@@ -34,7 +34,7 @@ endif
 LIBS    = -lpthread $(SQLITE_LIBS) $(SSL_LIBS)
 CFLAGS += $(SSL_CFLAGS) $(SQLITE_CFLAGS)
 
-# all: $(TARGET)
+all: file_tracker file_locator ft_summary
 
 file_tracker: file_tracker.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
@@ -49,4 +49,4 @@ clean:
 	rm -f $(TARGET) *.o
 
 install:
-	mv file_tracker ${HOME}/Desktop/bin
+	mv file_tracker file_locator ft_summary ${HOME}/Desktop/bin
