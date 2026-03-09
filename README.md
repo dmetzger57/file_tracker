@@ -1,4 +1,4 @@
-#File Tracker
+# File Tracker
 File Tracker creates a SQL database tracking all files in a specified path, including the file name, checksum, last modified date, and owner.
 
 Databases are stored in the ${USER}/Desktop/db/FileTracker folder.
@@ -15,12 +15,14 @@ file_locator: A utility to find specific files within the tracker databases.
 
 ft_summary: A reporting tool for database statistics.
 
-##file_tracker
+## file_tracker
 Used to create/store checksum values and verify existing files against stored hashes.
 
-Syntax
+### Syntax
 
-Options
+file_tracker -p path-1,path-2,path-N [-c] [-u] [-P] [-s]
+
+#### Options
 
 -p: Specifies the path(s) to be processed. If multiple paths are specified, file_tracker will spawn one thread per path for parallel processing.
 
@@ -32,12 +34,14 @@ Options
 
 -s: Summary mode. Produces a summary of results at the end of path processing.
 
-##file_locator
+## file_locator
 Searches specified (or all) databases for a specific file entry.
 
-Syntax
+### Syntax
 
-Options
+file_locator -f file_name [-p] [-d database] [-v]
+
+#### Options
 
 -f: Specifies the filename to be located.
 
@@ -47,10 +51,12 @@ Options
 
 -v: Verbose output.
 
-##ft_summary
+## ft_summary
 Prints statistics about the most recent or historical runs recorded in the database.
 
-Syntax
+#### Syntax
+
+ft_summary -d database [-a]
 
 Options
 
