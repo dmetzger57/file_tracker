@@ -319,14 +319,14 @@ void *path_worker(void *arg) {
     // Begin transaction for better performance and reduced lock contention
     sqlite3_exec(db, "BEGIN TRANSACTION;", 0, 0, 0);
 
-    if( showProgress ) printf("Beginning traversal of %s\n",ctx->source_path);
+    if( verbose ) printf("Beginning traversal of %s\n",ctx->source_path);
     traverse_directory(ctx, ctx->source_path, db);
-    if( showProgress ) printf("Traversal of %s complete\n",ctx->source_path);
+    if( verbose ) printf("Traversal of %s complete\n",ctx->source_path);
 
     char **missing_paths = NULL;
     int missing_count = 0, missing_capacity = 0;
 
-    if( showProgress ) printf("Beginning Database Update\n");
+    if( verbose ) printf("Beginning Database Update\n");
     sqlite3_stmt *mStmt;
     sqlite3_prepare_v2(db, "SELECT full_path FROM files", -1, &mStmt, NULL);
     while (sqlite3_step(mStmt) == SQLITE_ROW) {
@@ -341,11 +341,11 @@ void *path_worker(void *arg) {
         }
     }
     sqlite3_finalize(mStmt);
-    if( showProgress ) printf("Datbase Update Complete\n");
+    if( verbose ) printf("Database Update Complete\n");
 
     // Now delete the collected missing paths
     for (int i = 0; i < missing_count; i++) {
-        if( showProgress ) printf("Deleting missing files from the database\n");
+        if( verbose ) printf("Deleting missing files from the database\n");
         ctx->missing++;
         log_message(ctx, "MISSING", missing_paths[i]);
         if (update) {
@@ -356,7 +356,7 @@ void *path_worker(void *arg) {
             sqlite3_finalize(dStmt);
         }
         free(missing_paths[i]);
-        if( showProgress ) printf("Completed deleting missing files from the database\n");
+        if( verbose ) printf("Completed deleting missing files from the database\n");
     }
     free(missing_paths);
 
@@ -379,9 +379,9 @@ void *path_worker(void *arg) {
     free(sql);
 
     // Commit transaction
-    if( showProgress ) printf("Commiting Database Transaction\n");
+    if( verbose ) printf("Committing Database Transaction\n");
     sqlite3_exec(db, "COMMIT;", 0, 0, 0);
-    if( showProgress ) printf("Database Transaction Commit Complete\n");
+    if( verbose ) printf("Database Transaction Commit Complete\n");
 
     sqlite3_close(db);
     // Note: log_fp is now closed in main() to allow appending the summary
