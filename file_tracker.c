@@ -418,6 +418,8 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-s") == 0) showSummary = 1;
     }
 
+    if (showProgress) showSummary = 1;
+
     if (help_requested == 1) {
         fprintf(stderr, "Usage: %s -p /path1,/path2 [-c] [-u] [-v] [-V]\n", argv[0]);
         fprintf(stderr, "  -p <paths>  Paths to scan (required, comma-separated)\n");

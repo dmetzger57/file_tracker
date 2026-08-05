@@ -19,7 +19,7 @@ file_tracker -p path1,path2,pathN [-c] [-u] [-P] [-s] [-v]
 | `-p`   | Paths to scan (required, comma-separated). One thread per path. |
 | `-c`   | Compare checksums even when file modification time is unchanged. |
 | `-u`   | Update the database with changes. Without this, differences are only reported. |
-| `-P`   | Show percent-complete progress in 1% increments. |
+| `-P`   | Show percent-complete progress in 1% increments. Implies `-s`. |
 | `-s`   | Print an aggregate summary when processing completes. |
 | `-v`   | Verbose output. |
 
