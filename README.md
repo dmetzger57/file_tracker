@@ -27,7 +27,7 @@ file_tracker -p path1,path2,pathN [-c] [-u] [-P] [-s] [-v]
 
 ### file_locator
 
-Search tracker databases for a specific file by name.
+Search tracker databases for a specific file by name. Scans all `.db` files in `~/db/FileTracker/` by default, or a single database when specified. When the same filename appears across multiple databases (or multiple times within one), `file_locator` compares checksums against the first match and flags any that differ — useful for verifying that copies of a file on different volumes are identical.
 
 ```
 file_locator -f filename [-p] [-d database] [-v]
@@ -36,11 +36,13 @@ file_locator -f filename [-p] [-d database] [-v]
 | Option | Description |
 |--------|-------------|
 | `-f`   | Filename to search for (required). |
-| `-p`   | Partial/fuzzy match (SQL `LIKE`). |
-| `-d`   | Search a specific database file instead of all databases. |
-| `-v`   | Verbose output with full file metadata. |
+| `-p`   | Partial match. Wraps the filename in SQL `%` wildcards so `LIKE` matches any path containing the string. |
+| `-d`   | Search only the named database file (relative to `~/db/FileTracker/`) instead of all databases. |
+| `-v`   | Verbose output: prints full metadata for each match (ID, full path, size, created, last modified, owner, checksum). |
 
-When the same filename appears in multiple databases, `file_locator` flags entries whose checksums differ from the first match.
+**Default (compact) output:** One line per match showing the database name and full path. If a match's checksum differs from the first result, `, Checksum Mismatch` is appended.
+
+**Exit code:** Returns the number of matches found (0 = no matches).
 
 ### ft_summary
 
@@ -121,6 +123,12 @@ ft_summary -d archive -m -c
 
 # Find a file across all tracked volumes
 file_locator -f important_document.pdf
+
+# Partial match — find any tracked file containing "report" in its name
+file_locator -f report -p
+
+# Verbose search in a specific database
+file_locator -f backup.tar.gz -d archive.db -v
 ```
 
 ## License
