@@ -207,6 +207,9 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
 
+    if (showLiveProgress)
+        display_progress(name);
+
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "SELECT last_modified, checksum FROM files WHERE full_path = ? LIMIT 1", -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -273,7 +276,7 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
         pthread_mutex_lock(&progress_mutex);
         processed_files++;
         pthread_mutex_unlock(&progress_mutex);
-        display_progress(showLiveProgress ? name : NULL);
+        display_progress(NULL);
     }
 }
 
