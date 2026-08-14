@@ -23,6 +23,7 @@ int verbose = 0;
 int update = 0;
 int verifyChecksum = 0;
 int showProgress = 0;
+int showDetailedProgress = 0;
 int showSummary = 0;
 
 // Aggregate counters (Protected by global_count_mutex)
@@ -112,8 +113,13 @@ void display_progress() {
 
     int current_percent = (processed_files * 100) / total_files;
 
-    // Only update display when crossing a 1% boundary
-    if (current_percent > last_percent_displayed) {
+    int should_display = 0;
+    if (showDetailedProgress)
+        should_display = (processed_files % 10 == 0) || (processed_files == total_files);
+    else
+        should_display = (current_percent > last_percent_displayed);
+
+    if (should_display) {
         last_percent_displayed = current_percent;
         if( showProgress ) printf("\r%d%% (%'d of %'d)", current_percent, processed_files, total_files);
         fflush(stdout);
@@ -416,10 +422,12 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-u") == 0) update = 1;
         else if (strcmp(argv[i], "-v") == 0) verbose = 1;
         else if (strcmp(argv[i], "-P") == 0) showProgress = 1;
+        else if (strcmp(argv[i], "-V") == 0) showDetailedProgress = 1;
         else if (strcmp(argv[i], "-h") == 0) help_requested = 1;
         else if (strcmp(argv[i], "-s") == 0) showSummary = 1;
     }
 
+    if (showDetailedProgress) showProgress = 1;
     if (showProgress) showSummary = 1;
 
     if (help_requested == 1) {
@@ -429,7 +437,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  -c          Verify checksums even if mtime unchanged\n");
         fprintf(stderr, "  -u          Update database with changes\n");
         fprintf(stderr, "  -v          Verbose output\n");
-        fprintf(stderr, "  -P          Show progress percentage\n");
+        fprintf(stderr, "  -P          Show progress percentage (updates at 1%% increments)\n");
+        fprintf(stderr, "  -V          Show detailed progress (updates every 10 files). Implies -P\n");
         fprintf(stderr, "  -s          Show summary\n");
         exit(0);
     }
