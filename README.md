@@ -11,12 +11,13 @@ Run `file_tracker` against your storage media periodically to detect unauthorize
 The core engine. Recursively scans directory trees, computes SHA-256 hashes, and stores file metadata in per-path SQLite databases. On subsequent runs, detects new, changed, and missing files by comparing against stored records. Spawns one thread per path for parallel processing.
 
 ```
-file_tracker -p path1,path2,pathN [-c] [-u] [-P] [-s] [-v]
+file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-P] [-s] [-v]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-p`   | Paths to scan (required, comma-separated). One thread per path. |
+| `-n`   | Database file name (without `.db` extension). Stored in `~/db/FileTracker/`. When omitted, the database is named after each path's basename. When provided with multiple paths, all paths share the same database file. |
 | `-c`   | Compare checksums even when file modification time is unchanged. |
 | `-u`   | Update the database with changes. Without this, differences are only reported. |
 | `-P`   | Show percent-complete progress in 1% increments. Implies `-s`. |
@@ -64,7 +65,7 @@ ft_summary -d database [-a] [-m] [-c] [-n]
 
 | Path | Contents |
 |------|----------|
-| `~/db/FileTracker/` | SQLite databases (one per scanned path, named after the path's basename) |
+| `~/db/FileTracker/` | SQLite databases (one per scanned path, named after the path's basename unless overridden with `-n`) |
 | `~/logs/FileTracker/` | Timestamped log files from each run |
 | `~/.rsync-ignore` | Optional ignore list (one entry per line); matched files/directories are skipped |
 
@@ -114,6 +115,9 @@ file_tracker -p /mnt/archive -u -P -s
 
 # Periodic quick check — compare modification times, update database
 file_tracker -p /mnt/archive -u -P -s
+
+# Scan multiple paths into a single named database
+file_tracker -p /mnt/photos,/mnt/videos -n media_archive -u -P -s
 
 # Deep verification — recompute and compare every checksum
 file_tracker -p /mnt/archive -c -u -P -s

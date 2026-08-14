@@ -401,6 +401,7 @@ void *path_worker(void *arg) {
 int main(int argc, char *argv[]) {
 
     char *path_arg = NULL;
+    char *db_name_arg = NULL;
 
     int help_requested = 0;
 
@@ -410,6 +411,7 @@ int main(int argc, char *argv[]) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0) path_arg = argv[++i];
+        else if (strcmp(argv[i], "-n") == 0) db_name_arg = argv[++i];
         else if (strcmp(argv[i], "-c") == 0) verifyChecksum = 1;
         else if (strcmp(argv[i], "-u") == 0) update = 1;
         else if (strcmp(argv[i], "-v") == 0) verbose = 1;
@@ -421,8 +423,9 @@ int main(int argc, char *argv[]) {
     if (showProgress) showSummary = 1;
 
     if (help_requested == 1) {
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-c] [-u] [-v] [-V]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V]\n", argv[0]);
         fprintf(stderr, "  -p <paths>  Paths to scan (required, comma-separated)\n");
+        fprintf(stderr, "  -n <name>   Database file name (without .db extension)\n");
         fprintf(stderr, "  -c          Verify checksums even if mtime unchanged\n");
         fprintf(stderr, "  -u          Update database with changes\n");
         fprintf(stderr, "  -v          Verbose output\n");
@@ -433,7 +436,7 @@ int main(int argc, char *argv[]) {
 
     if ( ! path_arg) {
         fprintf(stderr, "Error: -p option is required\n");
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-c] [-u] [-v] [-V]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V]\n", argv[0]);
         exit(1);
     }
 
@@ -486,7 +489,10 @@ int main(int argc, char *argv[]) {
         char *path_copy = strdup(token);
         char *base = basename(path_copy);
 
-        snprintf(contexts[thread_count].db_path, MAX_PATH, "%s/db/FileTracker/%s.db", home, base);
+        if (db_name_arg)
+            snprintf(contexts[thread_count].db_path, MAX_PATH, "%s/db/FileTracker/%s.db", home, db_name_arg);
+        else
+            snprintf(contexts[thread_count].db_path, MAX_PATH, "%s/db/FileTracker/%s.db", home, base);
 
         snprintf(contexts[thread_count].log_path, MAX_PATH, "%s/logs/FileTracker/%s-%s.log", home, base, timestamp);
 
