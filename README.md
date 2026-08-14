@@ -11,7 +11,7 @@ Run `file_tracker` against your storage media periodically to detect unauthorize
 The core engine. Recursively scans directory trees, computes SHA-256 hashes, and stores file metadata in per-path SQLite databases. On subsequent runs, detects new, changed, and missing files by comparing against stored records. Spawns one thread per path for parallel processing.
 
 ```
-file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-P] [-V] [-s] [-v]
+file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-P] [-V] [-l] [-s] [-v]
 ```
 
 | Option | Description |
@@ -22,6 +22,7 @@ file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-P] [-V] [-s] [-v]
 | `-u`   | Update the database with changes. Without this, differences are only reported. |
 | `-P`   | Show percent-complete progress in 1% increments. Implies `-s`. |
 | `-V`   | Show detailed progress, updating every 10 files processed. Implies `-P`. |
+| `-l`   | Live view — updates the status line on every file, showing percent complete, file count, and the current filename. Implies `-P`. |
 | `-s`   | Print an aggregate summary when processing completes. |
 | `-v`   | Verbose output. |
 
