@@ -25,6 +25,7 @@ int verifyChecksum = 0;
 int showProgress = 0;
 int showDetailedProgress = 0;
 int showLiveProgress = 0;
+int showLiveProgressPath = 0;
 int showSummary = 0;
 
 // Aggregate counters (Protected by global_count_mutex)
@@ -208,7 +209,7 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
 
     if (showLiveProgress)
-        display_progress(name);
+        display_progress(showLiveProgressPath ? path : name);
 
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "SELECT last_modified, checksum FROM files WHERE full_path = ? LIMIT 1", -1, &stmt, NULL);
@@ -433,16 +434,18 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-P") == 0) showProgress = 1;
         else if (strcmp(argv[i], "-V") == 0) showDetailedProgress = 1;
         else if (strcmp(argv[i], "-l") == 0) showLiveProgress = 1;
+        else if (strcmp(argv[i], "-L") == 0) showLiveProgressPath = 1;
         else if (strcmp(argv[i], "-h") == 0) help_requested = 1;
         else if (strcmp(argv[i], "-s") == 0) showSummary = 1;
     }
 
+    if (showLiveProgressPath) showLiveProgress = 1;
     if (showLiveProgress) showProgress = 1;
     if (showDetailedProgress) showProgress = 1;
     if (showProgress) showSummary = 1;
 
     if (help_requested == 1) {
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L]\n", argv[0]);
         fprintf(stderr, "  -p <paths>  Paths to scan (required, comma-separated)\n");
         fprintf(stderr, "  -n <name>   Database file name (without .db extension)\n");
         fprintf(stderr, "  -c          Verify checksums even if mtime unchanged\n");
@@ -451,13 +454,14 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  -P          Show progress percentage (updates at 1%% increments)\n");
         fprintf(stderr, "  -V          Show detailed progress (updates every 10 files). Implies -P\n");
         fprintf(stderr, "  -l          Live view (updates on every file with filename). Implies -P\n");
+        fprintf(stderr, "  -L          Live view with full path instead of filename. Implies -l\n");
         fprintf(stderr, "  -s          Show summary\n");
         exit(0);
     }
 
     if ( ! path_arg) {
         fprintf(stderr, "Error: -p option is required\n");
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L]\n", argv[0]);
         exit(1);
     }
 
