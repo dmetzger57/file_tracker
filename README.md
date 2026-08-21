@@ -68,6 +68,27 @@ ft_summary -d database [-a] [-m] [-c] [-n]
 | `-c`   | List files found changed in the last run. |
 | `-n`   | List files found new in the last run. |
 
+### ft_logs
+
+View detailed log messages from a specific file_tracker run. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run date/time.
+
+```
+ft_logs -n database_name -d YYYY-MM-DD -t HH-MM-SS [-N] [-C] [-M]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-n`   | Database name, without the `.db` extension (required). |
+| `-d`   | Date of run in YYYY-MM-DD format (required). Matches the log file naming convention. |
+| `-t`   | Time of run in HH-MM-SS format (required). Matches the log file naming convention. |
+| `-N`   | Filter: show only NEW file messages. |
+| `-C`   | Filter: show only CHANGED file messages (includes "CHANGED (Metadata)" and "CHANGED (Checksum)"). |
+| `-M`   | Filter: show only MISSING file messages. |
+
+**Note:** Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed.
+
+**Output:** Displays run information (ID, date/time, machine, statistics) followed by the log messages matching the specified filters.
+
 ## Storage Layout
 
 | Path | Contents |
@@ -153,12 +174,22 @@ file_locator -f backup.tar.gz -d archive.db -v
 # Query notes from previous runs
 sqlite3 ~/db/FileTracker/archive.db \
   "SELECT last_date_verify, note FROM meta WHERE note IS NOT NULL ORDER BY id DESC LIMIT 5;"
+
+# View detailed logs from a specific run (date: 2024-03-15, time: 14:30:45)
+ft_logs -n archive -d 2024-03-15 -t 14-30-45
+
+# Show only files that were changed in that run
+ft_logs -n archive -d 2024-03-15 -t 14-30-45 -C
+
+# Show files that were added or changed
+ft_logs -n archive -d 2024-03-15 -t 14-30-45 -N -C
 ```
 
 ## Database Migration
 
-If you have existing databases created before the note feature was added, run the migration script to add the `note` column to the `meta` table:
+If you have existing databases that need schema updates, run the appropriate migration scripts:
 
+### Add note field (if upgrading from versions before note support)
 ```sh
 # Migrate all databases in ~/db/FileTracker/
 ./migrate_add_note.sh
@@ -167,7 +198,16 @@ If you have existing databases created before the note feature was added, run th
 ./migrate_add_note.sh ~/db/FileTracker/archive.db
 ```
 
-The migration is safe to run multiple times and will only add the column if it doesn't already exist.
+### Add run_logs table (if upgrading from versions before log storage)
+```sh
+# Migrate all databases in ~/db/FileTracker/
+./migrate_add_run_logs.sh
+
+# Or migrate a specific database
+./migrate_add_run_logs.sh ~/db/FileTracker/archive.db
+```
+
+Both migrations are idempotent and safe to run multiple times.
 
 ## Database Schema
 
@@ -202,6 +242,18 @@ Stores run history and statistics.
 | `num_errors` | INTEGER | Count of errors encountered |
 | `update_mode` | TEXT | "ON" if `-u` was used, "OFF" otherwise |
 | `note` | TEXT | Optional note attached to this run |
+
+### run_logs table
+Stores detailed log messages for each run.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Primary key (auto-increment) |
+| `run_id` | INTEGER | Foreign key to `meta.id` |
+| `status` | TEXT | File status (NEW, UNCHANGED, CHANGED (Metadata), CHANGED (Checksum), MISSING) |
+| `full_path` | TEXT | Absolute path of the file |
+
+**Indexes:** `run_id` and `status` are indexed for faster queries.
 
 ## License
 

@@ -45,11 +45,21 @@ pthread_mutex_t global_count_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t progress_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
+    char status[32];
+    char path[MAX_PATH];
+} LogEntry;
+
+typedef struct {
     char source_path[MAX_PATH];
     char db_path[MAX_PATH];
     char log_path[MAX_PATH];
     FILE *log_fp;
+    sqlite3 *db;
+    sqlite3_int64 run_id;
     int unchanged, changed, new, missing, ignored, error;
+    LogEntry *log_buffer;
+    int log_count;
+    int log_capacity;
 } ThreadContext;
 
 // ==== Ignore List Helpers ====
@@ -144,6 +154,18 @@ void log_message(ThreadContext *ctx, const char *status, const char *path) {
             fprintf(stdout, "[%s][%-18s] %s\n", basename(ctx->source_path), status, path);
         }
     }
+
+    // Buffer log message for database insertion later
+    if (ctx->log_count >= ctx->log_capacity) {
+        ctx->log_capacity = ctx->log_capacity == 0 ? 1024 : ctx->log_capacity * 2;
+        ctx->log_buffer = realloc(ctx->log_buffer, ctx->log_capacity * sizeof(LogEntry));
+    }
+
+    strncpy(ctx->log_buffer[ctx->log_count].status, status, sizeof(ctx->log_buffer[ctx->log_count].status) - 1);
+    ctx->log_buffer[ctx->log_count].status[sizeof(ctx->log_buffer[ctx->log_count].status) - 1] = '\0';
+    strncpy(ctx->log_buffer[ctx->log_count].path, path, sizeof(ctx->log_buffer[ctx->log_count].path) - 1);
+    ctx->log_buffer[ctx->log_count].path[sizeof(ctx->log_buffer[ctx->log_count].path) - 1] = '\0';
+    ctx->log_count++;
 }
 
 // ==== Utility Functions ====
@@ -315,9 +337,8 @@ void traverse_directory(ThreadContext *ctx, const char *dir_path, sqlite3 *db) {
 
 void *path_worker(void *arg) {
     ThreadContext *ctx = (ThreadContext *)arg;
-    sqlite3 *db;
 
-    if (sqlite3_open(ctx->db_path, &db) != SQLITE_OK) {
+    if (sqlite3_open(ctx->db_path, &ctx->db) != SQLITE_OK) {
         fprintf(stderr, "Error: Failed to open database %s\n", ctx->db_path);
         if (ctx->log_fp) {
             fprintf(ctx->log_fp, "FATAL ERROR: Could not open database\n");
@@ -326,18 +347,19 @@ void *path_worker(void *arg) {
     }
 
     // Enable WAL mode for better concurrency
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", 0, 0, 0);
-    sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", 0, 0, 0);
-    sqlite3_busy_timeout(db, 30000);  // Increased timeout for concurrent access
+    sqlite3_exec(ctx->db, "PRAGMA journal_mode=WAL;", 0, 0, 0);
+    sqlite3_exec(ctx->db, "PRAGMA synchronous=NORMAL;", 0, 0, 0);
+    sqlite3_busy_timeout(ctx->db, 30000);  // Increased timeout for concurrent access
 
-    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
-    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
 
     // Begin transaction for better performance and reduced lock contention
-    sqlite3_exec(db, "BEGIN TRANSACTION;", 0, 0, 0);
+    sqlite3_exec(ctx->db, "BEGIN TRANSACTION;", 0, 0, 0);
 
     if( verbose ) printf("Beginning traversal of %s\n",ctx->source_path);
-    traverse_directory(ctx, ctx->source_path, db);
+    traverse_directory(ctx, ctx->source_path, ctx->db);
     if( verbose ) printf("Traversal of %s complete\n",ctx->source_path);
 
     char **missing_paths = NULL;
@@ -345,7 +367,7 @@ void *path_worker(void *arg) {
 
     if( verbose ) printf("Beginning Database Update\n");
     sqlite3_stmt *mStmt;
-    sqlite3_prepare_v2(db, "SELECT full_path FROM files", -1, &mStmt, NULL);
+    sqlite3_prepare_v2(ctx->db, "SELECT full_path FROM files", -1, &mStmt, NULL);
     while (sqlite3_step(mStmt) == SQLITE_ROW) {
         const char *dp = (const char *)sqlite3_column_text(mStmt, 0);
         if (access(dp, F_OK) != 0) {
@@ -360,22 +382,8 @@ void *path_worker(void *arg) {
     sqlite3_finalize(mStmt);
     if( verbose ) printf("Database Update Complete\n");
 
-    // Now delete the collected missing paths
-    for (int i = 0; i < missing_count; i++) {
-        if( verbose ) printf("Deleting missing files from the database\n");
-        ctx->missing++;
-        log_message(ctx, "MISSING", missing_paths[i]);
-        if (update) {
-            sqlite3_stmt *dStmt;
-            sqlite3_prepare_v2(db, "DELETE FROM files WHERE full_path = ?", -1, &dStmt, NULL);
-            sqlite3_bind_text(dStmt, 1, missing_paths[i], -1, SQLITE_STATIC);
-            sqlite3_step(dStmt);
-            sqlite3_finalize(dStmt);
-        }
-        free(missing_paths[i]);
-        if( verbose ) printf("Completed deleting missing files from the database\n");
-    }
-    free(missing_paths);
+    // Set missing count before inserting meta record
+    ctx->missing = missing_count;
 
     char hname[256];
     gethostname(hname, 256);
@@ -383,7 +391,7 @@ void *path_worker(void *arg) {
     asprintf(&sql, "INSERT INTO meta (%s, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note) VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?, ?)",
              verifyChecksum ? "last_checksum_verify_date" : "last_date_verify");
     sqlite3_stmt *insMeta;
-    sqlite3_prepare_v2(db, sql, -1, &insMeta, NULL);
+    sqlite3_prepare_v2(ctx->db, sql, -1, &insMeta, NULL);
     sqlite3_bind_text(insMeta, 1, hname, -1, SQLITE_STATIC);
     sqlite3_bind_int(insMeta, 2, ctx->unchanged);
     sqlite3_bind_int(insMeta, 3, ctx->changed);
@@ -396,12 +404,52 @@ void *path_worker(void *arg) {
     sqlite3_finalize(insMeta);
     free(sql);
 
+    // Get the run_id we just inserted
+    ctx->run_id = sqlite3_last_insert_rowid(ctx->db);
+
+    // Log and delete the collected missing paths (before inserting buffered logs)
+    for (int i = 0; i < missing_count; i++) {
+        if( verbose ) printf("Deleting missing files from the database\n");
+        log_message(ctx, "MISSING", missing_paths[i]);
+        if (update) {
+            sqlite3_stmt *dStmt;
+            sqlite3_prepare_v2(ctx->db, "DELETE FROM files WHERE full_path = ?", -1, &dStmt, NULL);
+            sqlite3_bind_text(dStmt, 1, missing_paths[i], -1, SQLITE_STATIC);
+            sqlite3_step(dStmt);
+            sqlite3_finalize(dStmt);
+        }
+        free(missing_paths[i]);
+        if( verbose ) printf("Completed deleting missing files from the database\n");
+    }
+    free(missing_paths);
+
+    // Insert buffered log messages into database (includes MISSING from above)
+    if (ctx->log_count > 0) {
+        sqlite3_stmt *log_stmt;
+        const char *log_sql = "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)";
+        sqlite3_prepare_v2(ctx->db, log_sql, -1, &log_stmt, NULL);
+
+        for (int i = 0; i < ctx->log_count; i++) {
+            sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
+            sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
+            sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
+            sqlite3_step(log_stmt);
+            sqlite3_reset(log_stmt);
+        }
+        sqlite3_finalize(log_stmt);
+
+        free(ctx->log_buffer);
+        ctx->log_buffer = NULL;
+        ctx->log_count = 0;
+        ctx->log_capacity = 0;
+    }
+
     // Commit transaction
     if( verbose ) printf("Committing Database Transaction\n");
-    sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+    sqlite3_exec(ctx->db, "COMMIT;", 0, 0, 0);
     if( verbose ) printf("Database Transaction Commit Complete\n");
 
-    sqlite3_close(db);
+    sqlite3_close(ctx->db);
     // Note: log_fp is now closed in main() to allow appending the summary
 
     pthread_mutex_lock(&global_count_mutex);
@@ -568,6 +616,11 @@ int main(int argc, char *argv[]) {
         contexts[thread_count].unchanged = contexts[thread_count].changed = 0;
         contexts[thread_count].new = contexts[thread_count].missing = 0;
         contexts[thread_count].ignored = contexts[thread_count].error = 0;
+        contexts[thread_count].db = NULL;
+        contexts[thread_count].run_id = 0;
+        contexts[thread_count].log_buffer = NULL;
+        contexts[thread_count].log_count = 0;
+        contexts[thread_count].log_capacity = 0;
 
         if (pthread_create(&threads[thread_count], NULL, path_worker, &contexts[thread_count]) != 0) {
             fprintf(stderr, "Error: Failed to create thread for path %s: %s\n",
