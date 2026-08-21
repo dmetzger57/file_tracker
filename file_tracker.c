@@ -27,6 +27,7 @@ int showDetailedProgress = 0;
 int showLiveProgress = 0;
 int showLiveProgressPath = 0;
 int showSummary = 0;
+char *note_text = NULL;
 
 // Aggregate counters (Protected by global_count_mutex)
 int total_unchanged = 0, total_changed = 0, total_new = 0, total_missing = 0,
@@ -330,7 +331,7 @@ void *path_worker(void *arg) {
     sqlite3_busy_timeout(db, 30000);  // Increased timeout for concurrent access
 
     sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
-    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_errors INTEGER, update_mode TEXT);", 0, 0, 0);
+    sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
 
     // Begin transaction for better performance and reduced lock contention
     sqlite3_exec(db, "BEGIN TRANSACTION;", 0, 0, 0);
@@ -379,7 +380,7 @@ void *path_worker(void *arg) {
     char hname[256];
     gethostname(hname, 256);
     char *sql;
-    asprintf(&sql, "INSERT INTO meta (%s, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode) VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?)",
+    asprintf(&sql, "INSERT INTO meta (%s, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note) VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?, ?)",
              verifyChecksum ? "last_checksum_verify_date" : "last_date_verify");
     sqlite3_stmt *insMeta;
     sqlite3_prepare_v2(db, sql, -1, &insMeta, NULL);
@@ -390,6 +391,7 @@ void *path_worker(void *arg) {
     sqlite3_bind_int(insMeta, 5, ctx->missing);
     sqlite3_bind_int(insMeta, 6, ctx->error);
     sqlite3_bind_text(insMeta, 7, update ? "ON" : "OFF", -1, SQLITE_STATIC);
+    sqlite3_bind_text(insMeta, 8, note_text, -1, SQLITE_STATIC);
     sqlite3_step(insMeta);
     sqlite3_finalize(insMeta);
     free(sql);
@@ -418,6 +420,7 @@ int main(int argc, char *argv[]) {
 
     char *path_arg = NULL;
     char *db_name_arg = NULL;
+    char *note_file_arg = NULL;
 
     int help_requested = 0;
 
@@ -428,6 +431,8 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0) path_arg = argv[++i];
         else if (strcmp(argv[i], "-n") == 0) db_name_arg = argv[++i];
+        else if (strcmp(argv[i], "-t") == 0) note_text = argv[++i];
+        else if (strcmp(argv[i], "-N") == 0) note_file_arg = argv[++i];
         else if (strcmp(argv[i], "-c") == 0) verifyChecksum = 1;
         else if (strcmp(argv[i], "-u") == 0) update = 1;
         else if (strcmp(argv[i], "-v") == 0) verbose = 1;
@@ -445,7 +450,7 @@ int main(int argc, char *argv[]) {
     if (showProgress) showSummary = 1;
 
     if (help_requested == 1) {
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L] [-t note] [-N notefile]\n", argv[0]);
         fprintf(stderr, "  -p <paths>  Paths to scan (required, comma-separated)\n");
         fprintf(stderr, "  -n <name>   Database file name (without .db extension)\n");
         fprintf(stderr, "  -c          Verify checksums even if mtime unchanged\n");
@@ -456,13 +461,51 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  -l          Live view (updates on every file with filename). Implies -P\n");
         fprintf(stderr, "  -L          Live view with full path instead of filename. Implies -l\n");
         fprintf(stderr, "  -s          Show summary\n");
+        fprintf(stderr, "  -t <note>   Add note text to this run (requires -u)\n");
+        fprintf(stderr, "  -N <file>   Read note text from file for this run (requires -u)\n");
         exit(0);
     }
 
     if ( ! path_arg) {
         fprintf(stderr, "Error: -p option is required\n");
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L] [-t note] [-N notefile]\n", argv[0]);
         exit(1);
+    }
+
+    // Validate note options
+    if ((note_text || note_file_arg) && !update) {
+        fprintf(stderr, "Error: Note options (-t or -N) require -u (update mode)\n");
+        exit(1);
+    }
+
+    // Read note from file if specified
+    if (note_file_arg) {
+        FILE *note_fp = fopen(note_file_arg, "r");
+        if (!note_fp) {
+            fprintf(stderr, "Error: Could not open note file %s: %s\n", note_file_arg, strerror(errno));
+            exit(1);
+        }
+
+        // Read entire file into note_text
+        fseek(note_fp, 0, SEEK_END);
+        long file_size = ftell(note_fp);
+        fseek(note_fp, 0, SEEK_SET);
+
+        note_text = malloc(file_size + 1);
+        if (!note_text) {
+            fprintf(stderr, "Error: Could not allocate memory for note text\n");
+            fclose(note_fp);
+            exit(1);
+        }
+
+        size_t bytes_read = fread(note_text, 1, file_size, note_fp);
+        note_text[bytes_read] = '\0';
+        fclose(note_fp);
+
+        // Remove trailing newline if present
+        if (bytes_read > 0 && note_text[bytes_read - 1] == '\n') {
+            note_text[bytes_read - 1] = '\0';
+        }
     }
 
     load_ignore_list();
@@ -580,5 +623,6 @@ int main(int argc, char *argv[]) {
     }
 
     for (int i = 0; i < ignore_count; i++) free(ignore_list[i]);
+    if (note_file_arg && note_text) free(note_text);
     return 0;
 }
