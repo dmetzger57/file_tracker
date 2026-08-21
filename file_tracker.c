@@ -622,6 +622,27 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Display previous run's note if not in update mode
+    if (!update && showSummary && thread_count > 0) {
+        sqlite3 *db;
+        if (sqlite3_open(contexts[0].db_path, &db) == SQLITE_OK) {
+            sqlite3_stmt *stmt;
+            const char *query = "SELECT note FROM meta WHERE note IS NOT NULL ORDER BY id DESC LIMIT 1";
+            if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) == SQLITE_OK) {
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char *prev_note = (const char *)sqlite3_column_text(stmt, 0);
+                    if (prev_note && strlen(prev_note) > 0) {
+                        printf("\n============= PREVIOUS RUN'S NOTE ================\n");
+                        printf("%s\n", prev_note);
+                        printf("==================================================\n");
+                    }
+                }
+                sqlite3_finalize(stmt);
+            }
+            sqlite3_close(db);
+        }
+    }
+
     for (int i = 0; i < ignore_count; i++) free(ignore_list[i]);
     if (note_file_arg && note_text) free(note_text);
     return 0;

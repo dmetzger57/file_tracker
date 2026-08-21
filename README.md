@@ -31,7 +31,7 @@ file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-P] [-V] [-l] [-L] [-s
 
 **Default behavior (no `-c`):** Files are compared by modification time only. If the mtime matches the stored value, the file is marked unchanged without recomputing its hash. Use `-c` for a full checksum verification pass.
 
-**Notes:** Use `-t` or `-N` to attach contextual information to each run (e.g., "Weekly backup", "Post-migration verification"). Notes are stored in the database's `meta` table and can be queried later for audit purposes.
+**Notes:** Use `-t` or `-N` to attach contextual information to each run (e.g., "Weekly backup", "Post-migration verification"). Notes are stored in the database's `meta` table and can be queried later for audit purposes. When running without `-u` (read-only mode), the previous run's note is automatically displayed after the summary (if `-s` is enabled) to provide context about the last update.
 
 ### file_locator
 
@@ -122,6 +122,9 @@ file_tracker -p /mnt/archive -u -P -s -t "Initial baseline scan"
 
 # Periodic quick check — compare modification times, update database
 file_tracker -p /mnt/archive -u -P -s -t "Weekly verification"
+
+# Read-only verification — see changes without updating, displays previous run's note
+file_tracker -p /mnt/archive -s
 
 # Scan multiple paths into a single named database
 file_tracker -p /mnt/photos,/mnt/videos -n media_archive -u -P -s
