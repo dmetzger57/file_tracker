@@ -7,11 +7,10 @@
 #define MAX_PATH 4096
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s -n database_name [-l | -d YYYY-MM-DD -t HH-MM-SS [-N] [-C] [-M]]\n", prog_name);
+    fprintf(stderr, "Usage: %s -n database_name [-l | -r run_identifier [-N] [-C] [-M]]\n", prog_name);
     fprintf(stderr, "  -n <name>   Database name (without .db extension) - REQUIRED\n");
     fprintf(stderr, "  -l          List all runs in the database\n");
-    fprintf(stderr, "  -d <date>   Date of run in YYYY-MM-DD format (required without -l)\n");
-    fprintf(stderr, "  -t <time>   Time of run in HH-MM-SS format (required without -l)\n");
+    fprintf(stderr, "  -r <run_id> Run identifier (DB_Name-YYYY-MM-DD-HH-MM-SS) - use -l to see available runs\n");
     fprintf(stderr, "  -N          Show only NEW file messages\n");
     fprintf(stderr, "  -C          Show only CHANGED file messages\n");
     fprintf(stderr, "  -M          Show only MISSING file messages\n");
@@ -21,8 +20,7 @@ void print_usage(const char *prog_name) {
 
 int main(int argc, char *argv[]) {
     char *db_name = NULL;
-    char *date_str = NULL;
-    char *time_str = NULL;
+    char *run_identifier = NULL;
     int show_new = 0;
     int show_changed = 0;
     int show_missing = 0;
@@ -31,16 +29,13 @@ int main(int argc, char *argv[]) {
 
     // Parse command line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "n:d:t:NCMlh")) != -1) {
+    while ((opt = getopt(argc, argv, "n:r:NCMlh")) != -1) {
         switch (opt) {
             case 'n':
                 db_name = optarg;
                 break;
-            case 'd':
-                date_str = optarg;
-                break;
-            case 't':
-                time_str = optarg;
+            case 'r':
+                run_identifier = optarg;
                 break;
             case 'N':
                 show_new = 1;
@@ -73,8 +68,8 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    if (!list_runs && (!date_str || !time_str)) {
-        fprintf(stderr, "Error: -d and -t options are required (unless using -l)\n\n");
+    if (!list_runs && !run_identifier) {
+        fprintf(stderr, "Error: -r option is required (unless using -l)\n\n");
         print_usage(argv[0]);
         exit(1);
     }
@@ -120,7 +115,7 @@ int main(int argc, char *argv[]) {
         }
 
         printf("================ ALL RUNS IN DATABASE ================\n");
-        printf("%-5s %-20s %-15s %s\n", "ID", "Date/Time", "Machine", "U/C/N/M");
+        printf("%-42s %-15s %s\n", "Run Identifier", "Machine", "U/C/N/M");
         printf("======================================================\n");
 
         int count = 0;
@@ -135,9 +130,25 @@ int main(int argc, char *argv[]) {
             const char *update_mode = (const char *)sqlite3_column_text(stmt, 7);
             const char *note = (const char *)sqlite3_column_text(stmt, 8);
 
-            // Format: ID, Date/Time, Machine, Stats
-            printf("%-5lld %-20s %-15s %d/%d/%d/%d",
-                   id, run_date ? run_date : "N/A",
+            // Format run identifier: dbname-YYYY-MM-DD-HH-MM-SS
+            char run_id[128];
+            if (run_date) {
+                char formatted_date[64];
+                strncpy(formatted_date, run_date, sizeof(formatted_date) - 1);
+                formatted_date[sizeof(formatted_date) - 1] = '\0';
+
+                // Replace spaces and colons with hyphens
+                for (char *p = formatted_date; *p; p++) {
+                    if (*p == ' ' || *p == ':') *p = '-';
+                }
+                snprintf(run_id, sizeof(run_id), "%s-%s", db_name, formatted_date);
+            } else {
+                snprintf(run_id, sizeof(run_id), "%s-unknown-%lld", db_name, id);
+            }
+
+            // Format: Run ID, Machine, Stats
+            printf("%-42s %-15s %d/%d/%d/%d",
+                   run_id,
                    machine ? machine : "N/A",
                    unchanged, changed, new, missing);
 
@@ -159,25 +170,40 @@ int main(int argc, char *argv[]) {
         printf("Total runs: %d\n", count);
         printf("\nLegend: U/C/N/M = Unchanged/Changed/New/Missing\n");
         printf("        [RO] = Read-only mode (update mode OFF)\n");
+        printf("\nUse the Run Identifier with -r option to view logs:\n");
+        printf("  Example: %s -n %s -r <run_identifier>\n", argv[0], db_name);
 
         sqlite3_finalize(stmt);
         sqlite3_close(db);
         exit(0);
     }
 
-    // Construct datetime string for query (convert HH-MM-SS to HH:MM:SS)
+    // Parse run identifier: dbname-YYYY-MM-DD-HH-MM-SS
+    // Extract date and time from run identifier
     char datetime_pattern[64];
-    char time_formatted[16];
 
-    // Replace hyphens with colons in time
-    int h, m, s;
-    if (sscanf(time_str, "%d-%d-%d", &h, &m, &s) != 3) {
-        fprintf(stderr, "Error: Time format must be HH-MM-SS (e.g., 14-30-45)\n");
+    // Find the database name prefix and skip it
+    const char *date_start = strchr(run_identifier, '-');
+    if (!date_start) {
+        fprintf(stderr, "Error: Invalid run identifier format. Expected: dbname-YYYY-MM-DD-HH-MM-SS\n");
+        fprintf(stderr, "Use -l option to see available run identifiers.\n");
         sqlite3_close(db);
         exit(1);
     }
-    snprintf(time_formatted, sizeof(time_formatted), "%02d:%02d:%02d", h, m, s);
-    snprintf(datetime_pattern, sizeof(datetime_pattern), "%s %s", date_str, time_formatted);
+    date_start++; // Skip the first hyphen
+
+    // Parse YYYY-MM-DD-HH-MM-SS
+    int year, month, day, hour, min, sec;
+    if (sscanf(date_start, "%d-%d-%d-%d-%d-%d", &year, &month, &day, &hour, &min, &sec) != 6) {
+        fprintf(stderr, "Error: Invalid run identifier format. Expected: dbname-YYYY-MM-DD-HH-MM-SS\n");
+        fprintf(stderr, "Use -l option to see available run identifiers.\n");
+        sqlite3_close(db);
+        exit(1);
+    }
+
+    // Format as "YYYY-MM-DD HH:MM:SS" for database query
+    snprintf(datetime_pattern, sizeof(datetime_pattern), "%04d-%02d-%02d %02d:%02d:%02d",
+             year, month, day, hour, min, sec);
 
     // Find the run_id matching the datetime
     sqlite3_stmt *stmt;
@@ -214,7 +240,7 @@ int main(int argc, char *argv[]) {
         printf("Missing        : %d\n", missing);
         printf("==================================================\n\n");
     } else {
-        fprintf(stderr, "Error: No run found for date %s time %s\n", date_str, time_str);
+        fprintf(stderr, "Error: No run found matching: %s\n", run_identifier);
         fprintf(stderr, "Available runs in database:\n");
 
         sqlite3_finalize(stmt);
@@ -224,10 +250,26 @@ int main(int argc, char *argv[]) {
             "verify_machine FROM meta ORDER BY id DESC LIMIT 10";
         if (sqlite3_prepare_v2(db, list_runs, -1, &stmt, NULL) == SQLITE_OK) {
             while (sqlite3_step(stmt) == SQLITE_ROW) {
-                printf("  ID: %lld - %s - %s\n",
-                       sqlite3_column_int64(stmt, 0),
-                       sqlite3_column_text(stmt, 1),
-                       sqlite3_column_text(stmt, 2));
+                const char *run_date = (const char *)sqlite3_column_text(stmt, 1);
+
+                // Format run identifier
+                char run_id[128];
+                if (run_date) {
+                    char formatted_date[64];
+                    strncpy(formatted_date, run_date, sizeof(formatted_date) - 1);
+                    formatted_date[sizeof(formatted_date) - 1] = '\0';
+
+                    // Replace spaces and colons with hyphens
+                    for (char *p = formatted_date; *p; p++) {
+                        if (*p == ' ' || *p == ':') *p = '-';
+                    }
+                    snprintf(run_id, sizeof(run_id), "%s-%s", db_name, formatted_date);
+                } else {
+                    snprintf(run_id, sizeof(run_id), "%s-unknown-%lld", db_name,
+                            sqlite3_column_int64(stmt, 0));
+                }
+
+                printf("  %s\n", run_id);
             }
         }
         sqlite3_finalize(stmt);

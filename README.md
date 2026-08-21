@@ -70,27 +70,26 @@ ft_summary -d database [-a] [-m] [-c] [-n]
 
 ### ft_logs
 
-View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run date/time.
+View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run identifier.
 
 ```
-ft_logs -n database_name [-l | -d YYYY-MM-DD -t HH-MM-SS [-N] [-C] [-M]]
+ft_logs -n database_name [-l | -r run_identifier [-N] [-C] [-M]]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-n`   | Database name, without the `.db` extension (required). |
-| `-l`   | List all runs in the database with summary statistics. When used, `-d` and `-t` are not required. |
-| `-d`   | Date of run in YYYY-MM-DD format (required without `-l`). Matches the log file naming convention. |
-| `-t`   | Time of run in HH-MM-SS format (required without `-l`). Matches the log file naming convention. |
+| `-l`   | List all runs in the database with summary statistics and run identifiers. |
+| `-r`   | Run identifier in format `dbname-YYYY-MM-DD-HH-MM-SS` (use `-l` to see available identifiers). |
 | `-N`   | Filter: show only NEW file messages. |
 | `-C`   | Filter: show only CHANGED file messages (includes "CHANGED (Metadata)" and "CHANGED (Checksum)"). |
 | `-M`   | Filter: show only MISSING file messages. |
 
-**Listing all runs (`-l` option):** Displays a table of all runs showing ID, date/time, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present.
+**Listing all runs (`-l` option):** Displays a table of all runs showing run identifier, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present. Copy the run identifier from this list to use with the `-r` option.
 
-**Viewing specific run:** Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed.
+**Viewing specific run:** Use the run identifier displayed by `-l` with the `-r` option. Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed.
 
-**Output:** Displays run information (ID, date/time, machine, statistics) followed by the log messages matching the specified filters.
+**Run identifier format:** `dbname-YYYY-MM-DD-HH-MM-SS` (e.g., `archive-2024-03-15-14-30-45`)
 
 ## Storage Layout
 
@@ -181,14 +180,14 @@ sqlite3 ~/db/FileTracker/archive.db \
 # List all file_tracker runs in a database
 ft_logs -n archive -l
 
-# View detailed logs from a specific run (date: 2024-03-15, time: 14:30:45)
-ft_logs -n archive -d 2024-03-15 -t 14-30-45
+# View detailed logs from a specific run
+ft_logs -n archive -r archive-2024-03-15-14-30-45
 
 # Show only files that were changed in that run
-ft_logs -n archive -d 2024-03-15 -t 14-30-45 -C
+ft_logs -n archive -r archive-2024-03-15-14-30-45 -C
 
 # Show files that were added or changed
-ft_logs -n archive -d 2024-03-15 -t 14-30-45 -N -C
+ft_logs -n archive -r archive-2024-03-15-14-30-45 -N -C
 ```
 
 ## Database Migration
