@@ -73,18 +73,19 @@ ft_summary -d database [-a] [-m] [-c] [-n]
 View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run identifier.
 
 ```
-ft_logs -n database_name [-l | -r run_identifier [-N] [-C] [-M] [-U]]
+ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n]]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `-n`   | Database name, without the `.db` extension (required). |
+| `-d`   | Database name, without the `.db` extension (required). |
 | `-l`   | List all runs in the database with summary statistics and run identifiers. |
 | `-r`   | Run identifier in format `dbname-YYYY-MM-DD-HH-MM-SS` (use `-l` to see available identifiers). |
 | `-N`   | Filter: show only NEW file messages. |
 | `-C`   | Filter: show only CHANGED file messages (includes "CHANGED (Metadata)" and "CHANGED (Checksum)"). |
 | `-M`   | Filter: show only MISSING file messages. |
 | `-U`   | Filter: show only UNCHANGED file messages. |
+| `-n`   | Display the note associated with the run. |
 
 **Listing all runs (`-l` option):** Displays a table of all runs showing run identifier, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present. Copy the run identifier from this list to use with the `-r` option.
 
@@ -179,19 +180,25 @@ sqlite3 ~/db/FileTracker/archive.db \
   "SELECT last_date_verify, note FROM meta WHERE note IS NOT NULL ORDER BY id DESC LIMIT 5;"
 
 # List all file_tracker runs in a database
-ft_logs -n archive -l
+ft_logs -d archive -l
 
 # View detailed logs from a specific run
-ft_logs -n archive -r archive-2024-03-15-14-30-45
+ft_logs -d archive -r archive-2024-03-15-14-30-45
 
 # Show only files that were changed in that run
-ft_logs -n archive -r archive-2024-03-15-14-30-45 -C
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -C
 
 # Show files that were added or changed
-ft_logs -n archive -r archive-2024-03-15-14-30-45 -N -C
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -N -C
 
 # Show only unchanged files from a run
-ft_logs -n archive -r archive-2024-03-15-14-30-45 -U
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -U
+
+# Display the note associated with a run
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -n
+
+# Combine note display with file filters
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -n -C
 ```
 
 ## Database Migration

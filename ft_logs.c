@@ -7,14 +7,15 @@
 #define MAX_PATH 4096
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s -n database_name [-l | -r run_identifier [-N] [-C] [-M] [-U]]\n", prog_name);
-    fprintf(stderr, "  -n <name>   Database name (without .db extension) - REQUIRED\n");
+    fprintf(stderr, "Usage: %s -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n]]\n", prog_name);
+    fprintf(stderr, "  -d <name>   Database name (without .db extension) - REQUIRED\n");
     fprintf(stderr, "  -l          List all runs in the database\n");
     fprintf(stderr, "  -r <run_id> Run identifier (DB_Name-YYYY-MM-DD-HH-MM-SS) - use -l to see available runs\n");
     fprintf(stderr, "  -N          Show only NEW file messages\n");
     fprintf(stderr, "  -C          Show only CHANGED file messages\n");
     fprintf(stderr, "  -M          Show only MISSING file messages\n");
     fprintf(stderr, "  -U          Show only UNCHANGED file messages\n");
+    fprintf(stderr, "  -n          Display the note associated with the run\n");
     fprintf(stderr, "\nNote: If no filter options are specified, all log messages are displayed.\n");
     fprintf(stderr, "      Multiple filter options can be combined (e.g., -N -C shows NEW and CHANGED).\n");
 }
@@ -26,14 +27,15 @@ int main(int argc, char *argv[]) {
     int show_changed = 0;
     int show_missing = 0;
     int show_unchanged = 0;
+    int show_note = 0;
     int show_all = 1;
     int list_runs = 0;
 
     // Parse command line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "n:r:NCMUlh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:r:NCMUnlh")) != -1) {
         switch (opt) {
-            case 'n':
+            case 'd':
                 db_name = optarg;
                 break;
             case 'r':
@@ -55,6 +57,9 @@ int main(int argc, char *argv[]) {
                 show_unchanged = 1;
                 show_all = 0;
                 break;
+            case 'n':
+                show_note = 1;
+                break;
             case 'l':
                 list_runs = 1;
                 break;
@@ -69,7 +74,7 @@ int main(int argc, char *argv[]) {
 
     // Validate required arguments
     if (!db_name) {
-        fprintf(stderr, "Error: -n option is required\n\n");
+        fprintf(stderr, "Error: -d option is required\n\n");
         print_usage(argv[0]);
         exit(1);
     }
@@ -177,7 +182,7 @@ int main(int argc, char *argv[]) {
         printf("\nLegend: U/C/N/M = Unchanged/Changed/New/Missing\n");
         printf("        [RO] = Read-only mode (update mode OFF)\n");
         printf("\nUse the Run Identifier with -r option to view logs:\n");
-        printf("  Example: %s -n %s -r <run_identifier>\n", argv[0], db_name);
+        printf("  Example: %s -d %s -r <run_identifier>\n", argv[0], db_name);
 
         sqlite3_finalize(stmt);
         sqlite3_close(db);
@@ -227,6 +232,7 @@ int main(int argc, char *argv[]) {
     sqlite3_bind_text(stmt, 1, datetime_pattern, -1, SQLITE_STATIC);
 
     sqlite3_int64 run_id = 0;
+    const char *note_text = NULL;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         run_id = sqlite3_column_int64(stmt, 0);
         const char *machine = (const char *)sqlite3_column_text(stmt, 1);
@@ -245,6 +251,28 @@ int main(int argc, char *argv[]) {
         printf("New            : %d\n", new);
         printf("Missing        : %d\n", missing);
         printf("==================================================\n\n");
+
+        // Get the note if -n option was specified
+        if (show_note) {
+            sqlite3_stmt *note_stmt;
+            const char *note_query = "SELECT note FROM meta WHERE id = ? LIMIT 1";
+            if (sqlite3_prepare_v2(db, note_query, -1, &note_stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(note_stmt, 1, run_id);
+                if (sqlite3_step(note_stmt) == SQLITE_ROW) {
+                    note_text = (const char *)sqlite3_column_text(note_stmt, 0);
+                    if (note_text && strlen(note_text) > 0) {
+                        printf("=================== RUN NOTE ======================\n");
+                        printf("%s\n", note_text);
+                        printf("==================================================\n\n");
+                    } else {
+                        printf("=================== RUN NOTE ======================\n");
+                        printf("(No note recorded for this run)\n");
+                        printf("==================================================\n\n");
+                    }
+                }
+                sqlite3_finalize(note_stmt);
+            }
+        }
     } else {
         fprintf(stderr, "Error: No run found matching: %s\n", run_identifier);
         fprintf(stderr, "Available runs in database:\n");
