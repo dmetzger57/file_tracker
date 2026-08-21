@@ -7,13 +7,14 @@
 #define MAX_PATH 4096
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s -n database_name [-l | -r run_identifier [-N] [-C] [-M]]\n", prog_name);
+    fprintf(stderr, "Usage: %s -n database_name [-l | -r run_identifier [-N] [-C] [-M] [-U]]\n", prog_name);
     fprintf(stderr, "  -n <name>   Database name (without .db extension) - REQUIRED\n");
     fprintf(stderr, "  -l          List all runs in the database\n");
     fprintf(stderr, "  -r <run_id> Run identifier (DB_Name-YYYY-MM-DD-HH-MM-SS) - use -l to see available runs\n");
     fprintf(stderr, "  -N          Show only NEW file messages\n");
     fprintf(stderr, "  -C          Show only CHANGED file messages\n");
     fprintf(stderr, "  -M          Show only MISSING file messages\n");
+    fprintf(stderr, "  -U          Show only UNCHANGED file messages\n");
     fprintf(stderr, "\nNote: If no filter options are specified, all log messages are displayed.\n");
     fprintf(stderr, "      Multiple filter options can be combined (e.g., -N -C shows NEW and CHANGED).\n");
 }
@@ -24,12 +25,13 @@ int main(int argc, char *argv[]) {
     int show_new = 0;
     int show_changed = 0;
     int show_missing = 0;
+    int show_unchanged = 0;
     int show_all = 1;
     int list_runs = 0;
 
     // Parse command line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "n:r:NCMlh")) != -1) {
+    while ((opt = getopt(argc, argv, "n:r:NCMUlh")) != -1) {
         switch (opt) {
             case 'n':
                 db_name = optarg;
@@ -47,6 +49,10 @@ int main(int argc, char *argv[]) {
                 break;
             case 'M':
                 show_missing = 1;
+                show_all = 0;
+                break;
+            case 'U':
+                show_unchanged = 1;
                 show_all = 0;
                 break;
             case 'l':
@@ -298,6 +304,10 @@ int main(int argc, char *argv[]) {
         }
         if (show_missing) {
             strcat(status_filter, first ? "status = 'MISSING'" : " OR status = 'MISSING'");
+            first = 0;
+        }
+        if (show_unchanged) {
+            strcat(status_filter, first ? "status = 'UNCHANGED'" : " OR status = 'UNCHANGED'");
             first = 0;
         }
 

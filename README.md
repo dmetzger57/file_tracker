@@ -73,7 +73,7 @@ ft_summary -d database [-a] [-m] [-c] [-n]
 View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run identifier.
 
 ```
-ft_logs -n database_name [-l | -r run_identifier [-N] [-C] [-M]]
+ft_logs -n database_name [-l | -r run_identifier [-N] [-C] [-M] [-U]]
 ```
 
 | Option | Description |
@@ -84,6 +84,7 @@ ft_logs -n database_name [-l | -r run_identifier [-N] [-C] [-M]]
 | `-N`   | Filter: show only NEW file messages. |
 | `-C`   | Filter: show only CHANGED file messages (includes "CHANGED (Metadata)" and "CHANGED (Checksum)"). |
 | `-M`   | Filter: show only MISSING file messages. |
+| `-U`   | Filter: show only UNCHANGED file messages. |
 
 **Listing all runs (`-l` option):** Displays a table of all runs showing run identifier, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present. Copy the run identifier from this list to use with the `-r` option.
 
@@ -188,6 +189,9 @@ ft_logs -n archive -r archive-2024-03-15-14-30-45 -C
 
 # Show files that were added or changed
 ft_logs -n archive -r archive-2024-03-15-14-30-45 -N -C
+
+# Show only unchanged files from a run
+ft_logs -n archive -r archive-2024-03-15-14-30-45 -U
 ```
 
 ## Database Migration
