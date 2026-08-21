@@ -9,16 +9,18 @@
 #define MAX_PATH 4096
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s -d <database_name> [-a] [-m] [-c] [-n]\n", prog_name);
+    fprintf(stderr, "Usage: %s -d <database_name> [-a] [-N] [-m] [-c] [-n]\n", prog_name);
     fprintf(stderr, "  -d <name>   Database name (without .db extension)\n");
     fprintf(stderr, "  -a          Show all runs (default: last run only)\n");
+    fprintf(stderr, "  -N          Show run notes (Run #, Date, Note)\n");
     fprintf(stderr, "  -m          List files found missing in the last run\n");
     fprintf(stderr, "  -c          List files found changed in the last run\n");
     fprintf(stderr, "  -n          List files found new in the last run\n");
     fprintf(stderr, "\nDatabases are located in $HOME/db/FileTracker/\n");
     fprintf(stderr, "\nExample:\n");
-    fprintf(stderr, "  %s -d MyFiles        # Show last run for MyFiles.db\n", prog_name);
-    fprintf(stderr, "  %s -d MyFiles -a     # Show all runs for MyFiles.db\n", prog_name);
+    fprintf(stderr, "  %s -d MyFiles        # Show last run summary\n", prog_name);
+    fprintf(stderr, "  %s -d MyFiles -a     # Show all runs summary\n", prog_name);
+    fprintf(stderr, "  %s -d MyFiles -N     # Show notes from all runs\n", prog_name);
     fprintf(stderr, "  %s -d MyFiles -m     # Show last run with missing file list\n", prog_name);
     fprintf(stderr, "  %s -d MyFiles -c     # Show last run with changed file list\n", prog_name);
     fprintf(stderr, "  %s -d MyFiles -n     # Show last run with new file list\n", prog_name);
@@ -31,49 +33,18 @@ void print_separator(int width) {
     printf("\n");
 }
 
-void print_single_run(sqlite3_stmt *stmt) {
-    int id = sqlite3_column_int(stmt, 0);
-    const char *checksum_date = (const char *)sqlite3_column_text(stmt, 1);
-    const char *verify_date = (const char *)sqlite3_column_text(stmt, 2);
-    const char *machine = (const char *)sqlite3_column_text(stmt, 3);
-    int unchanged = sqlite3_column_int(stmt, 4);
-    int changed = sqlite3_column_int(stmt, 5);
-    int new_files = sqlite3_column_int(stmt, 6);
-    int missing = sqlite3_column_int(stmt, 7);
-    int errors = sqlite3_column_int(stmt, 8);
-    const char *update_mode = (const char *)sqlite3_column_text(stmt, 9);
-
-    printf("\n==================== RUN #%d ====================\n", id);
-
-    if (checksum_date && strlen(checksum_date) > 0) {
-        printf("Checksum Verify Date: %s\n", checksum_date);
-    }
-    if (verify_date && strlen(verify_date) > 0) {
-        printf("Date Verify:          %s\n", verify_date);
-    }
-    printf("Machine:              %s\n", machine ? machine : "unknown");
-    printf("Update Mode:          %s\n", update_mode ? update_mode : "UNK");
-    printf("Unchanged:            %'d\n", unchanged);
-    printf("Changed:              %'d\n", changed);
-    printf("New:                  %'d\n", new_files);
-    printf("Missing:              %'d\n", missing);
-    printf("Errors:               %'d\n", errors);
-    printf("================================================\n");
-}
-
-void print_table_header() {
+void print_compact_header() {
     printf("\n");
-    print_separator(132);
-    printf("%-4s | %-19s | %-19s | %-15s | %-6s | %10s | %10s | %10s | %10s | %8s\n",
-           "ID", "Checksum Date", "Verify Date", "Machine", "Update", "Unchanged", "Changed", "New", "Missing", "Errors");
-    print_separator(132);
+    print_separator(115);
+    printf("%-6s | %-19s | %-6s | %-8s | %10s | %10s | %10s | %10s | %8s\n",
+           "Run #", "Run Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Errors");
+    print_separator(115);
 }
 
-void print_table_row(sqlite3_stmt *stmt) {
+void print_compact_row(sqlite3_stmt *stmt) {
     int id = sqlite3_column_int(stmt, 0);
     const char *checksum_date = (const char *)sqlite3_column_text(stmt, 1);
     const char *verify_date = (const char *)sqlite3_column_text(stmt, 2);
-    const char *machine = (const char *)sqlite3_column_text(stmt, 3);
     int unchanged = sqlite3_column_int(stmt, 4);
     int changed = sqlite3_column_int(stmt, 5);
     int new_files = sqlite3_column_int(stmt, 6);
@@ -81,21 +52,53 @@ void print_table_row(sqlite3_stmt *stmt) {
     int errors = sqlite3_column_int(stmt, 8);
     const char *update_mode = (const char *)sqlite3_column_text(stmt, 9);
 
-    // Truncate machine name if too long
-    char machine_short[16];
-    if (machine) {
-        snprintf(machine_short, sizeof(machine_short), "%s", machine);
+    // Determine run date and checksum status
+    const char *run_date;
+    const char *checksum_status;
+    if (checksum_date && strlen(checksum_date) > 0) {
+        run_date = checksum_date;
+        checksum_status = "On";
     } else {
-        strcpy(machine_short, "unknown");
+        run_date = verify_date && strlen(verify_date) > 0 ? verify_date : "unknown";
+        checksum_status = "Off";
     }
 
-    printf("%-4d | %-19s | %-19s | %-15s | %-6s | %'10d | %'10d | %'10d | %'10d | %'8d\n",
-           id,
-           checksum_date && strlen(checksum_date) > 0 ? checksum_date : "",
-           verify_date && strlen(verify_date) > 0 ? verify_date : "",
-           machine_short,
-           update_mode ? update_mode : "UNK",
+    // Determine update status
+    const char *update_status = "Off";
+    if (update_mode && strcmp(update_mode, "ON") == 0) {
+        update_status = "On";
+    }
+
+    printf("%-6d | %-19s | %-6s | %-8s | %'10d | %'10d | %'10d | %'10d | %'8d\n",
+           id, run_date, update_status, checksum_status,
            unchanged, changed, new_files, missing, errors);
+}
+
+void print_notes_header() {
+    printf("\n");
+    print_separator(60);
+    printf("%-6s | %-19s | %s\n", "Run #", "Run Date", "Note");
+    print_separator(60);
+}
+
+void print_notes_row(sqlite3_stmt *stmt) {
+    int id = sqlite3_column_int(stmt, 0);
+    const char *checksum_date = (const char *)sqlite3_column_text(stmt, 1);
+    const char *verify_date = (const char *)sqlite3_column_text(stmt, 2);
+    const char *note = (const char *)sqlite3_column_text(stmt, 10);
+
+    // Determine run date
+    const char *run_date;
+    if (checksum_date && strlen(checksum_date) > 0) {
+        run_date = checksum_date;
+    } else {
+        run_date = verify_date && strlen(verify_date) > 0 ? verify_date : "unknown";
+    }
+
+    // Display note or "None"
+    const char *note_display = (note && strlen(note) > 0) ? note : "None";
+
+    printf("%-6d | %-19s | %s\n", id, run_date, note_display);
 }
 
 void print_log_entries(const char *log_dir, const char *db_name, int run_id,
@@ -181,6 +184,7 @@ void print_log_entries(const char *log_dir, const char *db_name, int run_id,
 int main(int argc, char *argv[]) {
     char *db_name = NULL;
     int show_all = 0;
+    int show_notes = 0;
     int show_missing = 0;
     int show_changed = 0;
     int show_new = 0;
@@ -194,6 +198,9 @@ int main(int argc, char *argv[]) {
             db_name = argv[++i];
         } else if (strcmp(argv[i], "-a") == 0) {
             show_all = 1;
+        } else if (strcmp(argv[i], "-N") == 0) {
+            show_notes = 1;
+            show_all = 1;  // Notes mode shows all runs
         } else if (strcmp(argv[i], "-m") == 0) {
             show_missing = 1;
         } else if (strcmp(argv[i], "-c") == 0) {
@@ -253,11 +260,11 @@ int main(int argc, char *argv[]) {
     const char *query;
     if (show_all) {
         query = "SELECT id, last_checksum_verify_date, last_date_verify, verify_machine, "
-                "num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode "
+                "num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note "
                 "FROM meta ORDER BY id ASC";
     } else {
         query = "SELECT id, last_checksum_verify_date, last_date_verify, verify_machine, "
-                "num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode "
+                "num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note "
                 "FROM meta ORDER BY id DESC LIMIT 1";
     }
 
@@ -274,8 +281,10 @@ int main(int argc, char *argv[]) {
     int last_run_id = 0;
     char last_run_date[20] = "";
 
-    if (show_all) {
-        print_table_header();
+    if (show_notes) {
+        print_notes_header();
+    } else {
+        print_compact_header();
     }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -292,15 +301,16 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        if (show_all) {
-            print_table_row(stmt);
+        if (show_notes) {
+            print_notes_row(stmt);
         } else {
-            print_single_run(stmt);
+            print_compact_row(stmt);
         }
     }
 
-    if (show_all && row_count > 0) {
-        print_separator(132);
+    int separator_width = show_notes ? 60 : 115;
+    if (row_count > 0) {
+        print_separator(separator_width);
         printf("Total runs: %d\n\n", row_count);
     }
 

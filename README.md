@@ -57,16 +57,21 @@ file_locator -f filename [-p] [-d database] [-v]
 Report run history and statistics from a tracker database.
 
 ```
-ft_summary -d database [-a] [-m] [-c] [-n]
+ft_summary -d database [-a] [-N] [-m] [-c] [-n]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-d`   | Database name, without the `.db` extension (required). |
-| `-a`   | Show all recorded runs in a table. Default: last run only. |
+| `-a`   | Show all recorded runs. Default: last run only. |
+| `-N`   | Show run notes (Run #, Run Date, Note). Displays "None" for runs without notes. |
 | `-m`   | List files found missing in the last run. |
 | `-c`   | List files found changed in the last run. |
 | `-n`   | List files found new in the last run. |
+
+**Default output format:** Run #, Run Date, Update (On/Off), Checksum (On/Off), Unchanged, Changed, New, Missing, Errors
+
+**Notes output format (`-N`):** Run #, Run Date, Note
 
 ### ft_logs
 
