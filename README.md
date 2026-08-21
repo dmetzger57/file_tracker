@@ -70,22 +70,25 @@ ft_summary -d database [-a] [-m] [-c] [-n]
 
 ### ft_logs
 
-View detailed log messages from a specific file_tracker run. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run date/time.
+View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run date/time.
 
 ```
-ft_logs -n database_name -d YYYY-MM-DD -t HH-MM-SS [-N] [-C] [-M]
+ft_logs -n database_name [-l | -d YYYY-MM-DD -t HH-MM-SS [-N] [-C] [-M]]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-n`   | Database name, without the `.db` extension (required). |
-| `-d`   | Date of run in YYYY-MM-DD format (required). Matches the log file naming convention. |
-| `-t`   | Time of run in HH-MM-SS format (required). Matches the log file naming convention. |
+| `-l`   | List all runs in the database with summary statistics. When used, `-d` and `-t` are not required. |
+| `-d`   | Date of run in YYYY-MM-DD format (required without `-l`). Matches the log file naming convention. |
+| `-t`   | Time of run in HH-MM-SS format (required without `-l`). Matches the log file naming convention. |
 | `-N`   | Filter: show only NEW file messages. |
 | `-C`   | Filter: show only CHANGED file messages (includes "CHANGED (Metadata)" and "CHANGED (Checksum)"). |
 | `-M`   | Filter: show only MISSING file messages. |
 
-**Note:** Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed.
+**Listing all runs (`-l` option):** Displays a table of all runs showing ID, date/time, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present.
+
+**Viewing specific run:** Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed.
 
 **Output:** Displays run information (ID, date/time, machine, statistics) followed by the log messages matching the specified filters.
 
@@ -174,6 +177,9 @@ file_locator -f backup.tar.gz -d archive.db -v
 # Query notes from previous runs
 sqlite3 ~/db/FileTracker/archive.db \
   "SELECT last_date_verify, note FROM meta WHERE note IS NOT NULL ORDER BY id DESC LIMIT 5;"
+
+# List all file_tracker runs in a database
+ft_logs -n archive -l
 
 # View detailed logs from a specific run (date: 2024-03-15, time: 14:30:45)
 ft_logs -n archive -d 2024-03-15 -t 14-30-45
