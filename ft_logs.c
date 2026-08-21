@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sqlite3.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #define MAX_PATH 4096
 
@@ -190,18 +191,39 @@ int main(int argc, char *argv[]) {
     }
 
     // Parse run identifier: dbname-YYYY-MM-DD-HH-MM-SS
-    // Extract date and time from run identifier
+    // Database name can contain hyphens, so we need to find the date pattern
     char datetime_pattern[64];
 
-    // Find the database name prefix and skip it
-    const char *date_start = strchr(run_identifier, '-');
+    // Look for the date pattern by scanning for YYYY-MM-DD format
+    // Find a sequence that looks like a 4-digit year followed by -MM-DD
+    const char *date_start = NULL;
+    const char *p = run_identifier;
+
+    while (*p) {
+        // Check if we have at least 19 characters remaining for YYYY-MM-DD-HH-MM-SS
+        if (strlen(p) >= 19) {
+            // Check if this looks like a year (4 digits)
+            if (isdigit(p[0]) && isdigit(p[1]) && isdigit(p[2]) && isdigit(p[3]) && p[4] == '-') {
+                // Check if followed by valid month pattern (MM-)
+                if (isdigit(p[5]) && isdigit(p[6]) && p[7] == '-') {
+                    // Check if followed by valid day pattern (DD-)
+                    if (isdigit(p[8]) && isdigit(p[9]) && p[10] == '-') {
+                        // This looks like the start of the date
+                        date_start = p;
+                        break;
+                    }
+                }
+            }
+        }
+        p++;
+    }
+
     if (!date_start) {
         fprintf(stderr, "Error: Invalid run identifier format. Expected: dbname-YYYY-MM-DD-HH-MM-SS\n");
         fprintf(stderr, "Use -l option to see available run identifiers.\n");
         sqlite3_close(db);
         exit(1);
     }
-    date_start++; // Skip the first hyphen
 
     // Parse YYYY-MM-DD-HH-MM-SS
     int year, month, day, hour, min, sec;
