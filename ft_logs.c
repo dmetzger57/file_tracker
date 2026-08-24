@@ -4,8 +4,26 @@
 #include <sqlite3.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <signal.h>
 
 #define MAX_PATH 4096
+
+// ==== Terminal Wrapping Control ====
+void enable_line_wrap(void) {
+    printf("\033[?7h");
+    fflush(stdout);
+}
+
+void disable_line_wrap(void) {
+    printf("\033[?7l");
+    fflush(stdout);
+}
+
+void signal_handler(int signum) {
+    enable_line_wrap();
+    signal(signum, SIG_DFL);
+    raise(signum);
+}
 
 void print_usage(const char *prog_name) {
     fprintf(stderr, "Usage: %s -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n]]\n", prog_name);
@@ -31,6 +49,13 @@ int main(int argc, char *argv[]) {
     int show_note = 0;
     int show_all = 1;
     int list_runs = 0;
+
+    // Setup terminal wrapping control
+    atexit(enable_line_wrap);
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGHUP, signal_handler);
+    disable_line_wrap();
 
     // Parse command line arguments
     int opt;

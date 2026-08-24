@@ -13,6 +13,7 @@
 #include <libgen.h>
 #include <locale.h>
 #include <errno.h>
+#include <signal.h>
 
 #define HASH_SIZE 65
 #define MAX_PATH 4096
@@ -43,6 +44,23 @@ int ignore_count = 0;
 
 pthread_mutex_t global_count_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t progress_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// ==== Terminal Wrapping Control ====
+void enable_line_wrap(void) {
+    printf("\033[?7h");
+    fflush(stdout);
+}
+
+void disable_line_wrap(void) {
+    printf("\033[?7l");
+    fflush(stdout);
+}
+
+void signal_handler(int signum) {
+    enable_line_wrap();
+    signal(signum, SIG_DFL);
+    raise(signum);
+}
 
 typedef struct {
     char status[32];
@@ -475,6 +493,13 @@ int main(int argc, char *argv[]) {
     setlocale(LC_NUMERIC, "");
 
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    // Setup terminal wrapping control
+    atexit(enable_line_wrap);
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGHUP, signal_handler);
+    disable_line_wrap();
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0) path_arg = argv[++i];

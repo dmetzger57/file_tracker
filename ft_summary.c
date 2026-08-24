@@ -5,8 +5,26 @@
 #include <unistd.h>
 #include <locale.h>
 #include <dirent.h>
+#include <signal.h>
 
 #define MAX_PATH 4096
+
+// ==== Terminal Wrapping Control ====
+void enable_line_wrap(void) {
+    printf("\033[?7h");
+    fflush(stdout);
+}
+
+void disable_line_wrap(void) {
+    printf("\033[?7l");
+    fflush(stdout);
+}
+
+void signal_handler(int signum) {
+    enable_line_wrap();
+    signal(signum, SIG_DFL);
+    raise(signum);
+}
 
 void print_usage(const char *prog_name) {
     fprintf(stderr, "Usage: %s -d <database_name> [-a] [-N] [-m] [-c] [-n]\n", prog_name);
@@ -191,6 +209,13 @@ int main(int argc, char *argv[]) {
 
     // Enable locale for thousand separators
     setlocale(LC_NUMERIC, "");
+
+    // Setup terminal wrapping control
+    atexit(enable_line_wrap);
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGHUP, signal_handler);
+    disable_line_wrap();
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
