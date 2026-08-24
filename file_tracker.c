@@ -274,8 +274,6 @@ void traverse_directory(ThreadContext *ctx, const char *dir_path, sqlite3 *db) {
         if (stat(full_path, &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
                 traverse_directory(ctx, full_path, db);
-            } else if (strcmp(entry->d_name, "LastSyncDate") == 0) {
-                ctx->ignored++;
             } else {
                 process_file(ctx, full_path, entry->d_name, db);
             }
