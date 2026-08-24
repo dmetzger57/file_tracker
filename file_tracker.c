@@ -23,8 +23,6 @@
 int verbose = 0;
 int update = 0;
 int verifyChecksum = 0;
-int showProgress = 0;
-int showDetailedProgress = 0;
 int showLiveProgress = 0;
 int showLiveProgressPath = 0;
 int showSummary = 0;
@@ -34,16 +32,10 @@ char *note_text = NULL;
 int total_unchanged = 0, total_changed = 0, total_new = 0, total_missing = 0,
     total_ignored = 0, total_error = 0;
 
-// Progress tracking (Protected by progress_mutex)
-int total_files = 0;
-int processed_files = 0;
-int last_percent_displayed = -1;
-
 char *ignore_list[MAX_IGNORES];
 int ignore_count = 0;
 
 pthread_mutex_t global_count_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t progress_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ==== Terminal Wrapping Control ====
 void enable_line_wrap(void) {
@@ -104,64 +96,6 @@ int is_ignored(const char *name) {
         if (strcmp(name, ignore_list[i]) == 0) return 1;
     }
     return 0;
-}
-
-// ==== Progress Tracking ====
-int count_files_recursive(const char *dir_path) {
-    int count = 0;
-    DIR *dir = opendir(dir_path);
-    if (!dir) return 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir))) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-        if (is_ignored(entry->d_name)) continue;
-
-        char full_path[MAX_PATH];
-        struct stat st;
-        int path_len = snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
-        if (path_len >= (int)sizeof(full_path)) continue;
-
-        if (stat(full_path, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                count += count_files_recursive(full_path);
-            } else if (strcmp(entry->d_name, ".DS_Store") != 0 && strcmp(entry->d_name, "LastSyncDate") != 0 && S_ISREG(st.st_mode)) {
-                count++;
-            }
-        }
-    }
-    closedir(dir);
-    return count;
-}
-
-void display_progress(const char *filename) {
-    pthread_mutex_lock(&progress_mutex);
-
-    if (total_files == 0) {
-        pthread_mutex_unlock(&progress_mutex);
-        return;
-    }
-
-    int current_percent = (processed_files * 100) / total_files;
-
-    int should_display = 0;
-    if (showLiveProgress)
-        should_display = 1;
-    else if (showDetailedProgress)
-        should_display = (processed_files % 10 == 0) || (processed_files == total_files);
-    else
-        should_display = (current_percent > last_percent_displayed);
-
-    if (should_display) {
-        last_percent_displayed = current_percent;
-        if (showLiveProgress && filename)
-            printf("\033[2K\r%d%% (%'d of %'d) %s", current_percent, processed_files, total_files, filename);
-        else if( showProgress )
-            printf("\r%d%% (%'d of %'d)", current_percent, processed_files, total_files);
-        fflush(stdout);
-    }
-
-    pthread_mutex_unlock(&progress_mutex);
 }
 
 // ==== Logging Helper ====
@@ -249,8 +183,13 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
 
-    if (showLiveProgress)
-        display_progress(showLiveProgressPath ? path : name);
+    if (showLiveProgress) {
+        if (showLiveProgressPath)
+            printf("\033[2K\r%s", path);
+        else
+            printf("\033[2K\r%s", name);
+        fflush(stdout);
+    }
 
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "SELECT last_modified, checksum FROM files WHERE full_path = ? LIMIT 1", -1, &stmt, NULL);
@@ -312,14 +251,6 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
         ctx->new++;
     }
     sqlite3_finalize(stmt);
-
-    // Update progress if enabled
-    if ( showProgress) {
-        pthread_mutex_lock(&progress_mutex);
-        processed_files++;
-        pthread_mutex_unlock(&progress_mutex);
-        display_progress(NULL);
-    }
 }
 
 void traverse_directory(ThreadContext *ctx, const char *dir_path, sqlite3 *db) {
@@ -509,8 +440,6 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-c") == 0) verifyChecksum = 1;
         else if (strcmp(argv[i], "-u") == 0) update = 1;
         else if (strcmp(argv[i], "-v") == 0) verbose = 1;
-        else if (strcmp(argv[i], "-P") == 0) showProgress = 1;
-        else if (strcmp(argv[i], "-V") == 0) showDetailedProgress = 1;
         else if (strcmp(argv[i], "-l") == 0) showLiveProgress = 1;
         else if (strcmp(argv[i], "-L") == 0) showLiveProgressPath = 1;
         else if (strcmp(argv[i], "-h") == 0) help_requested = 1;
@@ -518,20 +447,15 @@ int main(int argc, char *argv[]) {
     }
 
     if (showLiveProgressPath) showLiveProgress = 1;
-    if (showLiveProgress) showProgress = 1;
-    if (showDetailedProgress) showProgress = 1;
-    if (showProgress) showSummary = 1;
 
     if (help_requested == 1) {
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L] [-t note] [-N notefile]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-l] [-L] [-s] [-t note] [-N notefile]\n", argv[0]);
         fprintf(stderr, "  -p <paths>  Paths to scan (required, comma-separated)\n");
         fprintf(stderr, "  -n <name>   Database file name (without .db extension)\n");
         fprintf(stderr, "  -c          Verify checksums even if mtime unchanged\n");
         fprintf(stderr, "  -u          Update database with changes\n");
         fprintf(stderr, "  -v          Verbose output\n");
-        fprintf(stderr, "  -P          Show progress percentage (updates at 1%% increments)\n");
-        fprintf(stderr, "  -V          Show detailed progress (updates every 10 files). Implies -P\n");
-        fprintf(stderr, "  -l          Live view (updates on every file with filename). Implies -P\n");
+        fprintf(stderr, "  -l          Live view (show current filename being processed)\n");
         fprintf(stderr, "  -L          Live view with full path instead of filename. Implies -l\n");
         fprintf(stderr, "  -s          Show summary\n");
         fprintf(stderr, "  -t <note>   Add note text to this run (requires -u)\n");
@@ -541,7 +465,7 @@ int main(int argc, char *argv[]) {
 
     if ( ! path_arg) {
         fprintf(stderr, "Error: -p option is required\n");
-        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-V] [-l] [-L] [-t note] [-N notefile]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -p /path1,/path2 [-n db_name] [-c] [-u] [-v] [-l] [-L] [-s] [-t note] [-N notefile]\n", argv[0]);
         exit(1);
     }
 
@@ -595,25 +519,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Warning: Could not create db directory %s: %s\n", db_dir, strerror(errno));
     }
 
-    // Count total files if progress mode is enabled
-    if ( showProgress) {
-        char *path_copy = strdup(path_arg);
-        char *count_token = strtok(path_copy, ",");
-
-	printf("Counting Total Number Of Files To Process ... ");
-        while (count_token) {
-            total_files += count_files_recursive(count_token);
-            count_token = strtok(NULL, ",");
-        }
-        free(path_copy);
-        if (total_files > 0) {
-            if( showProgress ) printf("Found %'d files to process\n", total_files);
-        }
-	else {
-            if( showProgress ) printf("No Files Found To Process\n");
-        }
-    }
-
+    // File counting now happens during traversal to avoid double-pass
     char *token = strtok(path_arg, ",");
     ThreadContext contexts[64];
     pthread_t threads[64];
@@ -670,8 +576,8 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
-    // Clear progress line if it was displayed
-    if ( showProgress && total_files > 0) printf("\n");
+    // Clear live progress line if it was displayed
+    if (showLiveProgress) printf("\n");
 
     // Output and Log Summary
     const char *summary_header = "\n================ AGGREGATE SUMMARY ================\n";
