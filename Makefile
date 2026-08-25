@@ -13,7 +13,7 @@ LIBS = -lssl -lcrypto -lsqlite3 -lpthread
 
 .PHONY: all clean
 
-all: file_tracker file_locator ft_summary ft_logs
+all: file_tracker file_locator ft_summary ft_logs ft_find_dupes
 
 file_tracker: file_tracker.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o file_tracker file_tracker.c $(LIBS)
@@ -27,8 +27,11 @@ ft_summary: ft_summary.c
 ft_logs: ft_logs.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o ft_logs ft_logs.c $(LIBS)
 
+ft_find_dupes: ft_find_dupes.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o ft_find_dupes ft_find_dupes.c $(LIBS)
+
 clean:
-	rm -f file_tracker file_locator ft_summary ft_logs *.o
+	rm -f file_tracker file_locator ft_summary ft_logs ft_find_dupes *.o
 
 install:
-	mv file_tracker file_locator ft_summary ft_logs ${HOME}/bin
+	mv file_tracker file_locator ft_summary ft_logs ft_find_dupes ${HOME}/bin

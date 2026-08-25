@@ -99,6 +99,27 @@ ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n] [-s]]
 
 **Run identifier format:** `dbname-YYYY-MM-DD-HH-MM-SS` (e.g., `archive-2024-03-15-14-30-45`)
 
+### ft_find_dupes
+
+Find and report duplicate files based on SHA-256 checksums stored in the database. Groups files with identical checksums and displays their full paths.
+
+```
+ft_find_dupes -d database_name [-v]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-d`   | Database name, without the `.db` extension (required). |
+| `-v`   | Verbose output: show checksums and file counts for each duplicate group. |
+
+**Output format:** Files are grouped by their checksum. Each group represents files that are identical (same SHA-256 hash). The full path of each duplicate file is displayed with indentation.
+
+**Default output:** Shows duplicate file groups with file paths only.
+
+**Verbose output (`-v`):** Includes checksum values and count of duplicates in each group.
+
+**Summary:** At the end, displays the number of duplicate groups found and the total count of duplicate files.
+
 ## Storage Layout
 
 | Path | Contents |
@@ -223,6 +244,12 @@ ft_logs -d archive -r archive-2024-03-15-14-30-45 -s
 
 # View run summary with note
 ft_logs -d archive -r archive-2024-03-15-14-30-45 -s -n
+
+# Find duplicate files in a database
+ft_find_dupes -d archive
+
+# Find duplicates with verbose output (show checksums)
+ft_find_dupes -d archive -v
 ```
 
 ## Database Migration
