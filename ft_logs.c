@@ -289,15 +289,18 @@ int main(int argc, char *argv[]) {
         int missing = sqlite3_column_int(stmt, 5);
         const char *run_date = (const char *)sqlite3_column_text(stmt, 6);
 
-        printf("================ RUN INFORMATION ==================\n");
-        printf("Run ID         : %lld\n", run_id);
-        printf("Date/Time      : %s\n", run_date);
-        printf("Machine        : %s\n", machine);
-        printf("Unchanged      : %d\n", unchanged);
-        printf("Changed        : %d\n", changed);
-        printf("New            : %d\n", new);
-        printf("Missing        : %d\n", missing);
-        printf("==================================================\n\n");
+        // Only show run information if no filters are specified (show_all)
+        if (show_all) {
+            printf("================ RUN INFORMATION ==================\n");
+            printf("Run ID         : %lld\n", run_id);
+            printf("Date/Time      : %s\n", run_date);
+            printf("Machine        : %s\n", machine);
+            printf("Unchanged      : %d\n", unchanged);
+            printf("Changed        : %d\n", changed);
+            printf("New            : %d\n", new);
+            printf("Missing        : %d\n", missing);
+            printf("==================================================\n\n");
+        }
 
         // Get the note if -n option was specified
         if (show_note) {
@@ -401,7 +404,10 @@ int main(int argc, char *argv[]) {
 
     // Display log messages
     int count = 0;
-    printf("=================== LOG MESSAGES ==================\n");
+    // Only show header/footer if no filters specified
+    if (show_all) {
+        printf("=================== LOG MESSAGES ==================\n");
+    }
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *status = (const char *)sqlite3_column_text(stmt, 0);
         const char *path = (const char *)sqlite3_column_text(stmt, 1);
@@ -409,15 +415,13 @@ int main(int argc, char *argv[]) {
         count++;
     }
 
-    if (count == 0) {
-        printf("No log messages found");
-        if (!show_all) {
-            printf(" matching the specified filters");
+    if (show_all) {
+        if (count == 0) {
+            printf("No log messages found.\n");
         }
-        printf(".\n");
+        printf("==================================================\n");
+        printf("Total messages : %d\n", count);
     }
-    printf("==================================================\n");
-    printf("Total messages : %d\n", count);
 
     sqlite3_finalize(stmt);
     sqlite3_close(db);
