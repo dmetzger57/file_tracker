@@ -92,7 +92,9 @@ ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n]]
 
 **Listing all runs (`-l` option):** Displays a table of all runs showing run identifier, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present. Copy the run identifier from this list to use with the `-r` option.
 
-**Viewing specific run:** Use the run identifier displayed by `-l` with the `-r` option. Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed.
+**Viewing specific run:** Use the run identifier displayed by `-l` with the `-r` option. Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed with run information header and summary footer.
+
+**Filtered output:** When file status filters (`-N`, `-C`, `-U`, `-M`) are specified, ft_logs outputs only the matching log records without headers or summary. This makes the output suitable for piping to other commands or processing with scripts.
 
 **Run identifier format:** `dbname-YYYY-MM-DD-HH-MM-SS` (e.g., `archive-2024-03-15-14-30-45`)
 
@@ -191,10 +193,10 @@ sqlite3 ~/db/FileTracker/archive.db \
 # List all file_tracker runs in a database
 ft_logs -d archive -l
 
-# View detailed logs from a specific run
+# View detailed logs from a specific run (with headers and summary)
 ft_logs -d archive -r archive-2024-03-15-14-30-45
 
-# Show only files that were changed in that run
+# Show only files that were changed (clean output for piping)
 ft_logs -d archive -r archive-2024-03-15-14-30-45 -C
 
 # Show files that were added or changed
@@ -208,6 +210,12 @@ ft_logs -d archive -r archive-2024-03-15-14-30-45 -n
 
 # Combine note display with file filters
 ft_logs -d archive -r archive-2024-03-15-14-30-45 -n -C
+
+# Count how many files changed in a run (using filtered output)
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -C | wc -l
+
+# Extract just the paths of new files
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -N | awk '{print $2}'
 ```
 
 ## Database Migration
