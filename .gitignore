@@ -1,6 +1,8 @@
 file_locator
 file_tracker
 ft_summary
+ft_logs
+ft_find_dupes
 
 # Prerequisites
 *.d
