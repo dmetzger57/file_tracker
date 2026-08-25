@@ -26,7 +26,7 @@ void signal_handler(int signum) {
 }
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n]]\n", prog_name);
+    fprintf(stderr, "Usage: %s -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n] [-s]]\n", prog_name);
     fprintf(stderr, "  -d <name>   Database name (without .db extension) - REQUIRED\n");
     fprintf(stderr, "  -l          List all runs in the database\n");
     fprintf(stderr, "  -r <run_id> Run identifier (DB_Name-YYYY-MM-DD-HH-MM-SS) - use -l to see available runs\n");
@@ -35,6 +35,7 @@ void print_usage(const char *prog_name) {
     fprintf(stderr, "  -M          Show only MISSING file messages\n");
     fprintf(stderr, "  -U          Show only UNCHANGED file messages\n");
     fprintf(stderr, "  -n          Display the note associated with the run\n");
+    fprintf(stderr, "  -s          Show only run information summary (no log messages)\n");
     fprintf(stderr, "\nNote: If no filter options are specified, all log messages are displayed.\n");
     fprintf(stderr, "      Multiple filter options can be combined (e.g., -N -C shows NEW and CHANGED).\n");
 }
@@ -49,6 +50,7 @@ int main(int argc, char *argv[]) {
     int show_note = 0;
     int show_all = 1;
     int list_runs = 0;
+    int summary_only = 0;
 
     // Setup terminal wrapping control
     atexit(enable_line_wrap);
@@ -59,7 +61,7 @@ int main(int argc, char *argv[]) {
 
     // Parse command line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "d:r:NCMUnlh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:r:NCMUnlsh")) != -1) {
         switch (opt) {
             case 'd':
                 db_name = optarg;
@@ -88,6 +90,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'l':
                 list_runs = 1;
+                break;
+            case 's':
+                summary_only = 1;
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -289,8 +294,8 @@ int main(int argc, char *argv[]) {
         int missing = sqlite3_column_int(stmt, 5);
         const char *run_date = (const char *)sqlite3_column_text(stmt, 6);
 
-        // Only show run information if no filters are specified (show_all)
-        if (show_all) {
+        // Show run information if no filters are specified or if summary_only is requested
+        if (show_all || summary_only) {
             printf("================ RUN INFORMATION ==================\n");
             printf("Run ID         : %lld\n", run_id);
             printf("Date/Time      : %s\n", run_date);
@@ -361,6 +366,12 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
     sqlite3_finalize(stmt);
+
+    // If summary_only is requested, we're done - don't show log messages
+    if (summary_only) {
+        sqlite3_close(db);
+        return 0;
+    }
 
     // Build query for log messages
     char log_query[1024];

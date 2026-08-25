@@ -76,7 +76,7 @@ ft_summary -d database [-a] [-N] [-m] [-c] [-n]
 View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run identifier.
 
 ```
-ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n]]
+ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n] [-s]]
 ```
 
 | Option | Description |
@@ -89,6 +89,7 @@ ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n]]
 | `-M`   | Filter: show only MISSING file messages. |
 | `-U`   | Filter: show only UNCHANGED file messages. |
 | `-n`   | Display the note associated with the run. |
+| `-s`   | Show only run information summary (no log messages). |
 
 **Listing all runs (`-l` option):** Displays a table of all runs showing run identifier, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present. Copy the run identifier from this list to use with the `-r` option.
 
@@ -216,6 +217,12 @@ ft_logs -d archive -r archive-2024-03-15-14-30-45 -C | wc -l
 
 # Extract just the paths of new files
 ft_logs -d archive -r archive-2024-03-15-14-30-45 -N | awk '{print $2}'
+
+# View only the run summary without log messages
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -s
+
+# View run summary with note
+ft_logs -d archive -r archive-2024-03-15-14-30-45 -s -n
 ```
 
 ## Database Migration
