@@ -32,6 +32,9 @@ char *note_text = NULL;
 int total_unchanged = 0, total_changed = 0, total_new = 0, total_missing = 0,
     total_ignored = 0, total_error = 0;
 
+// Live progress counter (Protected by global_count_mutex)
+int live_file_count = 0;
+
 char *ignore_list[MAX_IGNORES];
 int ignore_count = 0;
 
@@ -184,10 +187,15 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
 
     if (showLiveProgress) {
+        pthread_mutex_lock(&global_count_mutex);
+        live_file_count++;
+        int current_count = live_file_count;
+        pthread_mutex_unlock(&global_count_mutex);
+
         if (showLiveProgressPath)
-            printf("\033[2K\r%s", path);
+            printf("\033[2K\r%d: %s", current_count, path);
         else
-            printf("\033[2K\r%s", name);
+            printf("\033[2K\r%d: %s", current_count, name);
         fflush(stdout);
     }
 

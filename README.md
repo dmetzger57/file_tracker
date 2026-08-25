@@ -21,8 +21,8 @@ file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-v] [-l] [-L] [-s] [-t
 | `-c`   | Compare checksums even when file modification time is unchanged. |
 | `-u`   | Update the database with changes. Without this, differences are only reported. |
 | `-v`   | Verbose output. |
-| `-l`   | Live view — show current filename being processed (updates on every file). |
-| `-L`   | Live view with full path instead of filename. Implies `-l`. |
+| `-l`   | Live view — show file count and current filename being processed (format: `####: filename`). |
+| `-L`   | Live view with full path instead of filename (format: `####: /full/path`). Implies `-l`. |
 | `-s`   | Print an aggregate summary when processing completes. |
 | `-t`   | Add a note to this run's metadata (requires `-u`). Use for documenting the purpose of the scan. |
 | `-N`   | Read note text from a file and attach it to this run's metadata (requires `-u`). Useful for multi-line notes. |
