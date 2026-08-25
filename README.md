@@ -11,7 +11,7 @@ Run `file_tracker` against your storage media periodically to detect unauthorize
 The core engine. Recursively scans directory trees, computes SHA-256 hashes, and stores file metadata in per-path SQLite databases. On subsequent runs, detects new, changed, and missing files by comparing against stored records. Spawns one thread per path for parallel processing.
 
 ```
-file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-P] [-V] [-l] [-L] [-s] [-v] [-t note] [-N notefile]
+file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-v] [-l] [-L] [-s] [-t note] [-N notefile]
 ```
 
 | Option | Description |
@@ -20,12 +20,10 @@ file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-P] [-V] [-l] [-L] [-s
 | `-n`   | Database file name (without `.db` extension). Stored in `~/db/FileTracker/`. When omitted, the database is named after each path's basename. When provided with multiple paths, all paths share the same database file. |
 | `-c`   | Compare checksums even when file modification time is unchanged. |
 | `-u`   | Update the database with changes. Without this, differences are only reported. |
-| `-P`   | Show percent-complete progress in 1% increments. Implies `-s`. |
-| `-V`   | Show detailed progress, updating every 10 files processed. Implies `-P`. |
-| `-l`   | Live view — updates the status line on every file, showing percent complete, file count, and the current filename. Implies `-P`. |
+| `-v`   | Verbose output. |
+| `-l`   | Live view — show current filename being processed (updates on every file). |
 | `-L`   | Live view with full path instead of filename. Implies `-l`. |
 | `-s`   | Print an aggregate summary when processing completes. |
-| `-v`   | Verbose output. |
 | `-t`   | Add a note to this run's metadata (requires `-u`). Use for documenting the purpose of the scan. |
 | `-N`   | Read note text from a file and attach it to this run's metadata (requires `-u`). Useful for multi-line notes. |
 
@@ -148,25 +146,31 @@ sudo dnf install openssl-devel sqlite-devel
 
 ```sh
 # Initial scan — hash all files and record them in the database with a note
-file_tracker -p /mnt/archive -u -P -s -t "Initial baseline scan"
+file_tracker -p /mnt/archive -u -s -t "Initial baseline scan"
 
 # Periodic quick check — compare modification times, update database
-file_tracker -p /mnt/archive -u -P -s -t "Weekly verification"
+file_tracker -p /mnt/archive -u -s -t "Weekly verification"
 
 # Read-only verification — see changes without updating, displays previous run's note
 file_tracker -p /mnt/archive -s
 
 # Scan multiple paths into a single named database
-file_tracker -p /mnt/photos,/mnt/videos -n media_archive -u -P -s
+file_tracker -p /mnt/photos,/mnt/videos -n media_archive -u -s
 
 # Deep verification — recompute and compare every checksum
-file_tracker -p /mnt/archive -c -u -P -s -t "Full checksum verification"
+file_tracker -p /mnt/archive -c -u -s -t "Full checksum verification"
 
 # Add a detailed multi-line note from a file
 echo "Post-migration scan
 Moved files from old_storage to new_storage
 Contact: admin@example.com" > /tmp/scan_note.txt
-file_tracker -p /mnt/archive -u -P -s -N /tmp/scan_note.txt
+file_tracker -p /mnt/archive -u -s -N /tmp/scan_note.txt
+
+# Live view — watch files being processed in real-time
+file_tracker -p /mnt/archive -u -l -s
+
+# Live view with full paths
+file_tracker -p /mnt/archive -u -L -s
 
 # Check what changed
 ft_summary -d archive -m -c
