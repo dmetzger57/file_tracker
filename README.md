@@ -52,15 +52,15 @@ file_locator -f filename [-p] [-d database] [-v]
 
 ### ft_summary
 
-Report run history and statistics from a tracker database.
+Report run history and statistics from a tracker database. When no database is specified, displays information for all databases in `~/db/FileTracker/`.
 
 ```
-ft_summary -d database [-a] [-N] [-m] [-c] [-n]
+ft_summary [-d database] [-a] [-N] [-m] [-c] [-n]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `-d`   | Database name, without the `.db` extension (required). |
+| `-d`   | Database name, without the `.db` extension. If omitted, shows all databases. |
 | `-a`   | Show all recorded runs. Default: last run only. |
 | `-N`   | Show run notes (Run #, Run Date, Note). Displays "None" for runs without notes. |
 | `-m`   | List files found missing in the last run. |
@@ -70,6 +70,8 @@ ft_summary -d database [-a] [-N] [-m] [-c] [-n]
 **Default output format:** Run #, Run Date, Update (On/Off), Checksum (On/Off), Unchanged, Changed, New, Missing, Errors
 
 **Notes output format (`-N`):** Run #, Run Date, Note
+
+**Multi-database mode:** When `-d` is omitted, ft_summary scans all `.db` files in `~/db/FileTracker/` and displays a header for each database followed by its summary. Databases without the expected schema are skipped with a warning.
 
 ### ft_logs
 
@@ -196,8 +198,14 @@ file_tracker -p /mnt/archive -u -l -s
 # Live view with full paths
 file_tracker -p /mnt/archive -u -L -s
 
-# Check what changed
+# Check what changed in a specific database
 ft_summary -d archive -m -c
+
+# View summary of all tracked databases
+ft_summary
+
+# View all runs for all databases
+ft_summary -a
 
 # Find a file across all tracked volumes
 file_locator -f important_document.pdf
