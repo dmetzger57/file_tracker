@@ -67,11 +67,15 @@ ft_summary [-d database] [-a] [-N] [-m] [-c] [-n]
 | `-c`   | List files found changed in the last run. |
 | `-n`   | List files found new in the last run. |
 
-**Default output format:** Run #, Run Date, Update (On/Off), Checksum (On/Off), Unchanged, Changed, New, Missing, Errors
+**Default output format (single database with `-d`):** Run #, Run Date, Update (On/Off), Checksum (On/Off), Unchanged, Changed, New, Missing, Errors
+
+**Multi-database compact format (no options):** When run without any options, displays all databases in a single-line-per-database format with columns: Database, Run #, Run Date, Update, Checksum, Unchanged, Changed, New, Missing, Errors
+
+**Multi-database detailed format (with `-a`, `-N`, `-m`, `-c`, or `-n`):** When `-d` is omitted but other options are specified, displays a separate header for each database followed by its detailed summary.
 
 **Notes output format (`-N`):** Run #, Run Date, Note
 
-**Multi-database mode:** When `-d` is omitted, ft_summary scans all `.db` files in `~/db/FileTracker/` and displays a header for each database followed by its summary. Databases without the expected schema are skipped with a warning.
+Databases without the expected schema are skipped with a warning.
 
 ### ft_logs
 

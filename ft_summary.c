@@ -61,6 +61,14 @@ void print_compact_header() {
     print_separator(115);
 }
 
+void print_multi_db_header() {
+    printf("\n");
+    print_separator(132);
+    printf("%-20s | %-6s | %-19s | %-6s | %-8s | %10s | %10s | %10s | %10s | %8s\n",
+           "Database", "Run #", "Run Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Errors");
+    print_separator(132);
+}
+
 void print_compact_row(sqlite3_stmt *stmt) {
     int id = sqlite3_column_int(stmt, 0);
     const char *checksum_date = (const char *)sqlite3_column_text(stmt, 1);
@@ -91,6 +99,39 @@ void print_compact_row(sqlite3_stmt *stmt) {
 
     printf("%-6d | %-19s | %-6s | %-8s | %'10d | %'10d | %'10d | %'10d | %'8d\n",
            id, run_date, update_status, checksum_status,
+           unchanged, changed, new_files, missing, errors);
+}
+
+void print_multi_db_row(const char *db_name, sqlite3_stmt *stmt) {
+    int id = sqlite3_column_int(stmt, 0);
+    const char *checksum_date = (const char *)sqlite3_column_text(stmt, 1);
+    const char *verify_date = (const char *)sqlite3_column_text(stmt, 2);
+    int unchanged = sqlite3_column_int(stmt, 4);
+    int changed = sqlite3_column_int(stmt, 5);
+    int new_files = sqlite3_column_int(stmt, 6);
+    int missing = sqlite3_column_int(stmt, 7);
+    int errors = sqlite3_column_int(stmt, 8);
+    const char *update_mode = (const char *)sqlite3_column_text(stmt, 9);
+
+    // Determine run date and checksum status
+    const char *run_date;
+    const char *checksum_status;
+    if (checksum_date && strlen(checksum_date) > 0) {
+        run_date = checksum_date;
+        checksum_status = "On";
+    } else {
+        run_date = verify_date && strlen(verify_date) > 0 ? verify_date : "unknown";
+        checksum_status = "Off";
+    }
+
+    // Determine update status
+    const char *update_status = "Off";
+    if (update_mode && strcmp(update_mode, "ON") == 0) {
+        update_status = "On";
+    }
+
+    printf("%-20s | %-6d | %-19s | %-6s | %-8s | %'10d | %'10d | %'10d | %'10d | %'8d\n",
+           db_name, id, run_date, update_status, checksum_status,
            unchanged, changed, new_files, missing, errors);
 }
 
@@ -203,7 +244,7 @@ void print_log_entries(const char *log_dir, const char *db_name, int run_id,
 
 // Process a single database
 int process_database(const char *db_name, const char *home, int show_all, int show_notes,
-                     int show_missing, int show_changed, int show_new, int is_multi_db) {
+                     int show_missing, int show_changed, int show_new, int is_multi_db, int multi_db_compact) {
     char db_path[MAX_PATH];
     snprintf(db_path, sizeof(db_path), "%s/db/FileTracker/%s.db", home, db_name);
 
@@ -262,18 +303,21 @@ int process_database(const char *db_name, const char *home, int show_all, int sh
     int last_run_id = 0;
     char last_run_date[20] = "";
 
-    // Print database name header if processing multiple databases
-    if (is_multi_db) {
+    // Print database name header if processing multiple databases (non-compact mode)
+    if (is_multi_db && !multi_db_compact) {
         printf("\n");
         printf("================================================================================\n");
         printf("DATABASE: %s\n", db_name);
         printf("================================================================================\n");
     }
 
-    if (show_notes) {
-        print_notes_header();
-    } else {
-        print_compact_header();
+    // Print header for non-compact modes
+    if (!multi_db_compact) {
+        if (show_notes) {
+            print_notes_header();
+        } else {
+            print_compact_header();
+        }
     }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -290,23 +334,29 @@ int process_database(const char *db_name, const char *home, int show_all, int sh
             }
         }
 
-        if (show_notes) {
+        if (multi_db_compact) {
+            // In compact mode, just print the one row with database name
+            print_multi_db_row(db_name, stmt);
+        } else if (show_notes) {
             print_notes_row(stmt);
         } else {
             print_compact_row(stmt);
         }
     }
 
-    int separator_width = show_notes ? 60 : 115;
-    if (row_count > 0) {
-        print_separator(separator_width);
-        printf("Total runs: %d\n", row_count);
-    }
+    // Print footer for non-compact modes
+    if (!multi_db_compact) {
+        int separator_width = show_notes ? 60 : 115;
+        if (row_count > 0) {
+            print_separator(separator_width);
+            printf("Total runs: %d\n", row_count);
+        }
 
-    if (row_count == 0) {
-        printf("\nNo verification runs found in database: %s\n", db_path);
-        printf("The database exists but contains no meta records.\n");
-        printf("Run file_tracker to perform a verification scan.\n");
+        if (row_count == 0) {
+            printf("\nNo verification runs found in database: %s\n", db_path);
+            printf("The database exists but contains no meta records.\n");
+            printf("Run file_tracker to perform a verification scan.\n");
+        }
     }
 
     if ((show_missing || show_changed || show_new) && last_run_id > 0 && last_run_date[0] != '\0') {
@@ -382,7 +432,7 @@ int main(int argc, char *argv[]) {
     // If database name is provided, process single database
     if (db_name) {
         return process_database(db_name, home, show_all, show_notes,
-                                show_missing, show_changed, show_new, 0);
+                                show_missing, show_changed, show_new, 0, 0);
     }
 
     // Process all databases in the FileTracker directory
@@ -464,11 +514,20 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Determine if we should use compact multi-db format
+    // Compact format when: no special options (-a, -N, -m, -c, -n) are specified
+    int use_compact = !show_all && !show_notes && !show_missing && !show_changed && !show_new;
+
+    // Print header once for compact format
+    if (use_compact) {
+        print_multi_db_header();
+    }
+
     // Process each database
     int result = 0;
     for (int i = 0; i < db_count; i++) {
         int rc = process_database(db_names[i], home, show_all, show_notes,
-                                  show_missing, show_changed, show_new, 1);
+                                  show_missing, show_changed, show_new, 1, use_compact);
         if (rc != 0) {
             result = rc;
         }
@@ -476,7 +535,10 @@ int main(int argc, char *argv[]) {
     }
     free(db_names);
 
-    if (db_count > 1) {
+    // Print footer for compact format
+    if (use_compact) {
+        print_separator(132);
+    } else if (db_count > 1) {
         printf("\n");
     }
 
