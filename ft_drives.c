@@ -42,8 +42,13 @@ void print_usage(const char *prog_name) {
     fprintf(stderr, "      Search for drives by keyword in description\n\n");
     fprintf(stderr, "  list\n");
     fprintf(stderr, "      List all tracked drives\n\n");
-    fprintf(stderr, "  update <drive_name> [-d description] [-c container]\n");
-    fprintf(stderr, "      Update drive information (refreshes capacity if mounted)\n\n");
+    fprintf(stderr, "  update <drive_name> [-d description] [-c container] [-s capacity] [-u used] [-a available]\n");
+    fprintf(stderr, "      Update drive information (refreshes capacity if mounted)\n");
+    fprintf(stderr, "      -d    Update description\n");
+    fprintf(stderr, "      -c    Update storage container\n");
+    fprintf(stderr, "      -s    Set capacity in GB (overrides auto-detection)\n");
+    fprintf(stderr, "      -u    Set used space in GB\n");
+    fprintf(stderr, "      -a    Set available space in GB\n\n");
     fprintf(stderr, "  verify <drive_name>\n");
     fprintf(stderr, "      Mark drive as verified (updates last_verified timestamp)\n\n");
     fprintf(stderr, "  delete <drive_name>\n");
@@ -411,24 +416,33 @@ int cmd_list_drives(sqlite3 *db) {
 }
 
 // Update drive information
-int cmd_update_drive(sqlite3 *db, const char *drive_name, const char *description, const char *container) {
+int cmd_update_drive(sqlite3 *db, const char *drive_name, const char *description, const char *container,
+                      long long manual_capacity, long long manual_used, long long manual_available) {
     char timestamp[64];
     get_timestamp(timestamp, sizeof(timestamp));
 
-    // Try to get drive stats if mounted
+    // Try to get drive stats if mounted (unless manually overridden)
     char mount_path[MAX_PATH];
     long long capacity = 0, available = 0, used = 0;
     int mounted = 0;
+    int update_capacity = 0;
 
-    if (find_mount_point(drive_name, mount_path, sizeof(mount_path))) {
+    // Use manual values if provided, otherwise try auto-detection
+    if (manual_capacity > 0 || manual_used > 0 || manual_available > 0) {
+        capacity = manual_capacity;
+        used = manual_used;
+        available = manual_available;
+        update_capacity = 1;
+    } else if (find_mount_point(drive_name, mount_path, sizeof(mount_path))) {
         mounted = get_drive_stats(mount_path, &capacity, &available, &used);
+        update_capacity = mounted;
     }
 
     // Build dynamic SQL based on what needs updating
     char sql[1024] = "UPDATE drives SET last_updated = ?";
     int param_idx = 2;
 
-    if (mounted) {
+    if (update_capacity) {
         strcat(sql, ", capacity = ?, space_available = ?, space_used = ?");
     }
     if (description) {
@@ -448,7 +462,7 @@ int cmd_update_drive(sqlite3 *db, const char *drive_name, const char *descriptio
 
     sqlite3_bind_text(stmt, 1, timestamp, -1, SQLITE_STATIC);
 
-    if (mounted) {
+    if (update_capacity) {
         sqlite3_bind_int64(stmt, param_idx++, capacity);
         sqlite3_bind_int64(stmt, param_idx++, available);
         sqlite3_bind_int64(stmt, param_idx++, used);
@@ -475,7 +489,7 @@ int cmd_update_drive(sqlite3 *db, const char *drive_name, const char *descriptio
     }
 
     printf("Drive '%s' updated successfully.\n", drive_name);
-    if (mounted) {
+    if (update_capacity) {
         char cap_str[64], avail_str[64], used_str[64];
         format_bytes(capacity, cap_str, sizeof(cap_str));
         format_bytes(available, avail_str, sizeof(avail_str));
@@ -688,6 +702,9 @@ int main(int argc, char *argv[]) {
         const char *drive_name = argv[2];
         const char *description = NULL;
         const char *container = NULL;
+        long long manual_capacity = 0;
+        long long manual_used = 0;
+        long long manual_available = 0;
 
         // Parse optional flags
         for (int i = 3; i < argc; i++) {
@@ -695,10 +712,20 @@ int main(int argc, char *argv[]) {
                 description = argv[++i];
             } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
                 container = argv[++i];
+            } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+                // Capacity in GB, convert to bytes
+                manual_capacity = (long long)(atof(argv[++i]) * 1024.0 * 1024.0 * 1024.0);
+            } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
+                // Used space in GB, convert to bytes
+                manual_used = (long long)(atof(argv[++i]) * 1024.0 * 1024.0 * 1024.0);
+            } else if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
+                // Available space in GB, convert to bytes
+                manual_available = (long long)(atof(argv[++i]) * 1024.0 * 1024.0 * 1024.0);
             }
         }
 
-        result = cmd_update_drive(db, drive_name, description, container) ? 0 : 1;
+        result = cmd_update_drive(db, drive_name, description, container,
+                                  manual_capacity, manual_used, manual_available) ? 0 : 1;
 
     } else if (strcmp(cmd, "verify") == 0) {
         if (argc < 3) {

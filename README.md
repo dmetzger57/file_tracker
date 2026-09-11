@@ -245,7 +245,7 @@ ft_drives <command> [options]
 | `show <drive_name>` | Display detailed information for a specific drive. |
 | `search <keyword>` | Search for drives by keyword in description or container fields. |
 | `list` | List all tracked drives with summary information. |
-| `update <drive_name> [-d description] [-c container]` | Update drive information. Refreshes capacity if mounted. |
+| `update <drive_name> [-d description] [-c container] [-s capacity] [-u used] [-a available]` | Update drive information. Refreshes capacity if mounted, or set manually with -s/-u/-a options. |
 | `verify <drive_name>` | Mark drive as verified (updates last_verified timestamp). |
 | `delete <drive_name>` | Delete a drive from tracking (requires confirmation). |
 
@@ -255,6 +255,9 @@ ft_drives <command> [options]
 |--------|-------------|
 | `-d`   | Description of drive purpose/contents. |
 | `-c`   | Storage container location (e.g., "Drawer A", "Safe", "Office Shelf"). |
+| `-s`   | Manual capacity in GB (overrides auto-detection). |
+| `-u`   | Manual used space in GB. |
+| `-a`   | Manual available space in GB. |
 
 **Examples:**
 
@@ -273,6 +276,12 @@ ft_drives list
 
 # Update drive information (refreshes capacity if mounted)
 ft_drives update BackupDrive2024 -d "Time Machine and file archives"
+
+# Manually set capacity for unmounted drive
+ft_drives update BackupDrive2024 -s 2000 -u 1500 -a 500
+
+# Update just the description
+ft_drives update BackupDrive2024 -d "Updated description"
 
 # Mark drive as verified after running file_tracker
 ft_drives verify BackupDrive2024
