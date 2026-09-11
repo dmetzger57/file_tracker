@@ -48,6 +48,12 @@ file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-v] [-l] [-L] [-s] [-t
 
 **Notes:** Use `-t` or `-N` to attach contextual information to each run (e.g., "Weekly backup", "Post-migration verification"). Notes are stored in the database's `meta` table and can be queried later for audit purposes. When running without `-u` (read-only mode), the previous run's note is automatically displayed after the summary (if `-s` is enabled) to provide context about the last update.
 
+**Drive Tracking Integration:** When running in update mode (`-u`), file_tracker automatically adds the scanned drive to the drive tracking database (`ft_drives`) if it's not already tracked. This ensures all scanned drives are automatically registered for drive management. The drive is added with:
+- Auto-detected capacity information if the path is accessible
+- Description: "Auto-added by file_tracker"
+- Current timestamp as last updated
+- No duplication - drives already in the tracker are not re-added
+
 ### file_tracker_gui
 
 Graphical user interface for file_tracker. Provides visual progress tracking, real-time status updates, and results display for directory scanning and checksum verification.
