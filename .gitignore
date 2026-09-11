@@ -1,5 +1,7 @@
+# Binary output files
 file_locator
 file_tracker
+file_tracker_lastrun
 ft_summary
 ft_logs
 ft_find_dupes
@@ -7,6 +9,7 @@ ft_drives
 ft_drives_gui
 file_tracker_gui
 ft_summary_gui
+folder_clean
 
 # Prerequisites
 *.d
