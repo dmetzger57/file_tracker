@@ -1,8 +1,25 @@
 # File Tracker
 
-A suite of command-line tools for tracking files via SHA-256 checksums stored in SQLite databases. Designed for detecting bit-rot and silent corruption on archival storage drives.
+A comprehensive suite of command-line and GUI tools for tracking files via SHA-256 checksums stored in SQLite databases. Designed for detecting bit-rot and silent corruption on archival storage drives.
 
 Run `file_tracker` against your storage media periodically to detect unauthorized changes or silent file corruption via checksum verification.
+
+## Quick Overview
+
+**CLI Tools:**
+- `file_tracker` - Scan directories and compute checksums
+- `file_locator` - Search for files across databases
+- `ft_summary` - View scan history and statistics
+- `ft_logs` - View detailed per-file logs
+- `ft_find_dupes` - Find duplicate files by checksum
+- `ft_drives` - Track external drive information
+
+**GUI Tools:**
+- `file_tracker_gui` - Visual interface for directory scanning
+- `ft_summary_gui` - Browse scan history with tabbed file lists
+- `ft_drives_gui` - Manage drive tracking visually
+
+**All tools share the same SQLite databases** - use CLI and GUI interchangeably!
 
 ## Tools
 
@@ -30,6 +47,57 @@ file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-v] [-l] [-L] [-s] [-t
 **Default behavior (no `-c`):** Files are compared by modification time only. If the mtime matches the stored value, the file is marked unchanged without recomputing its hash. Use `-c` for a full checksum verification pass.
 
 **Notes:** Use `-t` or `-N` to attach contextual information to each run (e.g., "Weekly backup", "Post-migration verification"). Notes are stored in the database's `meta` table and can be queried later for audit purposes. When running without `-u` (read-only mode), the previous run's note is automatically displayed after the summary (if `-s` is enabled) to provide context about the last update.
+
+### file_tracker_gui
+
+Graphical user interface for file_tracker. Provides visual progress tracking, real-time status updates, and results display for directory scanning and checksum verification.
+
+```sh
+file_tracker_gui
+```
+
+**Features:**
+
+- **Mounted Volumes List:** Shows all drives mounted at `/Volumes/` with capacity info
+  - Click any volume to auto-select for scanning
+  - Refresh button to reload volumes
+  - Perfect for external drive verification
+- **Directory Selection:** Browse button for any path selection, or manual entry
+- **Database Configuration:** Optional database name (auto-fills from volume name)
+- **Scan Options:**
+  - Enable Checksum Verification (SHA-256)
+  - Update Database mode (vs read-only)
+- **Note Field:** Add contextual notes to scan runs
+- **Live Progress:**
+  - Progress bar showing scan completion
+  - Real-time file counts (unchanged, changed, new, missing, errors)
+  - Current file being processed
+- **Results Display:** Detailed summary upon completion
+- **Stop Button:** Abort scan in progress
+
+**Usage:**
+
+**Method 1 - Select from Mounted Volumes:**
+1. View mounted drives in the left panel
+2. Click any volume (e.g., external drive) to select it
+3. Path and database name auto-populate
+4. Configure options (checksum, update mode, note)
+5. Click "Start Scan"
+6. Monitor progress and view results
+
+**Method 2 - Browse or Enter Path Manually:**
+1. Click "Browse..." or type path directly in Scan Path field
+2. Optionally specify a database name (or use default)
+3. Check "Enable Checksum Verification" for full SHA-256 verification
+4. Check "Update Database" to save changes (uncheck for read-only scan)
+5. Add an optional note describing this scan
+6. Click "Start Scan"
+7. Monitor progress in real-time
+8. View results when complete
+
+**Database:** Uses the same schema and storage location as the CLI tool (`~/db/FileTracker/`)
+
+**Requirements:** GTK4 (`brew install gtk4`)
 
 ### file_locator
 
@@ -76,6 +144,41 @@ ft_summary [-d database] [-a] [-N] [-m] [-c] [-n]
 **Notes output format (`-N`):** Run #, Run Date, Note
 
 Databases without the expected schema are skipped with a warning.
+
+### ft_summary_gui
+
+Graphical interface for viewing run history, statistics, and file lists from tracker databases. Provides an intuitive way to browse scan results with detailed information and file listings.
+
+```sh
+ft_summary_gui
+```
+
+**Features:**
+
+- **Database Selection:** Dropdown menu showing all available databases
+- **Run History Table:** View all runs or just the most recent
+  - Columns: Run #, Date, Update Mode, Checksum Status, File Counts
+  - Click any run to view details
+- **Tabbed Details View:**
+  - **Details Tab:** Complete run information, statistics, and notes
+  - **Missing Files Tab:** List of files in database but not found on disk
+  - **Changed Files Tab:** List of files that changed since last scan
+  - **New Files Tab:** List of newly discovered files
+- **Export Functionality:** Save current tab contents to text file
+- **Real-time Updates:** Refresh button to reload database information
+
+**Usage:**
+
+1. Launch `ft_summary_gui`
+2. Select a database from dropdown
+3. Check "Show All Runs" to see complete history (or leave unchecked for latest run only)
+4. Click a run in the table to view details
+5. Switch between tabs to see different file lists
+6. Click "Export" to save current tab to a text file
+
+**Integration:** Uses the same databases as CLI `ft_summary`, providing a visual way to explore the same data.
+
+**Requirements:** GTK4 (`brew install gtk4`)
 
 ### ft_logs
 
@@ -126,6 +229,99 @@ ft_find_dupes -d database_name [-v]
 
 **Summary:** At the end, displays the number of duplicate groups found and the total count of duplicate files.
 
+### ft_drives
+
+Track and manage information about external drives. Stores drive metadata (capacity, usage, description, storage location) in a SQLite database. Automatically detects capacity information when drives are mounted at `/Volumes/<drive_name>`.
+
+```
+ft_drives <command> [options]
+```
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `add <drive_name> [-d description] [-c container]` | Add a new drive. Auto-detects capacity if currently mounted. |
+| `show <drive_name>` | Display detailed information for a specific drive. |
+| `search <keyword>` | Search for drives by keyword in description or container fields. |
+| `list` | List all tracked drives with summary information. |
+| `update <drive_name> [-d description] [-c container]` | Update drive information. Refreshes capacity if mounted. |
+| `verify <drive_name>` | Mark drive as verified (updates last_verified timestamp). |
+| `delete <drive_name>` | Delete a drive from tracking (requires confirmation). |
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-d`   | Description of drive purpose/contents. |
+| `-c`   | Storage container location (e.g., "Drawer A", "Safe", "Office Shelf"). |
+
+**Examples:**
+
+```sh
+# Add a new external drive (will auto-detect capacity if mounted)
+ft_drives add "BackupDrive2024" -d "Time Machine backups" -c "Drawer A"
+
+# Show details for a specific drive
+ft_drives show BackupDrive2024
+
+# Search for drives containing "backup" in their description
+ft_drives search backup
+
+# List all tracked drives
+ft_drives list
+
+# Update drive information (refreshes capacity if mounted)
+ft_drives update BackupDrive2024 -d "Time Machine and file archives"
+
+# Mark drive as verified after running file_tracker
+ft_drives verify BackupDrive2024
+
+# Delete a drive from tracking (requires typing drive name to confirm)
+ft_drives delete BackupDrive2024
+```
+
+**Drive tracking workflow:**
+
+1. Add drive to tracking when you first initialize it: `ft_drives add "DriveName" -d "Purpose" -c "Location"`
+2. Run file_tracker against the mounted drive: `file_tracker -p /Volumes/DriveName -u -c`
+3. Mark drive as verified: `ft_drives verify DriveName`
+4. Update drive stats periodically: `ft_drives update DriveName`
+
+**Database:** Drive information is stored in `~/db/FileTracker/drives.db`.
+
+### ft_drives_gui
+
+Graphical user interface for drive tracking. Provides the same functionality as `ft_drives` with a visual interface.
+
+**Features:**
+
+- Browse all tracked drives in a searchable list
+- View detailed drive information including capacity visualization
+- Add new drives with a dialog form
+- Update drive capacity information with one click
+- Mark drives as verified
+- Real-time search filtering
+- Visual progress bar showing disk usage
+
+**Usage:**
+
+```sh
+ft_drives_gui
+```
+
+The GUI provides:
+- **Left panel:** Searchable list of all drives showing name, capacity, and description
+- **Right panel:** Detailed information for the selected drive including:
+  - Drive name
+  - Capacity usage with visual progress bar
+  - Storage statistics (capacity, used, available)
+  - Description and storage container location
+  - Last updated and verified timestamps
+  - Action buttons for updating and verifying
+
+**Requirements:** GTK4 (install via `brew install gtk4` on macOS)
+
 ## Storage Layout
 
 | Path | Contents |
@@ -139,7 +335,7 @@ ft_find_dupes -d database_name [-v]
 Requires GCC, OpenSSL 3, SQLite3, and pthreads.
 
 ```sh
-make          # build all three tools
+make          # build all tools
 make install  # copy binaries to ~/bin
 make clean    # remove build artifacts
 ```
@@ -153,11 +349,13 @@ On macOS the Makefile automatically picks up Homebrew paths for OpenSSL and SQLi
 | OpenSSL (`libssl`, `libcrypto`) | SHA-256 hashing |
 | SQLite3 | File metadata storage |
 | pthreads | Multi-path parallel scanning |
+| GTK4 (optional) | GUI for ft_drives_gui, file_tracker_gui, and ft_summary_gui |
 
 **macOS (Homebrew):**
 
 ```sh
 brew install openssl@3 sqlite
+brew install gtk4  # Optional, for GUI
 ```
 
 **Debian/Ubuntu:**

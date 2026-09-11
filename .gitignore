@@ -3,6 +3,10 @@ file_tracker
 ft_summary
 ft_logs
 ft_find_dupes
+ft_drives
+ft_drives_gui
+file_tracker_gui
+ft_summary_gui
 
 # Prerequisites
 *.d
