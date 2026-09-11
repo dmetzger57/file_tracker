@@ -37,6 +37,7 @@ The application uses a two-panel layout:
 
 **Right Panel Actions** (when drive selected):
 - **Update Drive Info** - Refresh capacity information if drive is mounted
+- **Edit Drive** - Manually edit description, capacity, and container fields
 - **Mark as Verified** - Update the last verified timestamp
 - **Delete Drive** - Remove drive from tracking (requires confirmation)
 
@@ -105,6 +106,31 @@ Use this after running `file_tracker` with checksum verification:
 2. In the GUI, select the drive
 3. Click **Mark as Verified**
 4. The "Last Verified" timestamp is updated
+
+### Editing Drive Information
+
+Manually edit drive details including description, capacity, and storage location:
+
+1. Select a drive from the list
+2. Click **Edit Drive** button
+3. The edit dialog appears with current values pre-filled:
+   - **Drive Name** (read-only, displayed at top)
+   - **Description** - Edit the drive's purpose/contents description
+   - **Container** - Edit the physical storage location
+   - **Capacity (GB)** - Manually set drive capacity in gigabytes
+   - **Used (GB)** - Manually set used space in gigabytes
+   - **Available (GB)** - Manually set available space in gigabytes
+4. Modify any fields you want to change
+5. Click **Save** to update, or **Cancel** to discard changes
+6. The drive details refresh to show updated information
+
+**Use Cases:**
+- Edit description or container without affecting capacity
+- Set capacity values for unmounted drives
+- Correct capacity information without mounting the drive
+- Update all fields at once
+
+**Note:** Leaving capacity fields empty preserves existing values. Only fields with values are updated in the database.
 
 ### Deleting a Drive
 

@@ -590,6 +590,260 @@ void on_add_drive_clicked(GtkButton *button, gpointer user_data) {
     gtk_window_present(GTK_WINDOW(dialog));
 }
 
+// Structure to hold edit dialog data
+typedef struct {
+    GtkWidget *desc_entry;
+    GtkWidget *container_entry;
+    GtkWidget *capacity_entry;
+    GtkWidget *used_entry;
+    GtkWidget *available_entry;
+    GtkWidget *dialog;
+    char drive_name[256];
+} EditDialogData;
+
+// OK button callback for edit drive dialog
+void on_edit_ok_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    EditDialogData *data = (EditDialogData *)user_data;
+
+    const char *description = gtk_editable_get_text(GTK_EDITABLE(data->desc_entry));
+    const char *container = gtk_editable_get_text(GTK_EDITABLE(data->container_entry));
+    const char *capacity_str = gtk_editable_get_text(GTK_EDITABLE(data->capacity_entry));
+    const char *used_str = gtk_editable_get_text(GTK_EDITABLE(data->used_entry));
+    const char *available_str = gtk_editable_get_text(GTK_EDITABLE(data->available_entry));
+
+    // Convert GB to bytes
+    long long capacity = 0, used = 0, available = 0;
+    int update_capacity = 0;
+
+    if (strlen(capacity_str) > 0 || strlen(used_str) > 0 || strlen(available_str) > 0) {
+        capacity = (long long)(atof(capacity_str) * 1024.0 * 1024.0 * 1024.0);
+        used = (long long)(atof(used_str) * 1024.0 * 1024.0 * 1024.0);
+        available = (long long)(atof(available_str) * 1024.0 * 1024.0 * 1024.0);
+        update_capacity = 1;
+    }
+
+    char timestamp[64];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    // Build dynamic SQL
+    char sql[1024] = "UPDATE drives SET last_updated = ?";
+    int param_idx = 2;
+
+    if (update_capacity) {
+        strcat(sql, ", capacity = ?, space_available = ?, space_used = ?");
+    }
+    if (strlen(description) > 0) {
+        strcat(sql, ", description = ?");
+    }
+    if (strlen(container) > 0) {
+        strcat(sql, ", storage_container = ?");
+    }
+    strcat(sql, " WHERE drive_name = ?;");
+
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, timestamp, -1, SQLITE_STATIC);
+
+        if (update_capacity) {
+            sqlite3_bind_int64(stmt, param_idx++, capacity);
+            sqlite3_bind_int64(stmt, param_idx++, available);
+            sqlite3_bind_int64(stmt, param_idx++, used);
+        }
+        if (strlen(description) > 0) {
+            sqlite3_bind_text(stmt, param_idx++, description, -1, SQLITE_STATIC);
+        }
+        if (strlen(container) > 0) {
+            sqlite3_bind_text(stmt, param_idx++, container, -1, SQLITE_STATIC);
+        }
+        sqlite3_bind_text(stmt, param_idx, data->drive_name, -1, SQLITE_STATIC);
+
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+
+        if (rc == SQLITE_DONE) {
+            refresh_drives_list(NULL);
+            show_drive_details(data->drive_name);
+
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Drive '%s' updated successfully", data->drive_name);
+
+            GtkAlertDialog *alert = gtk_alert_dialog_new(msg);
+            gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+            g_object_unref(alert);
+        }
+    }
+
+    gtk_window_close(GTK_WINDOW(data->dialog));
+}
+
+// Cleanup callback for edit drive dialog
+void on_edit_dialog_destroy(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    g_free(user_data);
+}
+
+void on_edit_drive_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+
+    if (strlen(current_drive_name) == 0) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a drive first");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        return;
+    }
+
+    // Query current drive data
+    const char *sql = "SELECT description, storage_container, capacity, space_used, space_available FROM drives WHERE drive_name = ?;";
+    sqlite3_stmt *stmt;
+
+    char current_desc[MAX_DESC] = "";
+    char current_container[MAX_CONTAINER] = "";
+    double current_capacity_gb = 0.0;
+    double current_used_gb = 0.0;
+    double current_available_gb = 0.0;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, current_drive_name, -1, SQLITE_STATIC);
+
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *desc = (const char *)sqlite3_column_text(stmt, 0);
+            const char *cont = (const char *)sqlite3_column_text(stmt, 1);
+            long long capacity = sqlite3_column_int64(stmt, 2);
+            long long used = sqlite3_column_int64(stmt, 3);
+            long long available = sqlite3_column_int64(stmt, 4);
+
+            if (desc) strncpy(current_desc, desc, sizeof(current_desc) - 1);
+            if (cont) strncpy(current_container, cont, sizeof(current_container) - 1);
+
+            if (capacity > 0) current_capacity_gb = (double)capacity / (1024.0 * 1024.0 * 1024.0);
+            if (used > 0) current_used_gb = (double)used / (1024.0 * 1024.0 * 1024.0);
+            if (available > 0) current_available_gb = (double)available / (1024.0 * 1024.0 * 1024.0);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // Create edit dialog
+    GtkWidget *dialog = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), "Edit Drive");
+    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(window));
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 450, 300);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
+    gtk_widget_set_margin_start(box, 16);
+    gtk_widget_set_margin_end(box, 16);
+    gtk_widget_set_margin_top(box, 16);
+    gtk_widget_set_margin_bottom(box, 16);
+
+    // Drive name (read-only display)
+    GtkWidget *name_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *name_label = gtk_label_new("Drive Name:");
+    gtk_widget_add_css_class(name_label, "dim-label");
+    GtkWidget *name_value = gtk_label_new(current_drive_name);
+    gtk_widget_add_css_class(name_value, "title-3");
+    gtk_box_append(GTK_BOX(name_box), name_label);
+    gtk_box_append(GTK_BOX(name_box), name_value);
+    gtk_box_append(GTK_BOX(box), name_box);
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
+
+    int row = 0;
+
+    // Description
+    GtkWidget *desc_label = gtk_label_new("Description:");
+    gtk_label_set_xalign(GTK_LABEL(desc_label), 1.0);
+    GtkWidget *desc_entry = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(desc_entry), current_desc);
+    gtk_widget_set_hexpand(desc_entry, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), desc_label, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), desc_entry, 1, row++, 1, 1);
+
+    // Container
+    GtkWidget *container_label = gtk_label_new("Container:");
+    gtk_label_set_xalign(GTK_LABEL(container_label), 1.0);
+    GtkWidget *container_entry = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(container_entry), current_container);
+    gtk_widget_set_hexpand(container_entry, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), container_label, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), container_entry, 1, row++, 1, 1);
+
+    // Capacity (GB)
+    GtkWidget *capacity_label = gtk_label_new("Capacity (GB):");
+    gtk_label_set_xalign(GTK_LABEL(capacity_label), 1.0);
+    GtkWidget *capacity_entry = gtk_entry_new();
+    if (current_capacity_gb > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f", current_capacity_gb);
+        gtk_editable_set_text(GTK_EDITABLE(capacity_entry), buf);
+    }
+    gtk_widget_set_hexpand(capacity_entry, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), capacity_label, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), capacity_entry, 1, row++, 1, 1);
+
+    // Used (GB)
+    GtkWidget *used_label = gtk_label_new("Used (GB):");
+    gtk_label_set_xalign(GTK_LABEL(used_label), 1.0);
+    GtkWidget *used_entry = gtk_entry_new();
+    if (current_used_gb > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f", current_used_gb);
+        gtk_editable_set_text(GTK_EDITABLE(used_entry), buf);
+    }
+    gtk_widget_set_hexpand(used_entry, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), used_label, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), used_entry, 1, row++, 1, 1);
+
+    // Available (GB)
+    GtkWidget *available_label = gtk_label_new("Available (GB):");
+    gtk_label_set_xalign(GTK_LABEL(available_label), 1.0);
+    GtkWidget *available_entry = gtk_entry_new();
+    if (current_available_gb > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f", current_available_gb);
+        gtk_editable_set_text(GTK_EDITABLE(available_entry), buf);
+    }
+    gtk_widget_set_hexpand(available_entry, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), available_label, 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), available_entry, 1, row++, 1, 1);
+
+    gtk_box_append(GTK_BOX(box), grid);
+
+    // Button box
+    GtkWidget *button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(button_box, GTK_ALIGN_END);
+
+    GtkWidget *cancel_button = gtk_button_new_with_label("Cancel");
+    GtkWidget *ok_button = gtk_button_new_with_label("Save");
+    gtk_widget_add_css_class(ok_button, "suggested-action");
+
+    // Store data for callback
+    EditDialogData *data = g_malloc(sizeof(EditDialogData));
+    data->desc_entry = desc_entry;
+    data->container_entry = container_entry;
+    data->capacity_entry = capacity_entry;
+    data->used_entry = used_entry;
+    data->available_entry = available_entry;
+    data->dialog = dialog;
+    strncpy(data->drive_name, current_drive_name, sizeof(data->drive_name) - 1);
+
+    g_signal_connect_swapped(cancel_button, "clicked", G_CALLBACK(gtk_window_close), dialog);
+    g_signal_connect(ok_button, "clicked", G_CALLBACK(on_edit_ok_clicked), data);
+    g_signal_connect(dialog, "destroy", G_CALLBACK(on_edit_dialog_destroy), data);
+
+    gtk_box_append(GTK_BOX(button_box), cancel_button);
+    gtk_box_append(GTK_BOX(button_box), ok_button);
+
+    gtk_box_append(GTK_BOX(box), button_box);
+
+    gtk_window_set_child(GTK_WINDOW(dialog), box);
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
 void on_update_drive_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
@@ -995,6 +1249,10 @@ void activate(GtkApplication *app, gpointer user_data) {
     GtkWidget *update_button = gtk_button_new_with_label("Update Drive Info");
     g_signal_connect(update_button, "clicked", G_CALLBACK(on_update_drive_clicked), NULL);
     gtk_box_append(GTK_BOX(action_box), update_button);
+
+    GtkWidget *edit_button = gtk_button_new_with_label("Edit Drive");
+    g_signal_connect(edit_button, "clicked", G_CALLBACK(on_edit_drive_clicked), NULL);
+    gtk_box_append(GTK_BOX(action_box), edit_button);
 
     GtkWidget *verify_button = gtk_button_new_with_label("Mark as Verified");
     g_signal_connect(verify_button, "clicked", G_CALLBACK(on_verify_drive_clicked), NULL);

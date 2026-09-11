@@ -310,7 +310,8 @@ Graphical user interface for drive tracking. Provides the same functionality as 
 - Browse all tracked drives in a searchable list
 - View detailed drive information including capacity visualization
 - Add new drives with a dialog form
-- Update drive capacity information with one click
+- Edit drive details (description, capacity, container) with a dialog form
+- Update drive capacity information with one click (auto-detect from mounted drives)
 - Mark drives as verified
 - Real-time search filtering
 - Visual progress bar showing disk usage
