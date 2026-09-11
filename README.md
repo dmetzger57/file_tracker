@@ -290,6 +290,8 @@ ft_drives delete BackupDrive2024
 
 **Database:** Drive information is stored in `~/db/FileTracker/drives.db`.
 
+**Auto-Discovery:** Automatically discovers and adds drives from existing file_tracker databases on startup. Click "Sync from Databases" to manually trigger discovery.
+
 ### ft_drives_gui
 
 Graphical user interface for drive tracking. Provides the same functionality as `ft_drives` with a visual interface.

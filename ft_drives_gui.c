@@ -128,6 +128,100 @@ int init_database(void) {
 
 // ==== Database Operations ====
 
+// Check if drive exists in drives database
+int drive_exists(sqlite3 *db, const char *drive_name) {
+    const char *sql = "SELECT COUNT(*) FROM drives WHERE drive_name = ?;";
+    sqlite3_stmt *stmt;
+    int exists = 0;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            exists = sqlite3_column_int(stmt, 0) > 0;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return exists;
+}
+
+// Auto-add drive from file_tracker database
+void auto_add_drive(sqlite3 *db, const char *drive_name) {
+    char timestamp[64];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    // Try to find mount point and get capacity
+    char mount_path[MAX_PATH];
+    long long capacity = 0, available = 0, used = 0;
+    int mounted = 0;
+
+    if (find_mount_point(drive_name, mount_path, sizeof(mount_path))) {
+        mounted = get_drive_stats(mount_path, &capacity, &available, &used);
+    }
+
+    const char *sql = "INSERT INTO drives (drive_name, capacity, space_available, space_used, "
+                      "description, last_updated, storage_container) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?);";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
+
+        if (mounted) {
+            sqlite3_bind_int64(stmt, 2, capacity);
+            sqlite3_bind_int64(stmt, 3, available);
+            sqlite3_bind_int64(stmt, 4, used);
+        } else {
+            sqlite3_bind_null(stmt, 2);
+            sqlite3_bind_null(stmt, 3);
+            sqlite3_bind_null(stmt, 4);
+        }
+
+        sqlite3_bind_text(stmt, 5, "Auto-discovered from file_tracker database", -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 6, timestamp, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 7, "", -1, SQLITE_STATIC);
+
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+// Sync drives from file_tracker databases
+int sync_from_databases(sqlite3 *db) {
+    const char *home = getenv("HOME");
+    if (!home) return 0;
+
+    char db_dir[MAX_PATH];
+    snprintf(db_dir, sizeof(db_dir), "%s/db/FileTracker", home);
+
+    DIR *dir = opendir(db_dir);
+    if (!dir) return 0;
+
+    int added_count = 0;
+    struct dirent *entry;
+
+    while ((entry = readdir(dir)) != NULL) {
+        // Skip if not a .db file or if it's drives.db itself
+        if (!strstr(entry->d_name, ".db")) continue;
+        if (strcmp(entry->d_name, "drives.db") == 0) continue;
+
+        // Extract drive name (remove .db extension)
+        char drive_name[256];
+        strncpy(drive_name, entry->d_name, sizeof(drive_name) - 1);
+        char *dot = strrchr(drive_name, '.');
+        if (dot) *dot = '\0';
+
+        // Check if this drive already exists in drives database
+        if (!drive_exists(db, drive_name)) {
+            auto_add_drive(db, drive_name);
+            added_count++;
+        }
+    }
+
+    closedir(dir);
+    return added_count;
+}
+
 // Query file_tracker database for last checksum date
 void get_last_checksum_date(const char *drive_name, char *result, size_t size) {
     const char *home = getenv("HOME");
@@ -672,6 +766,29 @@ void on_refresh_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
+void on_sync_databases_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+
+    int added = sync_from_databases(db);
+
+    if (added > 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Auto-discovered and added %d drive%s from file_tracker databases",
+                 added, added == 1 ? "" : "s");
+
+        GtkAlertDialog *alert = gtk_alert_dialog_new(msg);
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+
+        refresh_drives_list(NULL);
+    } else {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("All file_tracker databases are already tracked");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+    }
+}
+
 // ==== Main Window Setup ====
 
 void activate(GtkApplication *app, gpointer user_data) {
@@ -717,16 +834,26 @@ void activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(left_box), scrolled);
 
     // Button bar
-    GtkWidget *button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_widget_set_halign(button_box, GTK_ALIGN_CENTER);
+    GtkWidget *button_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_halign(button_box, GTK_ALIGN_FILL);
+
+    GtkWidget *top_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_halign(top_buttons, GTK_ALIGN_CENTER);
 
     GtkWidget *add_button = gtk_button_new_with_label("Add Drive");
     g_signal_connect(add_button, "clicked", G_CALLBACK(on_add_drive_clicked), NULL);
-    gtk_box_append(GTK_BOX(button_box), add_button);
+    gtk_box_append(GTK_BOX(top_buttons), add_button);
 
     GtkWidget *refresh_button = gtk_button_new_with_label("Refresh");
     g_signal_connect(refresh_button, "clicked", G_CALLBACK(on_refresh_clicked), NULL);
-    gtk_box_append(GTK_BOX(button_box), refresh_button);
+    gtk_box_append(GTK_BOX(top_buttons), refresh_button);
+
+    gtk_box_append(GTK_BOX(button_box), top_buttons);
+
+    GtkWidget *sync_button = gtk_button_new_with_label("Sync from Databases");
+    gtk_widget_set_halign(sync_button, GTK_ALIGN_CENTER);
+    g_signal_connect(sync_button, "clicked", G_CALLBACK(on_sync_databases_clicked), NULL);
+    gtk_box_append(GTK_BOX(button_box), sync_button);
 
     gtk_box_append(GTK_BOX(left_box), button_box);
 
@@ -887,6 +1014,9 @@ void activate(GtkApplication *app, gpointer user_data) {
 
     // Set paned position after window is shown
     gtk_paned_set_position(GTK_PANED(paned), 380);
+
+    // Auto-sync drives from file_tracker databases on startup
+    sync_from_databases(db);
 
     // Load initial data
     refresh_drives_list(NULL);

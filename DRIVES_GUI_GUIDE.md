@@ -31,8 +31,9 @@ The application uses a two-panel layout:
 ### Toolbar Actions
 
 **Left Panel Toolbar:**
-- **Add Drive** - Opens dialog to add a new drive
+- **Add Drive** - Opens dialog to manually add a new drive
 - **Refresh** - Reload drive list from database
+- **Sync from Databases** - Auto-discover and add drives from file_tracker databases
 
 **Right Panel Actions** (when drive selected):
 - **Update Drive Info** - Refresh capacity information if drive is mounted
@@ -41,7 +42,30 @@ The application uses a two-panel layout:
 
 ## Usage Workflows
 
-### Adding a New Drive
+### Auto-Discovery from file_tracker Databases
+
+The GUI automatically discovers drives that have been scanned with file_tracker:
+
+**Automatic on Startup:**
+- Every time you launch ft_drives_gui, it scans `~/db/FileTracker/` for databases
+- Any database that doesn't have a corresponding drive entry is automatically added
+- This ensures all scanned drives are tracked, even if you never manually added them
+
+**Manual Sync:**
+1. Click **Sync from Databases** button
+2. GUI scans for new file_tracker databases
+3. Shows count of newly discovered drives
+4. Drives are added with description "Auto-discovered from file_tracker database"
+5. If drive is mounted, capacity is auto-detected
+
+**Benefits:**
+- Scan a drive with file_tracker → automatically appears in drives list
+- No manual data entry required
+- Ensures complete tracking of all scanned drives
+
+### Manually Adding a New Drive
+
+If you want to track a drive before scanning it:
 
 1. Click **Add Drive** button
 2. Fill in the form:
