@@ -103,6 +103,8 @@ file_tracker_gui
 
 **Database:** Uses the same schema and storage location as the CLI tool (`~/db/FileTracker/`)
 
+**Drive Tracking Integration:** When "Update Database" is checked, the GUI automatically adds the scanned drive to the drive tracking database (`ft_drives`) if it's not already tracked. Same auto-registration behavior as the CLI tool.
+
 **Requirements:** GTK4 (`brew install gtk4`)
 
 ### file_locator

@@ -180,6 +180,32 @@ Files that couldn't be processed due to:
 - I/O errors
 - Path too long
 
+## Automatic Drive Tracking
+
+When "Update Database" is checked, the GUI automatically registers the scanned drive with the drive tracking system (`ft_drives`).
+
+**What Happens:**
+- After scan completes, checks if drive exists in drive tracker
+- If not found, automatically adds it with:
+  - Drive name from database name
+  - Auto-detected capacity information
+  - Description: "Auto-added by file_tracker_gui"
+  - Current timestamp
+
+**Benefits:**
+- No manual drive registration needed
+- All scanned drives automatically tracked
+- Seamless integration with drive management tools
+- Can edit drive details later with `ft_drives` or `ft_drives_gui`
+
+**Example Workflow:**
+1. Scan external drive "BackupDrive2024" with Update Database checked
+2. Drive is automatically added to drive tracker
+3. View drive info: `ft_drives show BackupDrive2024`
+4. Or manage in `ft_drives_gui`
+
+**Note:** Only happens when "Update Database" is checked. Read-only scans don't add drives.
+
 ## Integration with CLI Tools
 
 The GUI uses the **same database schema** as CLI `file_tracker`, so:
