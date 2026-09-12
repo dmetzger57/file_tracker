@@ -14,6 +14,12 @@
 #define HASH_SIZE 65
 #define MAX_PATH 4096
 
+// Log entry for run_logs table
+typedef struct {
+    char status[32];
+    char path[MAX_PATH];
+} LogEntry;
+
 // Global UI elements
 GtkWidget *window;
 GtkWidget *volumes_list;
@@ -38,9 +44,13 @@ typedef struct {
     int update_mode;
     char note[1024];
     sqlite3 *db;
+    sqlite3_int64 run_id;
     int unchanged, changed, new_files, missing, errors;
     int total_files;
     int should_stop;
+    LogEntry *log_buffer;
+    int log_count;
+    int log_capacity;
     GThread *scan_thread;
 } ScanContext;
 
@@ -57,6 +67,20 @@ void get_timestamp(char *buffer, size_t size) {
 char *get_file_owner(struct stat *sb) {
     struct passwd *pw = getpwuid(sb->st_uid);
     return pw ? pw->pw_name : "unknown";
+}
+
+void log_message(ScanContext *ctx, const char *status, const char *path) {
+    // Buffer log message for database insertion later
+    if (ctx->log_count >= ctx->log_capacity) {
+        ctx->log_capacity = ctx->log_capacity == 0 ? 1024 : ctx->log_capacity * 2;
+        ctx->log_buffer = realloc(ctx->log_buffer, ctx->log_capacity * sizeof(LogEntry));
+    }
+
+    strncpy(ctx->log_buffer[ctx->log_count].status, status, sizeof(ctx->log_buffer[ctx->log_count].status) - 1);
+    ctx->log_buffer[ctx->log_count].status[sizeof(ctx->log_buffer[ctx->log_count].status) - 1] = '\0';
+    strncpy(ctx->log_buffer[ctx->log_count].path, path, sizeof(ctx->log_buffer[ctx->log_count].path) - 1);
+    ctx->log_buffer[ctx->log_count].path[sizeof(ctx->log_buffer[ctx->log_count].path) - 1] = '\0';
+    ctx->log_count++;
 }
 
 int compute_sha256(const char *path, char *output_buffer) {
@@ -223,6 +247,7 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
     struct stat sb;
     if (stat(filepath, &sb) != 0) {
         ctx->errors++;
+        log_message(ctx, "ERROR", filepath);
         g_idle_add(update_progress, ctx);
         return;
     }
@@ -235,6 +260,7 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
 
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, 0) != SQLITE_OK) {
         ctx->errors++;
+        log_message(ctx, "ERROR", filepath);
         g_idle_add(update_progress, ctx);
         return;
     }
@@ -252,6 +278,7 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
         if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
             // File changed
             ctx->changed++;
+            log_message(ctx, "CHANGED", filepath);
 
             if (ctx->update_mode) {
                 char checksum[HASH_SIZE] = "";
@@ -276,8 +303,10 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
             if (compute_sha256(filepath, checksum)) {
                 if (db_checksum && strcmp(checksum, db_checksum) == 0) {
                     ctx->unchanged++;
+                    log_message(ctx, "UNCHANGED", filepath);
                 } else {
                     ctx->changed++;
+                    log_message(ctx, "CHANGED", filepath);
 
                     if (ctx->update_mode) {
                         const char *update_sql = "UPDATE files SET checksum=? WHERE full_path=?;";
@@ -293,10 +322,12 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
             }
         } else {
             ctx->unchanged++;
+            log_message(ctx, "UNCHANGED", filepath);
         }
     } else {
         // New file
         ctx->new_files++;
+        log_message(ctx, "NEW", filepath);
 
         if (ctx->update_mode) {
             char checksum[HASH_SIZE] = "";
@@ -549,6 +580,30 @@ gpointer scan_thread_func(gpointer data) {
             sqlite3_bind_text(stmt, 10, ctx->note, -1, SQLITE_STATIC);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
+        }
+
+        // Get the run_id we just inserted
+        ctx->run_id = sqlite3_last_insert_rowid(ctx->db);
+
+        // Insert buffered log messages into run_logs
+        if (ctx->log_count > 0) {
+            sqlite3_stmt *log_stmt;
+            const char *log_sql = "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)";
+            if (sqlite3_prepare_v2(ctx->db, log_sql, -1, &log_stmt, 0) == SQLITE_OK) {
+                for (int i = 0; i < ctx->log_count; i++) {
+                    sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
+                    sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
+                    sqlite3_step(log_stmt);
+                    sqlite3_reset(log_stmt);
+                }
+                sqlite3_finalize(log_stmt);
+            }
+
+            free(ctx->log_buffer);
+            ctx->log_buffer = NULL;
+            ctx->log_count = 0;
+            ctx->log_capacity = 0;
         }
 
         // Auto-add drive to drive tracker
