@@ -54,3 +54,6 @@ install:
 	@if [ -f file_tracker_gui ]; then mv file_tracker_gui ${HOME}/bin; fi
 	@if [ -f ft_summary_gui ]; then mv ft_summary_gui ${HOME}/bin; fi
 	@if [ -f ft_logs_gui ]; then mv ft_logs_gui ${HOME}/bin; fi
+
+apps: file_tracker_gui ft_summary_gui ft_drives_gui ft_logs_gui
+	./create_app_bundles.sh
