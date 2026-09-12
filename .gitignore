@@ -4,6 +4,7 @@ file_tracker
 file_tracker_lastrun
 ft_summary
 ft_logs
+ft_logs_gui
 ft_find_dupes
 ft_drives
 ft_drives_gui
