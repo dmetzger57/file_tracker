@@ -15,22 +15,16 @@ create_app_bundle() {
     # Copy executable to Resources
     cp "$EXECUTABLE" "${APP_NAME}.app/Contents/Resources/"
 
-    # Create wrapper script that launches without terminal
-    cat > "${APP_NAME}.app/Contents/MacOS/launcher" << 'LAUNCHER'
-#!/bin/bash
-# Get the directory containing this script
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-# Launch the actual executable from Resources, redirect output to /dev/null
-exec "$DIR/../Resources/EXECUTABLE_PLACEHOLDER" > /dev/null 2>&1
-LAUNCHER
+    # Create a customized launcher.c for this app
+    sed "s/APP_EXECUTABLE/$EXECUTABLE/g" launcher.c > "${APP_NAME}.app/Contents/MacOS/launcher_temp.c"
 
-    # Replace placeholder with actual executable name
-    sed -i '' "s/EXECUTABLE_PLACEHOLDER/$EXECUTABLE/g" "${APP_NAME}.app/Contents/MacOS/launcher"
+    # Compile the C wrapper
+    gcc -o "${APP_NAME}.app/Contents/MacOS/launcher" "${APP_NAME}.app/Contents/MacOS/launcher_temp.c"
 
-    # Make launcher executable
-    chmod +x "${APP_NAME}.app/Contents/MacOS/launcher"
+    # Remove temporary source file
+    rm "${APP_NAME}.app/Contents/MacOS/launcher_temp.c"
 
-    # Create Info.plist - point to the wrapper launcher
+    # Create Info.plist - point to the compiled launcher
     cat > "${APP_NAME}.app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -54,8 +48,6 @@ LAUNCHER
     <string>10.15</string>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <key>LSUIElement</key>
-    <false/>
 </dict>
 </plist>
 PLIST
