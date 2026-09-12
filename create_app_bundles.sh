@@ -15,14 +15,14 @@ create_app_bundle() {
     # Copy executable to Resources
     cp "$EXECUTABLE" "${APP_NAME}.app/Contents/Resources/"
 
-    # Create a customized launcher.c for this app
-    sed "s/APP_EXECUTABLE/$EXECUTABLE/g" launcher.c > "${APP_NAME}.app/Contents/MacOS/launcher_temp.c"
+    # Create a customized launcher.m for this app
+    sed "s/APP_EXECUTABLE/$EXECUTABLE/g" launcher.m > "${APP_NAME}.app/Contents/MacOS/launcher_temp.m"
 
-    # Compile the C wrapper
-    gcc -o "${APP_NAME}.app/Contents/MacOS/launcher" "${APP_NAME}.app/Contents/MacOS/launcher_temp.c"
+    # Compile the Objective-C wrapper with Cocoa framework
+    clang -framework Cocoa -o "${APP_NAME}.app/Contents/MacOS/launcher" "${APP_NAME}.app/Contents/MacOS/launcher_temp.m"
 
     # Remove temporary source file
-    rm "${APP_NAME}.app/Contents/MacOS/launcher_temp.c"
+    rm "${APP_NAME}.app/Contents/MacOS/launcher_temp.m"
 
     # Create Info.plist - point to the compiled launcher
     cat > "${APP_NAME}.app/Contents/Info.plist" << PLIST
