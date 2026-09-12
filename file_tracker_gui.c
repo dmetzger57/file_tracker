@@ -141,15 +141,18 @@ int init_database(sqlite3 *db) {
 gboolean update_progress(gpointer data) {
     ScanContext *ctx = (ScanContext *)data;
 
+    int processed = ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors;
+    int remaining = ctx->total_files > processed ? ctx->total_files - processed : 0;
+
     if (ctx->total_files > 0) {
-        double fraction = (double)(ctx->unchanged + ctx->changed +
-                                   ctx->new_files + ctx->missing + ctx->errors) / ctx->total_files;
+        double fraction = (double)processed / ctx->total_files;
         gtk_progress_bar_set_fraction(progress_bar, fraction);
     }
 
-    char status[256];
+    char status[512];
     snprintf(status, sizeof(status),
-             "Unchanged: %d | Changed: %d | New: %d | Missing: %d | Errors: %d",
+             "Total: %d | Processed: %d | Remaining: %d | Unchanged: %d | Changed: %d | New: %d | Missing: %d | Errors: %d",
+             ctx->total_files, processed, remaining,
              ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->errors);
     gtk_label_set_text(GTK_LABEL(status_label), status);
 
