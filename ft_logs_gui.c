@@ -472,8 +472,8 @@ void activate(GtkApplication *app, gpointer user_data) {
     run_info_text = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(run_info_text), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(run_info_text), TRUE);
-    gtk_widget_set_size_request(run_info_text, -1, 200);
     GtkWidget *info_scroll = gtk_scrolled_window_new();
+    gtk_widget_set_size_request(info_scroll, -1, 200);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(info_scroll), run_info_text);
     gtk_box_append(GTK_BOX(right_box), info_scroll);
 
