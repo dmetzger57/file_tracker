@@ -123,7 +123,7 @@ void load_runs_list(const char *db_name) {
     const char *query =
         "SELECT id, "
         "COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
-        "verify_machine, num_unchanged, num_changed, num_new, num_missing, "
+        "verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, "
         "update_mode, note "
         "FROM meta ORDER BY id DESC";
 
@@ -143,8 +143,9 @@ void load_runs_list(const char *db_name) {
         int changed = sqlite3_column_int(stmt, 4);
         int new = sqlite3_column_int(stmt, 5);
         int missing = sqlite3_column_int(stmt, 6);
-        const char *update_mode = (const char *)sqlite3_column_text(stmt, 7);
-        const char *note = (const char *)sqlite3_column_text(stmt, 8);
+        int ignored = sqlite3_column_int(stmt, 7);
+        const char *update_mode = (const char *)sqlite3_column_text(stmt, 8);
+        const char *note = (const char *)sqlite3_column_text(stmt, 9);
 
         char run_id[128];
         format_run_identifier(run_id, sizeof(run_id), db_name, run_date, id);
@@ -164,8 +165,8 @@ void load_runs_list(const char *db_name) {
 
         // Stats
         char stats[256];
-        snprintf(stats, sizeof(stats), "U:%d C:%d N:%d M:%d on %s%s%s",
-                unchanged, changed, new, missing,
+        snprintf(stats, sizeof(stats), "U:%d C:%d N:%d M:%d I:%d on %s%s%s",
+                unchanged, changed, new, missing, ignored,
                 machine ? machine : "N/A",
                 update_mode && strcmp(update_mode, "OFF") == 0 ? " [RO]" : "",
                 note && strlen(note) > 0 ? " 📝" : "");
@@ -202,7 +203,7 @@ void load_run_details(sqlite3_int64 run_id) {
 
     // Get run information
     const char *query =
-        "SELECT id, verify_machine, num_unchanged, num_changed, num_new, num_missing, "
+        "SELECT id, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, "
         "COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
         "update_mode, note "
         "FROM meta WHERE id = ? LIMIT 1";
@@ -221,9 +222,10 @@ void load_run_details(sqlite3_int64 run_id) {
         int changed = sqlite3_column_int(stmt, 3);
         int new = sqlite3_column_int(stmt, 4);
         int missing = sqlite3_column_int(stmt, 5);
-        const char *run_date = (const char *)sqlite3_column_text(stmt, 6);
-        const char *update_mode = (const char *)sqlite3_column_text(stmt, 7);
-        const char *note = (const char *)sqlite3_column_text(stmt, 8);
+        int ignored = sqlite3_column_int(stmt, 6);
+        const char *run_date = (const char *)sqlite3_column_text(stmt, 7);
+        const char *update_mode = (const char *)sqlite3_column_text(stmt, 8);
+        const char *note = (const char *)sqlite3_column_text(stmt, 9);
 
         // Format run info
         char info[1024];
@@ -236,12 +238,13 @@ void load_run_details(sqlite3_int64 run_id) {
                  "Changed        : %d\n"
                  "New            : %d\n"
                  "Missing        : %d\n"
+                 "Ignored        : %d\n"
                  "Total          : %d",
                  run_id,
                  run_date ? run_date : "Unknown",
                  machine ? machine : "N/A",
                  update_mode ? update_mode : "N/A",
-                 unchanged, changed, new, missing,
+                 unchanged, changed, new, missing, ignored,
                  unchanged + changed + new + missing);
 
         GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(run_info_text));

@@ -57,18 +57,18 @@ void print_separator(int width) {
 
 void print_compact_header() {
     printf("\n");
-    print_separator(115);
-    printf("%-6s | %-19s | %-6s | %-8s | %10s | %10s | %10s | %10s | %8s\n",
-           "Run #", "Run Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Errors");
-    print_separator(115);
+    print_separator(128);
+    printf("%-6s | %-19s | %-6s | %-8s | %10s | %10s | %10s | %10s | %10s | %8s\n",
+           "Run #", "Run Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Ignored", "Errors");
+    print_separator(128);
 }
 
 void print_multi_db_header() {
     printf("\n");
-    print_separator(132);
-    printf("%-20s | %-6s | %-19s | %-6s | %-8s | %10s | %10s | %10s | %10s | %8s\n",
-           "Database", "Run #", "Run Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Errors");
-    print_separator(132);
+    print_separator(145);
+    printf("%-20s | %-6s | %-19s | %-6s | %-8s | %10s | %10s | %10s | %10s | %10s | %8s\n",
+           "Database", "Run #", "Run Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Ignored", "Errors");
+    print_separator(145);
 }
 
 void print_compact_row(sqlite3_stmt *stmt) {
@@ -79,8 +79,9 @@ void print_compact_row(sqlite3_stmt *stmt) {
     int changed = sqlite3_column_int(stmt, 5);
     int new_files = sqlite3_column_int(stmt, 6);
     int missing = sqlite3_column_int(stmt, 7);
-    int errors = sqlite3_column_int(stmt, 8);
-    const char *update_mode = (const char *)sqlite3_column_text(stmt, 9);
+    int ignored = sqlite3_column_int(stmt, 8);
+    int errors = sqlite3_column_int(stmt, 9);
+    const char *update_mode = (const char *)sqlite3_column_text(stmt, 10);
 
     // Determine run date and checksum status
     const char *run_date;
@@ -99,9 +100,9 @@ void print_compact_row(sqlite3_stmt *stmt) {
         update_status = "On";
     }
 
-    printf("%-6d | %-19s | %-6s | %-8s | %'10d | %'10d | %'10d | %'10d | %'8d\n",
+    printf("%-6d | %-19s | %-6s | %-8s | %'10d | %'10d | %'10d | %'10d | %'10d | %'8d\n",
            id, run_date, update_status, checksum_status,
-           unchanged, changed, new_files, missing, errors);
+           unchanged, changed, new_files, missing, ignored, errors);
 }
 
 void print_multi_db_row(const char *db_name, sqlite3_stmt *stmt) {
@@ -112,8 +113,9 @@ void print_multi_db_row(const char *db_name, sqlite3_stmt *stmt) {
     int changed = sqlite3_column_int(stmt, 5);
     int new_files = sqlite3_column_int(stmt, 6);
     int missing = sqlite3_column_int(stmt, 7);
-    int errors = sqlite3_column_int(stmt, 8);
-    const char *update_mode = (const char *)sqlite3_column_text(stmt, 9);
+    int ignored = sqlite3_column_int(stmt, 8);
+    int errors = sqlite3_column_int(stmt, 9);
+    const char *update_mode = (const char *)sqlite3_column_text(stmt, 10);
 
     // Determine run date and checksum status
     const char *run_date;
@@ -132,9 +134,9 @@ void print_multi_db_row(const char *db_name, sqlite3_stmt *stmt) {
         update_status = "On";
     }
 
-    printf("%-20s | %-6d | %-19s | %-6s | %-8s | %'10d | %'10d | %'10d | %'10d | %'8d\n",
+    printf("%-20s | %-6d | %-19s | %-6s | %-8s | %'10d | %'10d | %'10d | %'10d | %'10d | %'8d\n",
            db_name, id, run_date, update_status, checksum_status,
-           unchanged, changed, new_files, missing, errors);
+           unchanged, changed, new_files, missing, ignored, errors);
 }
 
 void print_notes_header() {
@@ -277,11 +279,11 @@ int process_database(const char *db_name, const char *home, int show_all, int sh
     const char *query;
     if (show_all) {
         query = "SELECT id, last_checksum_verify_date, last_date_verify, verify_machine, "
-                "num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note "
+                "num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, update_mode, note "
                 "FROM meta ORDER BY id ASC";
     } else {
         query = "SELECT id, last_checksum_verify_date, last_date_verify, verify_machine, "
-                "num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note "
+                "num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, update_mode, note "
                 "FROM meta ORDER BY id DESC LIMIT 1";
     }
 
@@ -348,7 +350,7 @@ int process_database(const char *db_name, const char *home, int show_all, int sh
 
     // Print footer for non-compact modes
     if (!multi_db_compact) {
-        int separator_width = show_notes ? 60 : 115;
+        int separator_width = show_notes ? 60 : 128;
         if (row_count > 0) {
             print_separator(separator_width);
             printf("Total runs: %d\n", row_count);
@@ -545,7 +547,7 @@ int main(int argc, char *argv[]) {
 
     // Print footer for compact format
     if (use_compact) {
-        print_separator(132);
+        print_separator(145);
     } else if (db_count > 1) {
         printf("\n");
     }

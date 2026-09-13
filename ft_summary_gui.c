@@ -78,11 +78,11 @@ void load_run_history(const char *db_name) {
 
     if (all_runs) {
         sql = "SELECT id, last_checksum_verify_date, last_date_verify, num_unchanged, "
-              "num_changed, num_new, num_missing, num_errors, update_mode "
+              "num_changed, num_new, num_missing, num_ignored, num_errors, update_mode "
               "FROM meta ORDER BY id DESC;";
     } else {
         sql = "SELECT id, last_checksum_verify_date, last_date_verify, num_unchanged, "
-              "num_changed, num_new, num_missing, num_errors, update_mode "
+              "num_changed, num_new, num_missing, num_ignored, num_errors, update_mode "
               "FROM meta ORDER BY id DESC LIMIT 1;";
     }
 
@@ -96,8 +96,9 @@ void load_run_history(const char *db_name) {
             int changed = sqlite3_column_int(stmt, 4);
             int new_files = sqlite3_column_int(stmt, 5);
             int missing = sqlite3_column_int(stmt, 6);
-            int errors = sqlite3_column_int(stmt, 7);
-            const char *update_mode = (const char *)sqlite3_column_text(stmt, 8);
+            int ignored = sqlite3_column_int(stmt, 7);
+            int errors = sqlite3_column_int(stmt, 8);
+            const char *update_mode = (const char *)sqlite3_column_text(stmt, 9);
 
             const char *run_date;
             const char *checksum_status;
@@ -125,7 +126,8 @@ void load_run_history(const char *db_name) {
                               5, changed,
                               6, new_files,
                               7, missing,
-                              8, errors,
+                              8, ignored,
+                              9, errors,
                               -1);
         }
         sqlite3_finalize(stmt);
@@ -226,9 +228,10 @@ void load_run_details(const char *db_name, int run_id) {
             int changed = sqlite3_column_int(stmt, 5);
             int new_files = sqlite3_column_int(stmt, 6);
             int missing = sqlite3_column_int(stmt, 7);
-            int errors = sqlite3_column_int(stmt, 8);
-            const char *update_mode = (const char *)sqlite3_column_text(stmt, 9);
-            const char *note = (const char *)sqlite3_column_text(stmt, 10);
+            int ignored = sqlite3_column_int(stmt, 8);
+            int errors = sqlite3_column_int(stmt, 9);
+            const char *update_mode = (const char *)sqlite3_column_text(stmt, 10);
+            const char *note = (const char *)sqlite3_column_text(stmt, 11);
 
             g_string_append_printf(details, "Run #%d Details\n", id);
             g_string_append(details, "═══════════════════════════════════════\n\n");
@@ -253,6 +256,7 @@ void load_run_details(const char *db_name, int run_id) {
             g_string_append_printf(details, "  Changed:      %'10d files\n", changed);
             g_string_append_printf(details, "  New:          %'10d files\n", new_files);
             g_string_append_printf(details, "  Missing:      %'10d files\n", missing);
+            g_string_append_printf(details, "  Ignored:      %'10d files\n", ignored);
             g_string_append_printf(details, "  Errors:       %'10d files\n", errors);
             g_string_append(details, "───────────────────────────────────────\n");
             g_string_append_printf(details, "  Total:        %'10d files\n",
@@ -472,7 +476,7 @@ void activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(left_box), runs_label);
 
     // Create tree view
-    GtkListStore *store = gtk_list_store_new(9,
+    GtkListStore *store = gtk_list_store_new(10,
                                              G_TYPE_INT,    // Run #
                                              G_TYPE_STRING, // Date
                                              G_TYPE_STRING, // Update
@@ -481,6 +485,7 @@ void activate(GtkApplication *app, gpointer user_data) {
                                              G_TYPE_INT,    // Changed
                                              G_TYPE_INT,    // New
                                              G_TYPE_INT,    // Missing
+                                             G_TYPE_INT,    // Ignored
                                              G_TYPE_INT);   // Errors
 
     runs_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
@@ -490,8 +495,8 @@ void activate(GtkApplication *app, gpointer user_data) {
     GtkCellRenderer *renderer;
     GtkTreeViewColumn *column;
 
-    const char *titles[] = {"Run #", "Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Errors"};
-    for (int i = 0; i < 9; i++) {
+    const char *titles[] = {"Run #", "Date", "Update", "Checksum", "Unchanged", "Changed", "New", "Missing", "Ignored", "Errors"};
+    for (int i = 0; i < 10; i++) {
         renderer = gtk_cell_renderer_text_new();
         column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);

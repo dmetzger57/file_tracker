@@ -152,7 +152,7 @@ int main(int argc, char *argv[]) {
         const char *list_query =
             "SELECT id, "
             "COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
-            "verify_machine, num_unchanged, num_changed, num_new, num_missing, "
+            "verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, "
             "update_mode, note "
             "FROM meta ORDER BY id DESC";
 
@@ -163,7 +163,7 @@ int main(int argc, char *argv[]) {
         }
 
         printf("================ ALL RUNS IN DATABASE ================\n");
-        printf("%-42s %-15s %s\n", "Run Identifier", "Machine", "U/C/N/M");
+        printf("%-42s %-15s %s\n", "Run Identifier", "Machine", "U/C/N/M/I");
         printf("======================================================\n");
 
         int count = 0;
@@ -175,8 +175,9 @@ int main(int argc, char *argv[]) {
             int changed = sqlite3_column_int(stmt, 4);
             int new = sqlite3_column_int(stmt, 5);
             int missing = sqlite3_column_int(stmt, 6);
-            const char *update_mode = (const char *)sqlite3_column_text(stmt, 7);
-            const char *note = (const char *)sqlite3_column_text(stmt, 8);
+            int ignored = sqlite3_column_int(stmt, 7);
+            const char *update_mode = (const char *)sqlite3_column_text(stmt, 8);
+            const char *note = (const char *)sqlite3_column_text(stmt, 9);
 
             // Format run identifier: dbname-YYYY-MM-DD-HH-MM-SS
             char run_id[128];
@@ -195,10 +196,10 @@ int main(int argc, char *argv[]) {
             }
 
             // Format: Run ID, Machine, Stats
-            printf("%-42s %-15s %d/%d/%d/%d",
+            printf("%-42s %-15s %d/%d/%d/%d/%d",
                    run_id,
                    machine ? machine : "N/A",
-                   unchanged, changed, new, missing);
+                   unchanged, changed, new, missing, ignored);
 
             // Add update mode indicator
             if (update_mode && strcmp(update_mode, "OFF") == 0) {
@@ -216,7 +217,7 @@ int main(int argc, char *argv[]) {
 
         printf("======================================================\n");
         printf("Total runs: %d\n", count);
-        printf("\nLegend: U/C/N/M = Unchanged/Changed/New/Missing\n");
+        printf("\nLegend: U/C/N/M/I = Unchanged/Changed/New/Missing/Ignored\n");
         printf("        [RO] = Read-only mode (update mode OFF)\n");
         printf("\nUse the Run Identifier with -r option to view logs:\n");
         printf("  Example: %s -d %s -r <run_identifier>\n", argv[0], db_name);
@@ -277,7 +278,7 @@ int main(int argc, char *argv[]) {
     // Find the run_id matching the datetime
     sqlite3_stmt *stmt;
     const char *find_run_query =
-        "SELECT id, verify_machine, num_unchanged, num_changed, num_new, num_missing, "
+        "SELECT id, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, "
         "COALESCE(last_checksum_verify_date, last_date_verify) as run_date "
         "FROM meta WHERE run_date = ? LIMIT 1";
 
@@ -298,7 +299,8 @@ int main(int argc, char *argv[]) {
         int changed = sqlite3_column_int(stmt, 3);
         int new = sqlite3_column_int(stmt, 4);
         int missing = sqlite3_column_int(stmt, 5);
-        const char *run_date = (const char *)sqlite3_column_text(stmt, 6);
+        int ignored = sqlite3_column_int(stmt, 6);
+        const char *run_date = (const char *)sqlite3_column_text(stmt, 7);
 
         // Show run information if no filters are specified or if summary_only is requested
         if (show_all || summary_only) {
@@ -310,6 +312,7 @@ int main(int argc, char *argv[]) {
             printf("Changed        : %d\n", changed);
             printf("New            : %d\n", new);
             printf("Missing        : %d\n", missing);
+            printf("Ignored        : %d\n", ignored);
             printf("==================================================\n\n");
         }
 

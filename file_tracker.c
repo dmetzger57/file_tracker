@@ -320,7 +320,7 @@ void *path_worker(void *arg) {
     sqlite3_busy_timeout(ctx->db, 30000);  // Increased timeout for concurrent access
 
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
-    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
 
     // Begin transaction for better performance and reduced lock contention
@@ -356,7 +356,7 @@ void *path_worker(void *arg) {
     char hname[256];
     gethostname(hname, 256);
     char *sql;
-    asprintf(&sql, "INSERT INTO meta (%s, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note) VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?, ?)",
+    asprintf(&sql, "INSERT INTO meta (%s, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, update_mode, note) VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
              verifyChecksum ? "last_checksum_verify_date" : "last_date_verify");
     sqlite3_stmt *insMeta;
     sqlite3_prepare_v2(ctx->db, sql, -1, &insMeta, NULL);
@@ -365,9 +365,10 @@ void *path_worker(void *arg) {
     sqlite3_bind_int(insMeta, 3, ctx->changed);
     sqlite3_bind_int(insMeta, 4, ctx->new);
     sqlite3_bind_int(insMeta, 5, ctx->missing);
-    sqlite3_bind_int(insMeta, 6, ctx->error);
-    sqlite3_bind_text(insMeta, 7, update ? "ON" : "OFF", -1, SQLITE_STATIC);
-    sqlite3_bind_text(insMeta, 8, note_text, -1, SQLITE_STATIC);
+    sqlite3_bind_int(insMeta, 6, ctx->ignored);
+    sqlite3_bind_int(insMeta, 7, ctx->error);
+    sqlite3_bind_text(insMeta, 8, update ? "ON" : "OFF", -1, SQLITE_STATIC);
+    sqlite3_bind_text(insMeta, 9, note_text, -1, SQLITE_STATIC);
     sqlite3_step(insMeta);
     sqlite3_finalize(insMeta);
     free(sql);

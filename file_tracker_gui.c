@@ -13,6 +13,7 @@
 
 #define HASH_SIZE 65
 #define MAX_PATH 4096
+#define MAX_IGNORES 1024
 
 // Log entry for run_logs table
 typedef struct {
@@ -45,7 +46,7 @@ typedef struct {
     char note[1024];
     sqlite3 *db;
     sqlite3_int64 run_id;
-    int unchanged, changed, new_files, missing, errors;
+    int unchanged, changed, new_files, missing, ignored, errors;
     int total_files;
     int should_stop;
     LogEntry *log_buffer;
@@ -56,7 +57,36 @@ typedef struct {
 
 ScanContext *current_scan = NULL;
 
+// Ignore list
+char *ignore_list[MAX_IGNORES];
+int ignore_count = 0;
+
 // ==== Utility Functions ====
+
+void load_ignore_list() {
+    const char *home = getenv("HOME");
+    char ignore_path[MAX_PATH];
+    snprintf(ignore_path, sizeof(ignore_path), "%s/.rsync-ignore", home);
+
+    FILE *f = fopen(ignore_path, "r");
+    if (!f) return;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f) && ignore_count < MAX_IGNORES) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (strlen(line) > 0) {
+            ignore_list[ignore_count++] = strdup(line);
+        }
+    }
+    fclose(f);
+}
+
+int is_ignored(const char *name) {
+    for (int i = 0; i < ignore_count; i++) {
+        if (strcmp(name, ignore_list[i]) == 0) return 1;
+    }
+    return 0;
+}
 
 void get_timestamp(char *buffer, size_t size) {
     time_t now = time(NULL);
@@ -141,6 +171,7 @@ int init_database(sqlite3 *db) {
         "num_changed INTEGER, "
         "num_new INTEGER, "
         "num_missing INTEGER, "
+        "num_ignored INTEGER, "
         "num_errors INTEGER, "
         "update_mode TEXT, "
         "note TEXT);";
@@ -181,9 +212,9 @@ gboolean update_progress(gpointer data) {
 
     char status[512];
     snprintf(status, sizeof(status),
-             "Total: %d | Processed: %d | Remaining: %d | Unchanged: %d | Changed: %d | New: %d | Missing: %d | Errors: %d",
+             "Total: %d | Processed: %d | Remaining: %d | Unchanged: %d | Changed: %d | New: %d | Missing: %d | Ignored: %d | Errors: %d",
              ctx->total_files, processed, remaining,
-             ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->errors);
+             ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->ignored, ctx->errors);
     gtk_label_set_text(GTK_LABEL(status_label), status);
 
     return G_SOURCE_REMOVE;
@@ -220,6 +251,7 @@ gboolean scan_completed(gpointer data) {
              "  Changed:   %d files\n"
              "  New:       %d files\n"
              "  Missing:   %d files\n"
+             "  Ignored:   %d files\n"
              "  Errors:    %d files\n\n"
              "Total processed: %d files",
              ctx->scan_path,
@@ -230,6 +262,7 @@ gboolean scan_completed(gpointer data) {
              ctx->changed,
              ctx->new_files,
              ctx->missing,
+             ctx->ignored,
              ctx->errors,
              ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors);
 
@@ -381,6 +414,12 @@ void scan_directory(ScanContext *ctx, const char *dirpath) {
 
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
+
+        // Check if file/directory is ignored
+        if (is_ignored(entry->d_name)) {
+            ctx->ignored++;
+            continue;
+        }
 
         char filepath[MAX_PATH];
         snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
@@ -569,8 +608,8 @@ gpointer scan_thread_func(gpointer data) {
         gethostname(hostname, sizeof(hostname));
 
         const char *sql = "INSERT INTO meta (last_checksum_verify_date, last_date_verify, verify_machine, "
-                         "num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note) "
-                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+                         "num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, update_mode, note) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, 0) == SQLITE_OK) {
@@ -585,9 +624,10 @@ gpointer scan_thread_func(gpointer data) {
             sqlite3_bind_int(stmt, 5, ctx->changed);
             sqlite3_bind_int(stmt, 6, ctx->new_files);
             sqlite3_bind_int(stmt, 7, ctx->missing);
-            sqlite3_bind_int(stmt, 8, ctx->errors);
-            sqlite3_bind_text(stmt, 9, "ON", -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 10, ctx->note, -1, SQLITE_STATIC);
+            sqlite3_bind_int(stmt, 8, ctx->ignored);
+            sqlite3_bind_int(stmt, 9, ctx->errors);
+            sqlite3_bind_text(stmt, 10, "ON", -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 11, ctx->note, -1, SQLITE_STATIC);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
@@ -998,10 +1038,18 @@ void activate(GtkApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char *argv[]) {
+    // Load ignore list at startup
+    load_ignore_list();
+
     GtkApplication *app = gtk_application_new("com.filetracker.gui", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
 
     int status = g_application_run(G_APPLICATION(app), argc, argv);
+
+    // Free ignore list
+    for (int i = 0; i < ignore_count; i++) {
+        free(ignore_list[i]);
+    }
 
     g_object_unref(app);
     return status;
