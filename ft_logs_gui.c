@@ -19,6 +19,7 @@ GtkWidget *filter_new_check;
 GtkWidget *filter_changed_check;
 GtkWidget *filter_missing_check;
 GtkWidget *filter_unchanged_check;
+GtkWidget *filter_errors_check;
 GtkWidget *filter_all_check;
 GtkWidget *show_note_check;
 GtkWidget *refresh_button;
@@ -299,6 +300,12 @@ void load_logs(void) {
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(filter_unchanged_check))) {
             if (!first) strcat(status_filter, " OR ");
             strcat(status_filter, "status = 'UNCHANGED'");
+            first = 0;
+            any_filter = 1;
+        }
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(filter_errors_check))) {
+            if (!first) strcat(status_filter, " OR ");
+            strcat(status_filter, "status = 'ERROR'");
             any_filter = 1;
         }
     }
@@ -389,6 +396,7 @@ void on_filter_toggled(GtkCheckButton *button, gpointer user_data) {
         gtk_check_button_set_active(GTK_CHECK_BUTTON(filter_changed_check), FALSE);
         gtk_check_button_set_active(GTK_CHECK_BUTTON(filter_missing_check), FALSE);
         gtk_check_button_set_active(GTK_CHECK_BUTTON(filter_unchanged_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(filter_errors_check), FALSE);
     }
     // If any individual filter was checked, uncheck "All"
     else if (button != GTK_CHECK_BUTTON(filter_all_check) &&
@@ -524,12 +532,16 @@ void activate(GtkApplication *app, gpointer user_data) {
     filter_unchanged_check = gtk_check_button_new_with_label("Unchanged");
     g_signal_connect(filter_unchanged_check, "toggled", G_CALLBACK(on_filter_toggled), NULL);
 
+    filter_errors_check = gtk_check_button_new_with_label("Errors");
+    g_signal_connect(filter_errors_check, "toggled", G_CALLBACK(on_filter_toggled), NULL);
+
     gtk_box_append(GTK_BOX(filter_box), filter_label);
     gtk_box_append(GTK_BOX(filter_box), filter_all_check);
     gtk_box_append(GTK_BOX(filter_box), filter_new_check);
     gtk_box_append(GTK_BOX(filter_box), filter_changed_check);
     gtk_box_append(GTK_BOX(filter_box), filter_missing_check);
     gtk_box_append(GTK_BOX(filter_box), filter_unchanged_check);
+    gtk_box_append(GTK_BOX(filter_box), filter_errors_check);
     gtk_box_append(GTK_BOX(right_box), filter_box);
 
     // Logs viewer

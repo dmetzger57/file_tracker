@@ -83,6 +83,12 @@ void log_message(ScanContext *ctx, const char *status, const char *path) {
     ctx->log_count++;
 }
 
+// Log error message with descriptive text
+void log_error(ScanContext *ctx, const char *error_msg) {
+    log_message(ctx, "ERROR", error_msg);
+    ctx->errors++;
+}
+
 int compute_sha256(const char *path, char *output_buffer) {
     FILE *file = fopen(path, "rb");
     if (!file) return 0;
@@ -246,8 +252,9 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
 
     struct stat sb;
     if (stat(filepath, &sb) != 0) {
-        ctx->errors++;
-        log_message(ctx, "ERROR", filepath);
+        char err_msg[MAX_PATH + 64];
+        snprintf(err_msg, sizeof(err_msg), "stat() failed for: %s", filepath);
+        log_error(ctx, err_msg);
         g_idle_add(update_progress, ctx);
         return;
     }
@@ -259,8 +266,9 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
     sqlite3_stmt *stmt;
 
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, 0) != SQLITE_OK) {
-        ctx->errors++;
-        log_message(ctx, "ERROR", filepath);
+        char err_msg[512];
+        snprintf(err_msg, sizeof(err_msg), "SQLite prepare error: %s", sqlite3_errmsg(ctx->db));
+        log_error(ctx, err_msg);
         g_idle_add(update_progress, ctx);
         return;
     }
@@ -361,7 +369,9 @@ void scan_directory(ScanContext *ctx, const char *dirpath) {
 
     DIR *dir = opendir(dirpath);
     if (!dir) {
-        ctx->errors++;
+        char err_msg[MAX_PATH + 64];
+        snprintf(err_msg, sizeof(err_msg), "Failed to open directory: %s", dirpath);
+        log_error(ctx, err_msg);
         return;
     }
 

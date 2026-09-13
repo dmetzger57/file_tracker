@@ -124,6 +124,16 @@ void log_message(ThreadContext *ctx, const char *status, const char *path) {
     ctx->log_count++;
 }
 
+// Log error message to both stderr/file and database
+void log_error(ThreadContext *ctx, const char *error_msg) {
+    fprintf(stderr, "%s\n", error_msg);
+    if (ctx->log_fp) {
+        fprintf(ctx->log_fp, "[ERROR            ] %s\n", error_msg);
+    }
+    log_message(ctx, "ERROR", error_msg);
+    ctx->error++;
+}
+
 // ==== Utility Functions ====
 void compute_sha256(const char *path, char *outputBuffer) {
     FILE *file = fopen(path, "rb");
@@ -203,8 +213,9 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "SELECT last_modified, checksum FROM files WHERE full_path = ? LIMIT 1", -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "SQLite prepare error: %s\n", sqlite3_errmsg(db));
-        ctx->error++;
+        char err_msg[512];
+        snprintf(err_msg, sizeof(err_msg), "SQLite prepare error: %s", sqlite3_errmsg(db));
+        log_error(ctx, err_msg);
         return;
     }
     sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
@@ -276,8 +287,9 @@ void traverse_directory(ThreadContext *ctx, const char *dir_path, sqlite3 *db) {
         struct stat st;
         int path_len = snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
         if (path_len >= (int)sizeof(full_path)) {
-            fprintf(stderr, "Warning: Path too long, skipping: %s/%s\n", dir_path, entry->d_name);
-            ctx->error++;
+            char err_msg[MAX_PATH + 64];
+            snprintf(err_msg, sizeof(err_msg), "Path too long, skipping: %s/%s", dir_path, entry->d_name);
+            log_error(ctx, err_msg);
             continue;
         }
         if (stat(full_path, &st) == 0) {

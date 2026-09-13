@@ -26,7 +26,7 @@ void signal_handler(int signum) {
 }
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n] [-s]]\n", prog_name);
+    fprintf(stderr, "Usage: %s -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-E] [-n] [-s]]\n", prog_name);
     fprintf(stderr, "  -d <name>   Database name (without .db extension) - REQUIRED\n");
     fprintf(stderr, "  -l          List all runs in the database\n");
     fprintf(stderr, "  -r <run_id> Run identifier (DB_Name-YYYY-MM-DD-HH-MM-SS) - use -l to see available runs\n");
@@ -34,6 +34,7 @@ void print_usage(const char *prog_name) {
     fprintf(stderr, "  -C          Show only CHANGED file messages\n");
     fprintf(stderr, "  -M          Show only MISSING file messages\n");
     fprintf(stderr, "  -U          Show only UNCHANGED file messages\n");
+    fprintf(stderr, "  -E          Show only ERROR messages\n");
     fprintf(stderr, "  -n          Display the note associated with the run\n");
     fprintf(stderr, "  -s          Show only run information summary (no log messages)\n");
     fprintf(stderr, "\nNote: If no filter options are specified, all log messages are displayed.\n");
@@ -47,6 +48,7 @@ int main(int argc, char *argv[]) {
     int show_changed = 0;
     int show_missing = 0;
     int show_unchanged = 0;
+    int show_errors = 0;
     int show_note = 0;
     int show_all = 1;
     int list_runs = 0;
@@ -61,7 +63,7 @@ int main(int argc, char *argv[]) {
 
     // Parse command line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "d:r:NCMUnlsh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:r:NCMUEnlsh")) != -1) {
         switch (opt) {
             case 'd':
                 db_name = optarg;
@@ -83,6 +85,10 @@ int main(int argc, char *argv[]) {
                 break;
             case 'U':
                 show_unchanged = 1;
+                show_all = 0;
+                break;
+            case 'E':
+                show_errors = 1;
                 show_all = 0;
                 break;
             case 'n':
@@ -397,6 +403,10 @@ int main(int argc, char *argv[]) {
         }
         if (show_unchanged) {
             strcat(status_filter, first ? "status = 'UNCHANGED'" : " OR status = 'UNCHANGED'");
+            first = 0;
+        }
+        if (show_errors) {
+            strcat(status_filter, first ? "status = 'ERROR'" : " OR status = 'ERROR'");
             first = 0;
         }
 

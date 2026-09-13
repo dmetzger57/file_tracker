@@ -28,13 +28,14 @@ void signal_handler(int signum) {
 }
 
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s [-d <database_name>] [-a] [-N] [-m] [-c] [-n]\n", prog_name);
+    fprintf(stderr, "Usage: %s [-d <database_name>] [-a] [-N] [-m] [-c] [-n] [-e]\n", prog_name);
     fprintf(stderr, "  -d <name>   Database name (without .db extension) - if omitted, shows all databases\n");
     fprintf(stderr, "  -a          Show all runs (default: last run only)\n");
     fprintf(stderr, "  -N          Show run notes (Run #, Date, Note)\n");
     fprintf(stderr, "  -m          List files found missing in the last run\n");
     fprintf(stderr, "  -c          List files found changed in the last run\n");
     fprintf(stderr, "  -n          List files found new in the last run\n");
+    fprintf(stderr, "  -e          List errors encountered in the last run\n");
     fprintf(stderr, "\nDatabases are located in $HOME/db/FileTracker/\n");
     fprintf(stderr, "\nExample:\n");
     fprintf(stderr, "  %s                   # Show last run summary for all databases\n", prog_name);
@@ -44,6 +45,7 @@ void print_usage(const char *prog_name) {
     fprintf(stderr, "  %s -d MyFiles -m     # Show last run with missing file list\n", prog_name);
     fprintf(stderr, "  %s -d MyFiles -c     # Show last run with changed file list\n", prog_name);
     fprintf(stderr, "  %s -d MyFiles -n     # Show last run with new file list\n", prog_name);
+    fprintf(stderr, "  %s -d MyFiles -e     # Show last run with error list\n", prog_name);
 }
 
 void print_separator(int width) {
@@ -244,7 +246,7 @@ void print_log_entries(const char *log_dir, const char *db_name, int run_id,
 
 // Process a single database
 int process_database(const char *db_name, const char *home, int show_all, int show_notes,
-                     int show_missing, int show_changed, int show_new, int is_multi_db, int multi_db_compact) {
+                     int show_missing, int show_changed, int show_new, int show_errors, int is_multi_db, int multi_db_compact) {
     char db_path[MAX_PATH];
     snprintf(db_path, sizeof(db_path), "%s/db/FileTracker/%s.db", home, db_name);
 
@@ -323,7 +325,7 @@ int process_database(const char *db_name, const char *home, int show_all, int sh
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         row_count++;
 
-        if (show_missing || show_changed || show_new) {
+        if (show_missing || show_changed || show_new || show_errors) {
             last_run_id = sqlite3_column_int(stmt, 0);
             const char *cd = (const char *)sqlite3_column_text(stmt, 1);
             const char *vd = (const char *)sqlite3_column_text(stmt, 2);
@@ -359,7 +361,7 @@ int process_database(const char *db_name, const char *home, int show_all, int sh
         }
     }
 
-    if ((show_missing || show_changed || show_new) && last_run_id > 0 && last_run_date[0] != '\0') {
+    if ((show_missing || show_changed || show_new || show_errors) && last_run_id > 0 && last_run_date[0] != '\0') {
         char log_dir[MAX_PATH];
         snprintf(log_dir, sizeof(log_dir), "%s/logs/FileTracker", home);
         if (show_missing)
@@ -371,6 +373,9 @@ int process_database(const char *db_name, const char *home, int show_all, int sh
         if (show_new)
             print_log_entries(log_dir, db_name, last_run_id, last_run_date,
                               "[NEW", "New Files");
+        if (show_errors)
+            print_log_entries(log_dir, db_name, last_run_id, last_run_date,
+                              "[ERROR", "Errors");
     }
 
     sqlite3_finalize(stmt);
@@ -386,6 +391,7 @@ int main(int argc, char *argv[]) {
     int show_missing = 0;
     int show_changed = 0;
     int show_new = 0;
+    int show_errors = 0;
 
     // Enable locale for thousand separators
     setlocale(LC_NUMERIC, "");
@@ -412,6 +418,8 @@ int main(int argc, char *argv[]) {
             show_changed = 1;
         } else if (strcmp(argv[i], "-n") == 0) {
             show_new = 1;
+        } else if (strcmp(argv[i], "-e") == 0) {
+            show_errors = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -432,7 +440,7 @@ int main(int argc, char *argv[]) {
     // If database name is provided, process single database
     if (db_name) {
         return process_database(db_name, home, show_all, show_notes,
-                                show_missing, show_changed, show_new, 0, 0);
+                                show_missing, show_changed, show_new, show_errors, 0, 0);
     }
 
     // Process all databases in the FileTracker directory
@@ -515,8 +523,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Determine if we should use compact multi-db format
-    // Compact format when: no special options (-a, -N, -m, -c, -n) are specified
-    int use_compact = !show_all && !show_notes && !show_missing && !show_changed && !show_new;
+    // Compact format when: no special options (-a, -N, -m, -c, -n, -e) are specified
+    int use_compact = !show_all && !show_notes && !show_missing && !show_changed && !show_new && !show_errors;
 
     // Print header once for compact format
     if (use_compact) {
@@ -527,7 +535,7 @@ int main(int argc, char *argv[]) {
     int result = 0;
     for (int i = 0; i < db_count; i++) {
         int rc = process_database(db_names[i], home, show_all, show_notes,
-                                  show_missing, show_changed, show_new, 1, use_compact);
+                                  show_missing, show_changed, show_new, show_errors, 1, use_compact);
         if (rc != 0) {
             result = rc;
         }

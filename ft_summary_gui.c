@@ -18,6 +18,7 @@ GtkWidget *details_text;
 GtkWidget *missing_text;
 GtkWidget *changed_text;
 GtkWidget *new_text;
+GtkWidget *errors_text;
 GtkWidget *notebook;
 
 // Data
@@ -277,6 +278,7 @@ void load_run_details(const char *db_name, int run_id) {
     load_file_list(db_name, run_id, "MISSING", GTK_TEXT_VIEW(missing_text));
     load_file_list(db_name, run_id, "CHANGED", GTK_TEXT_VIEW(changed_text));
     load_file_list(db_name, run_id, "NEW", GTK_TEXT_VIEW(new_text));
+    load_file_list(db_name, run_id, "ERROR", GTK_TEXT_VIEW(errors_text));
 }
 
 // ==== Callbacks ====
@@ -365,6 +367,10 @@ void on_export_clicked(GtkButton *button, gpointer user_data) {
         case 3: // New
             text_view = GTK_TEXT_VIEW(new_text);
             filename_suffix = "new";
+            break;
+        case 4: // Errors
+            text_view = GTK_TEXT_VIEW(errors_text);
+            filename_suffix = "errors";
             break;
         default:
             return;
@@ -541,6 +547,14 @@ void activate(GtkApplication *app, gpointer user_data) {
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(new_text), TRUE);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(new_scroll), new_text);
     gtk_notebook_append_page(GTK_NOTEBOOK(notebook), new_scroll, gtk_label_new("New Files"));
+
+    // Errors tab
+    GtkWidget *errors_scroll = gtk_scrolled_window_new();
+    errors_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(errors_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(errors_text), TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(errors_scroll), errors_text);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), errors_scroll, gtk_label_new("Errors"));
 
     gtk_paned_set_end_child(GTK_PANED(paned), notebook);
     gtk_paned_set_position(GTK_PANED(paned), 700);

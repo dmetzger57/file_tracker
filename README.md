@@ -17,6 +17,7 @@ Run `file_tracker` against your storage media periodically to detect unauthorize
 **GUI Tools:**
 - `file_tracker_gui` - Visual interface for directory scanning
 - `ft_summary_gui` - Browse scan history with tabbed file lists
+- `ft_logs_gui` - View and filter log messages interactively
 - `ft_drives_gui` - Manage drive tracking visually
 
 **All tools share the same SQLite databases** - use CLI and GUI interchangeably!
@@ -131,7 +132,7 @@ file_locator -f filename [-p] [-d database] [-v]
 Report run history and statistics from a tracker database. When no database is specified, displays information for all databases in `~/db/FileTracker/`.
 
 ```
-ft_summary [-d database] [-a] [-N] [-m] [-c] [-n]
+ft_summary [-d database] [-a] [-N] [-m] [-c] [-n] [-e]
 ```
 
 | Option | Description |
@@ -142,14 +143,17 @@ ft_summary [-d database] [-a] [-N] [-m] [-c] [-n]
 | `-m`   | List files found missing in the last run. |
 | `-c`   | List files found changed in the last run. |
 | `-n`   | List files found new in the last run. |
+| `-e`   | List errors encountered in the last run. |
 
 **Default output format (single database with `-d`):** Run #, Run Date, Update (On/Off), Checksum (On/Off), Unchanged, Changed, New, Missing, Errors
 
 **Multi-database compact format (no options):** When run without any options, displays all databases in a single-line-per-database format with columns: Database, Run #, Run Date, Update, Checksum, Unchanged, Changed, New, Missing, Errors
 
-**Multi-database detailed format (with `-a`, `-N`, `-m`, `-c`, or `-n`):** When `-d` is omitted but other options are specified, displays a separate header for each database followed by its detailed summary.
+**Multi-database detailed format (with `-a`, `-N`, `-m`, `-c`, `-n`, or `-e`):** When `-d` is omitted but other options are specified, displays a separate header for each database followed by its detailed summary.
 
 **Notes output format (`-N`):** Run #, Run Date, Note
+
+**Error Logging:** Errors such as "path too long" or "SQLite errors" are now logged to the database and can be viewed with the `-e` option. See [ERROR_LOGGING_FEATURE.md](ERROR_LOGGING_FEATURE.md) for details.
 
 Databases without the expected schema are skipped with a warning.
 
@@ -172,6 +176,7 @@ ft_summary_gui
   - **Missing Files Tab:** List of files in database but not found on disk
   - **Changed Files Tab:** List of files that changed since last scan
   - **New Files Tab:** List of newly discovered files
+  - **Errors Tab:** List of errors encountered during the scan run
 - **Export Functionality:** Save current tab contents to text file
 - **Real-time Updates:** Refresh button to reload database information
 
@@ -190,10 +195,10 @@ ft_summary_gui
 
 ### ft_logs
 
-View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING) are stored in the database and can be queried by run identifier.
+View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING, ERROR) are stored in the database and can be queried by run identifier.
 
 ```
-ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n] [-s]]
+ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-E] [-n] [-s]]
 ```
 
 | Option | Description |
@@ -205,16 +210,58 @@ ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-n] [-s]]
 | `-C`   | Filter: show only CHANGED file messages (includes "CHANGED (Metadata)" and "CHANGED (Checksum)"). |
 | `-M`   | Filter: show only MISSING file messages. |
 | `-U`   | Filter: show only UNCHANGED file messages. |
+| `-E`   | Filter: show only ERROR messages. |
 | `-n`   | Display the note associated with the run. |
 | `-s`   | Show only run information summary (no log messages). |
 
 **Listing all runs (`-l` option):** Displays a table of all runs showing run identifier, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present. Copy the run identifier from this list to use with the `-r` option.
 
-**Viewing specific run:** Use the run identifier displayed by `-l` with the `-r` option. Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files). If no filters are specified, all log messages are displayed with run information header and summary footer.
+**Viewing specific run:** Use the run identifier displayed by `-l` with the `-r` option. Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files, `-E -M` shows errors and missing files). If no filters are specified, all log messages are displayed with run information header and summary footer.
 
-**Filtered output:** When file status filters (`-N`, `-C`, `-U`, `-M`) are specified, ft_logs outputs only the matching log records without headers or summary. This makes the output suitable for piping to other commands or processing with scripts.
+**Filtered output:** When file status filters (`-N`, `-C`, `-U`, `-M`, `-E`) are specified, ft_logs outputs only the matching log records without headers or summary. This makes the output suitable for piping to other commands or processing with scripts.
+
+**Error Messages:** Errors encountered during file_tracker runs (such as "path too long" or database errors) are now logged to the database with status 'ERROR' and can be viewed using the `-E` filter. See [ERROR_LOGGING_FEATURE.md](ERROR_LOGGING_FEATURE.md) for details.
 
 **Run identifier format:** `dbname-YYYY-MM-DD-HH-MM-SS` (e.g., `archive-2024-03-15-14-30-45`)
+
+### ft_logs_gui
+
+Graphical interface for viewing and filtering log messages from file_tracker runs. Provides an easy way to browse run history and filter logs by status type.
+
+```sh
+ft_logs_gui
+```
+
+**Features:**
+
+- **Database Selection:** Dropdown menu showing all available databases
+- **Runs List:** Displays all runs with identifiers and statistics
+  - Click any run to view its details and logs
+- **Run Information:** Shows run metadata (date, machine, file counts, notes)
+- **Status Filters:** Interactive checkboxes to filter log messages
+  - **All:** Show all log messages
+  - **New:** Show only newly discovered files
+  - **Changed:** Show only files that changed
+  - **Missing:** Show only files not found on disk
+  - **Unchanged:** Show only files that haven't changed
+  - **Errors:** Show only error messages from the run
+- **Log Viewer:** Monospace display of filtered log messages
+- **Real-time Filtering:** Logs update immediately when filters change
+
+**Usage:**
+
+1. Launch `ft_logs_gui`
+2. Select a database from dropdown
+3. Click a run from the runs list
+4. Use filter checkboxes to show specific log types
+5. Combine multiple filters to see multiple statuses
+6. Click "Refresh" to reload database
+
+**Filter Behavior:** Selecting "All" unchecks all individual filters. Selecting any individual filter unchecks "All". Multiple individual filters can be combined (e.g., check both "New" and "Changed" to see both types).
+
+**Integration:** Uses the same databases as CLI `ft_logs`, providing a visual way to explore log data with interactive filtering.
+
+**Requirements:** GTK4 (`brew install gtk4`)
 
 ### ft_find_dupes
 
