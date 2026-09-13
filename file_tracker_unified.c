@@ -643,25 +643,341 @@ GtkWidget *create_summary_tab() {
 }
 
 // ============================================================================
-// TAB 4: QUICK SCANNER (Simplified version)
+// TAB 4: FULL FILE SCANNER
 // ============================================================================
 
+typedef struct {
+    char status[32];
+    char path[MAX_PATH];
+} ScanLogEntry;
+
+typedef struct {
+    char scan_path[MAX_PATH];
+    char db_path[MAX_PATH];
+    char db_name[256];
+    int enable_checksum;
+    int update_mode;
+    char note[1024];
+    sqlite3 *db;
+    sqlite3_int64 run_id;
+    int unchanged, changed, new_files, missing, ignored, errors;
+    int total_files;
+    int should_stop;
+    ScanLogEntry *log_buffer;
+    int log_count;
+    int log_capacity;
+    GThread *scan_thread;
+} ScannerContext;
+
+GtkWidget *scanner_volumes_list;
 GtkWidget *scanner_path_entry;
 GtkWidget *scanner_db_entry;
+GtkWidget *scanner_checksum_check;
 GtkWidget *scanner_update_check;
-GtkWidget *scanner_status_label;
+GtkWidget *scanner_note_text;
 GtkWidget *scanner_start_button;
+GtkWidget *scanner_stop_button;
+GtkProgressBar *scanner_progress_bar;
+GtkWidget *scanner_status_label;
+GtkWidget *scanner_current_file_label;
+GtkWidget *scanner_results_text;
 
-void on_scanner_browse_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+ScannerContext *current_scanner_scan = NULL;
 
-    GtkFileDialog *dialog = gtk_file_dialog_new();
-    gtk_file_dialog_set_title(dialog, "Select Directory to Scan");
-    gtk_file_dialog_set_modal(dialog, TRUE);
+void scanner_log_message(ScannerContext *ctx, const char *status, const char *path) {
+    if (ctx->log_count >= ctx->log_capacity) {
+        ctx->log_capacity = ctx->log_capacity == 0 ? 1024 : ctx->log_capacity * 2;
+        ctx->log_buffer = realloc(ctx->log_buffer, ctx->log_capacity * sizeof(ScanLogEntry));
+    }
+    strncpy(ctx->log_buffer[ctx->log_count].status, status, 31);
+    ctx->log_buffer[ctx->log_count].status[31] = '\0';
+    strncpy(ctx->log_buffer[ctx->log_count].path, path, MAX_PATH - 1);
+    ctx->log_buffer[ctx->log_count].path[MAX_PATH - 1] = '\0';
+    ctx->log_count++;
+}
 
-    // We'll handle the async result inline
-    // For simplicity in this unified version, we'll just show the dialog
-    // In a full implementation, you'd use gtk_file_dialog_select_folder with callback
+gboolean scanner_update_progress(gpointer data) {
+    ScannerContext *ctx = (ScannerContext *)data;
+    int processed = ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors;
+
+    if (ctx->total_files > 0) {
+        gtk_progress_bar_set_fraction(scanner_progress_bar, (double)processed / ctx->total_files);
+    }
+
+    char status[512];
+    snprintf(status, sizeof(status),
+             "Processed: %d/%d | Unch: %d | Chg: %d | New: %d | Miss: %d | Ign: %d | Err: %d",
+             processed, ctx->total_files, ctx->unchanged, ctx->changed,
+             ctx->new_files, ctx->missing, ctx->ignored, ctx->errors);
+    gtk_label_set_text(GTK_LABEL(scanner_status_label), status);
+    return G_SOURCE_REMOVE;
+}
+
+gboolean scanner_update_current_file(gpointer data) {
+    char *filename = (char *)data;
+    gtk_label_set_text(GTK_LABEL(scanner_current_file_label), filename);
+    g_free(filename);
+    return G_SOURCE_REMOVE;
+}
+
+gboolean scanner_scan_completed(gpointer data);
+
+void scanner_process_file(ScannerContext *ctx, const char *filepath, const char *filename) {
+    if (ctx->should_stop) return;
+
+    g_idle_add(scanner_update_current_file, g_strdup(filename));
+
+    struct stat sb;
+    if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) return;
+
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(ctx->db, "SELECT size, last_modified, checksum FROM files WHERE full_path = ?", -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, filepath, -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        long long db_size = sqlite3_column_int64(stmt, 0);
+        long long db_mtime = sqlite3_column_int64(stmt, 1);
+
+        if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
+            ctx->changed++;
+            scanner_log_message(ctx, "CHANGED", filepath);
+            if (ctx->update_mode) {
+                char checksum[HASH_SIZE] = "";
+                if (ctx->enable_checksum) compute_sha256(filepath, checksum);
+                sqlite3_stmt *up;
+                sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
+                sqlite3_bind_int64(up, 1, sb.st_size);
+                sqlite3_bind_int64(up, 2, sb.st_mtime);
+                sqlite3_bind_text(up, 3, checksum, -1, SQLITE_STATIC);
+                sqlite3_bind_text(up, 4, filepath, -1, SQLITE_STATIC);
+                sqlite3_step(up);
+                sqlite3_finalize(up);
+            }
+        } else {
+            ctx->unchanged++;
+            scanner_log_message(ctx, "UNCHANGED", filepath);
+        }
+    } else {
+        ctx->new_files++;
+        scanner_log_message(ctx, "NEW", filepath);
+        if (ctx->update_mode) {
+            char checksum[HASH_SIZE] = "";
+            if (ctx->enable_checksum) compute_sha256(filepath, checksum);
+            sqlite3_stmt *ins;
+            sqlite3_prepare_v2(ctx->db, "INSERT INTO files (file_name, full_path, size, created, last_modified, owner, checksum) VALUES (?, ?, ?, ?, ?, ?, ?)", -1, &ins, NULL);
+            sqlite3_bind_text(ins, 1, filename, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 2, filepath, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(ins, 3, sb.st_size);
+            sqlite3_bind_int64(ins, 4, sb.st_ctime);
+            sqlite3_bind_int64(ins, 5, sb.st_mtime);
+            struct passwd *pw = getpwuid(sb.st_uid);
+            sqlite3_bind_text(ins, 6, pw ? pw->pw_name : "unknown", -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 7, checksum, -1, SQLITE_STATIC);
+            sqlite3_step(ins);
+            sqlite3_finalize(ins);
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    g_idle_add(scanner_update_progress, ctx);
+}
+
+void scanner_scan_directory(ScannerContext *ctx, const char *dirpath) {
+    if (ctx->should_stop) return;
+
+    DIR *dir = opendir(dirpath);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (ctx->should_stop) break;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (is_ignored(entry->d_name)) { ctx->ignored++; continue; }
+
+        char filepath[MAX_PATH];
+        snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
+
+        struct stat sb;
+        if (stat(filepath, &sb) == 0) {
+            if (S_ISDIR(sb.st_mode)) {
+                scanner_scan_directory(ctx, filepath);
+            } else if (S_ISREG(sb.st_mode)) {
+                scanner_process_file(ctx, filepath, entry->d_name);
+            }
+        }
+    }
+    closedir(dir);
+}
+
+int scanner_count_files(const char *dirpath) {
+    int count = 0;
+    DIR *dir = opendir(dirpath);
+    if (!dir) return 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char filepath[MAX_PATH];
+        snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
+        struct stat sb;
+        if (stat(filepath, &sb) == 0) {
+            if (S_ISDIR(sb.st_mode)) count += scanner_count_files(filepath);
+            else if (S_ISREG(sb.st_mode)) count++;
+        }
+    }
+    closedir(dir);
+    return count;
+}
+
+gpointer scanner_thread_func(gpointer data) {
+    ScannerContext *ctx = (ScannerContext *)data;
+
+    if (sqlite3_open(ctx->db_path, &ctx->db) != SQLITE_OK) {
+        g_idle_add(scanner_scan_completed, ctx);
+        return NULL;
+    }
+
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
+
+    g_idle_add(scanner_update_current_file, g_strdup("Counting files..."));
+    ctx->total_files = scanner_count_files(ctx->scan_path);
+
+    scanner_scan_directory(ctx, ctx->scan_path);
+
+    if (ctx->update_mode) {
+        char timestamp[64], hostname[256];
+        get_timestamp(timestamp, sizeof(timestamp));
+        gethostname(hostname, sizeof(hostname));
+
+        sqlite3_stmt *stmt;
+        sqlite3_prepare_v2(ctx->db, "INSERT INTO meta (last_checksum_verify_date, last_date_verify, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, update_mode, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", -1, &stmt, 0);
+        sqlite3_bind_text(stmt, 1, ctx->enable_checksum ? timestamp : NULL, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, timestamp, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, hostname, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 4, ctx->unchanged);
+        sqlite3_bind_int(stmt, 5, ctx->changed);
+        sqlite3_bind_int(stmt, 6, ctx->new_files);
+        sqlite3_bind_int(stmt, 7, ctx->missing);
+        sqlite3_bind_int(stmt, 8, ctx->ignored);
+        sqlite3_bind_int(stmt, 9, ctx->errors);
+        sqlite3_bind_text(stmt, 10, "ON", -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 11, ctx->note, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+
+        ctx->run_id = sqlite3_last_insert_rowid(ctx->db);
+
+        if (ctx->log_count > 0) {
+            sqlite3_stmt *log_stmt;
+            sqlite3_prepare_v2(ctx->db, "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)", -1, &log_stmt, 0);
+            for (int i = 0; i < ctx->log_count; i++) {
+                sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
+                sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
+                sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
+                sqlite3_step(log_stmt);
+                sqlite3_reset(log_stmt);
+            }
+            sqlite3_finalize(log_stmt);
+            free(ctx->log_buffer);
+            ctx->log_buffer = NULL;
+        }
+    }
+
+    g_idle_add(scanner_scan_completed, ctx);
+    return NULL;
+}
+
+gboolean scanner_scan_completed(gpointer data) {
+    ScannerContext *ctx = (ScannerContext *)data;
+
+    gtk_widget_set_sensitive(scanner_start_button, TRUE);
+    gtk_widget_set_sensitive(scanner_stop_button, FALSE);
+    gtk_widget_set_sensitive(scanner_path_entry, TRUE);
+    gtk_widget_set_sensitive(scanner_db_entry, TRUE);
+    gtk_progress_bar_set_fraction(scanner_progress_bar, 1.0);
+
+    char results[2048];
+    snprintf(results, sizeof(results),
+             "Scan Complete!\n\nPath: %s\nDatabase: %s\nMode: %s\nChecksum: %s\n\n"
+             "Unchanged: %'d\nChanged: %'d\nNew: %'d\nMissing: %'d\nIgnored: %'d\nErrors: %'d\n\n"
+             "Total: %'d files",
+             ctx->scan_path, ctx->db_name,
+             ctx->update_mode ? "Update" : "Read-only",
+             ctx->enable_checksum ? "Enabled" : "Disabled",
+             ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->ignored, ctx->errors,
+             ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors);
+
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_results_text));
+    gtk_text_buffer_set_text(buffer, results, -1);
+
+    if (ctx->db) sqlite3_close(ctx->db);
+    return G_SOURCE_REMOVE;
+}
+
+void scanner_refresh_volumes() {
+    GtkListBox *list = GTK_LIST_BOX(scanner_volumes_list);
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(list))) != NULL) {
+        gtk_list_box_remove(list, child);
+    }
+
+    DIR *dir = opendir("/Volumes");
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+
+        char full_path[MAX_PATH];
+        snprintf(full_path, sizeof(full_path), "/Volumes/%s", entry->d_name);
+
+        struct stat sb;
+        if (stat(full_path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+            GtkWidget *row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+            gtk_widget_set_margin_start(row, 8);
+            gtk_widget_set_margin_end(row, 8);
+            gtk_widget_set_margin_top(row, 6);
+            gtk_widget_set_margin_bottom(row, 6);
+
+            GtkWidget *name_label = gtk_label_new(entry->d_name);
+            gtk_label_set_xalign(GTK_LABEL(name_label), 0.0);
+            gtk_widget_add_css_class(name_label, "heading");
+            gtk_box_append(GTK_BOX(row), name_label);
+
+            struct statfs fs_stats;
+            if (statfs(full_path, &fs_stats) == 0) {
+                long long cap = (long long)fs_stats.f_blocks * fs_stats.f_bsize;
+                long long avail = (long long)fs_stats.f_bavail * fs_stats.f_bsize;
+                char info[128];
+                snprintf(info, sizeof(info), "%.1f GB total, %.1f GB free",
+                        cap / (1024.0 * 1024.0 * 1024.0), avail / (1024.0 * 1024.0 * 1024.0));
+                GtkWidget *info_label = gtk_label_new(info);
+                gtk_label_set_xalign(GTK_LABEL(info_label), 0.0);
+                gtk_widget_add_css_class(info_label, "dim-label");
+                gtk_box_append(GTK_BOX(row), info_label);
+            }
+
+            g_object_set_data_full(G_OBJECT(row), "volume_path", g_strdup(full_path), g_free);
+            gtk_list_box_append(list, row);
+        }
+    }
+    closedir(dir);
+}
+
+void on_scanner_volume_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
+    (void)box; (void)user_data;
+    if (!row) return;
+
+    GtkWidget *row_widget = gtk_list_box_row_get_child(GTK_LIST_BOX_ROW(row));
+    const char *volume_path = g_object_get_data(G_OBJECT(row_widget), "volume_path");
+
+    if (volume_path) {
+        gtk_editable_set_text(GTK_EDITABLE(scanner_path_entry), volume_path);
+        char *vol_name = strrchr(volume_path, '/');
+        if (vol_name) gtk_editable_set_text(GTK_EDITABLE(scanner_db_entry), vol_name + 1);
+    }
 }
 
 void on_scanner_start_clicked(GtkButton *button, gpointer user_data) {
@@ -671,26 +987,90 @@ void on_scanner_start_clicked(GtkButton *button, gpointer user_data) {
     const char *db_name = gtk_editable_get_text(GTK_EDITABLE(scanner_db_entry));
 
     if (strlen(path) == 0) {
-        gtk_label_set_text(GTK_LABEL(scanner_status_label), "Please select a path to scan");
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a directory to scan");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
         return;
     }
 
-    gtk_label_set_text(GTK_LABEL(scanner_status_label),
-        "Quick scan feature - use the full File Tracker app for complete scanning functionality");
+    current_scanner_scan = g_new0(ScannerContext, 1);
+    strncpy(current_scanner_scan->scan_path, path, sizeof(current_scanner_scan->scan_path) - 1);
+
+    if (strlen(db_name) > 0) {
+        strncpy(current_scanner_scan->db_name, db_name, sizeof(current_scanner_scan->db_name) - 1);
+    } else {
+        char *base = strrchr(path, '/');
+        strncpy(current_scanner_scan->db_name, base ? base + 1 : path, sizeof(current_scanner_scan->db_name) - 1);
+    }
+
+    snprintf(current_scanner_scan->db_path, sizeof(current_scanner_scan->db_path),
+             "%s/%s.db", db_dir_path, current_scanner_scan->db_name);
+
+    current_scanner_scan->enable_checksum = gtk_check_button_get_active(GTK_CHECK_BUTTON(scanner_checksum_check));
+    current_scanner_scan->update_mode = gtk_check_button_get_active(GTK_CHECK_BUTTON(scanner_update_check));
+
+    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_note_text));
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(note_buffer, &start, &end);
+    char *note = gtk_text_buffer_get_text(note_buffer, &start, &end, FALSE);
+    strncpy(current_scanner_scan->note, note, sizeof(current_scanner_scan->note) - 1);
+    g_free(note);
+
+    gtk_widget_set_sensitive(scanner_start_button, FALSE);
+    gtk_widget_set_sensitive(scanner_stop_button, TRUE);
+    gtk_widget_set_sensitive(scanner_path_entry, FALSE);
+    gtk_widget_set_sensitive(scanner_db_entry, FALSE);
+    gtk_progress_bar_set_fraction(scanner_progress_bar, 0.0);
+    gtk_label_set_text(GTK_LABEL(scanner_status_label), "Initializing...");
+
+    current_scanner_scan->scan_thread = g_thread_new("scanner", scanner_thread_func, current_scanner_scan);
+}
+
+void on_scanner_stop_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+    if (current_scanner_scan) {
+        current_scanner_scan->should_stop = 1;
+        gtk_label_set_text(GTK_LABEL(scanner_status_label), "Stopping...");
+    }
 }
 
 GtkWidget *create_scanner_tab() {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_start(box, 16);
-    gtk_widget_set_margin_end(box, 16);
-    gtk_widget_set_margin_top(box, 16);
-    gtk_widget_set_margin_bottom(box, 16);
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
-    // Info label
-    GtkWidget *info_label = gtk_label_new(
-        "Quick Scanner - For full scanning features, use the dedicated File Tracker application");
-    gtk_widget_add_css_class(info_label, "dim-label");
-    gtk_box_append(GTK_BOX(box), info_label);
+    // Left: Volumes
+    GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_size_request(left_box, 300, -1);
+    gtk_widget_set_margin_start(left_box, 8);
+    gtk_widget_set_margin_end(left_box, 8);
+    gtk_widget_set_margin_top(left_box, 8);
+    gtk_widget_set_margin_bottom(left_box, 8);
+
+    GtkWidget *vol_header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *vol_label = gtk_label_new("Volumes");
+    gtk_widget_add_css_class(vol_label, "heading");
+    gtk_label_set_xalign(GTK_LABEL(vol_label), 0.0);
+    gtk_widget_set_hexpand(vol_label, TRUE);
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)scanner_refresh_volumes), NULL);
+    gtk_box_append(GTK_BOX(vol_header), vol_label);
+    gtk_box_append(GTK_BOX(vol_header), refresh_btn);
+    gtk_box_append(GTK_BOX(left_box), vol_header);
+
+    scanner_volumes_list = gtk_list_box_new();
+    g_signal_connect(scanner_volumes_list, "row-activated", G_CALLBACK(on_scanner_volume_selected), NULL);
+    GtkWidget *vol_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(vol_scroll), scanner_volumes_list);
+    gtk_widget_set_vexpand(vol_scroll, TRUE);
+    gtk_box_append(GTK_BOX(left_box), vol_scroll);
+
+    gtk_paned_set_start_child(GTK_PANED(paned), left_box);
+
+    // Right: Controls
+    GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_start(right_box, 16);
+    gtk_widget_set_margin_end(right_box, 16);
+    gtk_widget_set_margin_top(right_box, 16);
+    gtk_widget_set_margin_bottom(right_box, 16);
 
     // Path
     GtkWidget *path_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -698,12 +1078,9 @@ GtkWidget *create_scanner_tab() {
     gtk_widget_set_size_request(path_label, 80, -1);
     scanner_path_entry = gtk_entry_new();
     gtk_widget_set_hexpand(scanner_path_entry, TRUE);
-    GtkWidget *browse_btn = gtk_button_new_with_label("Browse...");
-    g_signal_connect(browse_btn, "clicked", G_CALLBACK(on_scanner_browse_clicked), NULL);
     gtk_box_append(GTK_BOX(path_box), path_label);
     gtk_box_append(GTK_BOX(path_box), scanner_path_entry);
-    gtk_box_append(GTK_BOX(path_box), browse_btn);
-    gtk_box_append(GTK_BOX(box), path_box);
+    gtk_box_append(GTK_BOX(right_box), path_box);
 
     // Database
     GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -713,33 +1090,78 @@ GtkWidget *create_scanner_tab() {
     gtk_widget_set_hexpand(scanner_db_entry, TRUE);
     gtk_box_append(GTK_BOX(db_box), db_label);
     gtk_box_append(GTK_BOX(db_box), scanner_db_entry);
-    gtk_box_append(GTK_BOX(box), db_box);
+    gtk_box_append(GTK_BOX(right_box), db_box);
 
     // Options
+    GtkWidget *opts_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+    scanner_checksum_check = gtk_check_button_new_with_label("Verify Checksums");
     scanner_update_check = gtk_check_button_new_with_label("Update Database");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(scanner_update_check), TRUE);
-    gtk_box_append(GTK_BOX(box), scanner_update_check);
+    gtk_box_append(GTK_BOX(opts_box), scanner_checksum_check);
+    gtk_box_append(GTK_BOX(opts_box), scanner_update_check);
+    gtk_box_append(GTK_BOX(right_box), opts_box);
 
-    // Start button
+    // Note
+    GtkWidget *note_label = gtk_label_new("Note:");
+    gtk_label_set_xalign(GTK_LABEL(note_label), 0.0);
+    scanner_note_text = gtk_text_view_new();
+    gtk_widget_set_size_request(scanner_note_text, -1, 50);
+    GtkWidget *note_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), scanner_note_text);
+    gtk_box_append(GTK_BOX(right_box), note_label);
+    gtk_box_append(GTK_BOX(right_box), note_scroll);
+
+    // Buttons
+    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(btn_box, GTK_ALIGN_CENTER);
     scanner_start_button = gtk_button_new_with_label("Start Scan");
     gtk_widget_add_css_class(scanner_start_button, "suggested-action");
-    gtk_widget_set_halign(scanner_start_button, GTK_ALIGN_CENTER);
-    gtk_widget_set_size_request(scanner_start_button, 150, -1);
+    gtk_widget_set_size_request(scanner_start_button, 120, -1);
     g_signal_connect(scanner_start_button, "clicked", G_CALLBACK(on_scanner_start_clicked), NULL);
-    gtk_box_append(GTK_BOX(box), scanner_start_button);
+    scanner_stop_button = gtk_button_new_with_label("Stop");
+    gtk_widget_add_css_class(scanner_stop_button, "destructive-action");
+    gtk_widget_set_size_request(scanner_stop_button, 120, -1);
+    gtk_widget_set_sensitive(scanner_stop_button, FALSE);
+    g_signal_connect(scanner_stop_button, "clicked", G_CALLBACK(on_scanner_stop_clicked), NULL);
+    gtk_box_append(GTK_BOX(btn_box), scanner_start_button);
+    gtk_box_append(GTK_BOX(btn_box), scanner_stop_button);
+    gtk_box_append(GTK_BOX(right_box), btn_box);
+
+    gtk_box_append(GTK_BOX(right_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+
+    // Progress
+    scanner_progress_bar = GTK_PROGRESS_BAR(gtk_progress_bar_new());
+    gtk_widget_set_size_request(GTK_WIDGET(scanner_progress_bar), -1, 24);
+    gtk_box_append(GTK_BOX(right_box), GTK_WIDGET(scanner_progress_bar));
 
     // Status
-    scanner_status_label = gtk_label_new("Ready - Configure path and database name above");
+    scanner_status_label = gtk_label_new("Ready");
     gtk_label_set_xalign(GTK_LABEL(scanner_status_label), 0.0);
-    gtk_widget_add_css_class(scanner_status_label, "dim-label");
-    gtk_box_append(GTK_BOX(box), scanner_status_label);
+    gtk_box_append(GTK_BOX(right_box), scanner_status_label);
 
-    // Spacer
-    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_vexpand(spacer, TRUE);
-    gtk_box_append(GTK_BOX(box), spacer);
+    // Current file
+    scanner_current_file_label = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(scanner_current_file_label), 0.0);
+    gtk_widget_add_css_class(scanner_current_file_label, "dim-label");
+    gtk_label_set_ellipsize(GTK_LABEL(scanner_current_file_label), PANGO_ELLIPSIZE_START);
+    gtk_box_append(GTK_BOX(right_box), scanner_current_file_label);
 
-    return box;
+    // Results
+    GtkWidget *results_label = gtk_label_new("Results:");
+    gtk_label_set_xalign(GTK_LABEL(results_label), 0.0);
+    scanner_results_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(scanner_results_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(scanner_results_text), TRUE);
+    GtkWidget *results_scroll = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(results_scroll, TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(results_scroll), scanner_results_text);
+    gtk_box_append(GTK_BOX(right_box), results_label);
+    gtk_box_append(GTK_BOX(right_box), results_scroll);
+
+    gtk_paned_set_end_child(GTK_PANED(paned), right_box);
+    gtk_paned_set_position(GTK_PANED(paned), 320);
+
+    return paned;
 }
 
 // ============================================================================
@@ -770,9 +1192,9 @@ GtkWidget *create_about_tab() {
         "• File Locator - Search files across databases\n"
         "• Drives Manager - Track and manage storage drives\n"
         "• Summary Viewer - View scan run statistics\n"
-        "• Quick Scanner - Basic file scanning\n\n"
-        "For advanced scanning features, use the\n"
-        "dedicated File Tracker application.");
+        "• File Scanner - Full file scanning with progress tracking\n\n"
+        "All major File Tracker features\n"
+        "in one convenient application.");
     gtk_label_set_justify(GTK_LABEL(desc), GTK_JUSTIFY_CENTER);
     gtk_box_append(GTK_BOX(box), desc);
 
@@ -830,11 +1252,14 @@ void activate(GtkApplication *app, gpointer user_data) {
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_summary_tab(),
                             gtk_label_new("Summary"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_scanner_tab(),
-                            gtk_label_new("Quick Scan"));
+                            gtk_label_new("File Scanner"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_about_tab(),
                             gtk_label_new("About"));
 
     gtk_window_set_child(GTK_WINDOW(window), main_notebook);
+
+    // Initialize scanner volumes list
+    scanner_refresh_volumes();
     gtk_window_present(GTK_WINDOW(window));
 
     // Initialize
