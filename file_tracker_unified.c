@@ -1005,8 +1005,8 @@ GtkWidget *create_logs_tab() {
     logs_run_info_text = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_run_info_text), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(logs_run_info_text), TRUE);
-    gtk_widget_set_size_request(logs_run_info_text, -1, 150);
     GtkWidget *info_scroll = gtk_scrolled_window_new();
+    gtk_widget_set_size_request(info_scroll, -1, 220);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(info_scroll), logs_run_info_text);
     gtk_box_append(GTK_BOX(right_box), info_label);
     gtk_box_append(GTK_BOX(right_box), info_scroll);
