@@ -1160,13 +1160,15 @@ gboolean scanner_scan_completed(gpointer data);
 
 void scanner_process_ignored_file(ScannerContext *ctx, const char *filepath, const char *filename) {
     struct stat sb;
+
+    // Always log ignored files, even if they can't be stat'd or aren't regular files
+    scanner_log_message(ctx, "IGNORED", filepath);
+
     if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) {
         ctx->ignored++;
         g_idle_add(scanner_update_progress, ctx);
         return;
     }
-
-    scanner_log_message(ctx, "IGNORED", filepath);
 
     if (ctx->update_mode) {
         // Check if file already exists in database
