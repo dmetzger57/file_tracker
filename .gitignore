@@ -1,5 +1,6 @@
 # Binary output files
 file_locator
+file_locator_gui
 file_tracker
 file_tracker_lastrun
 ft_summary

@@ -60,6 +60,7 @@ create_app_bundle "File Tracker" "file_tracker_gui" "com.filetracker.gui"
 create_app_bundle "File Tracker Logs" "ft_logs_gui" "com.filetracker.logs"
 create_app_bundle "File Tracker Summary" "ft_summary_gui" "com.filetracker.summary"
 create_app_bundle "File Tracker Drives" "ft_drives_gui" "com.filetracker.drives"
+create_app_bundle "File Locator" "file_locator_gui" "com.filetracker.locator"
 
 echo ""
 echo "All .app bundles created successfully!"
