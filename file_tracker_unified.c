@@ -643,7 +643,443 @@ GtkWidget *create_summary_tab() {
 }
 
 // ============================================================================
-// TAB 4: FULL FILE SCANNER
+// TAB 4: LOGS VIEWER
+// ============================================================================
+
+GtkWidget *logs_db_combo;
+GtkWidget *logs_runs_list;
+GtkWidget *logs_run_info_text;
+GtkWidget *logs_note_text;
+GtkWidget *logs_text;
+GtkWidget *logs_filter_new_check;
+GtkWidget *logs_filter_changed_check;
+GtkWidget *logs_filter_missing_check;
+GtkWidget *logs_filter_unchanged_check;
+GtkWidget *logs_filter_ignored_check;
+GtkWidget *logs_filter_errors_check;
+GtkWidget *logs_filter_all_check;
+
+char logs_current_db_path[MAX_PATH] = "";
+sqlite3_int64 logs_selected_run_id = 0;
+
+void logs_format_run_identifier(char *buffer, size_t size, const char *db_name, const char *run_date, sqlite3_int64 id) {
+    if (run_date) {
+        char formatted_date[64];
+        strncpy(formatted_date, run_date, sizeof(formatted_date) - 1);
+        formatted_date[sizeof(formatted_date) - 1] = '\0';
+        for (char *p = formatted_date; *p; p++) {
+            if (*p == ' ' || *p == ':') *p = '-';
+        }
+        snprintf(buffer, size, "%s-%s", db_name, formatted_date);
+    } else {
+        snprintf(buffer, size, "%s-unknown-%lld", db_name, id);
+    }
+}
+
+void logs_refresh_databases() {
+    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(logs_db_combo));
+
+    DIR *dir = opendir(db_dir_path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        size_t len = strlen(entry->d_name);
+        if (len > 3 && strcmp(entry->d_name + len - 3, ".db") == 0 &&
+            strcmp(entry->d_name, "drives.db") != 0) {
+            char db_name[256];
+            strncpy(db_name, entry->d_name, len - 3);
+            db_name[len - 3] = '\0';
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(logs_db_combo), db_name);
+        }
+    }
+    closedir(dir);
+
+    gtk_combo_box_set_active(GTK_COMBO_BOX(logs_db_combo), 0);
+}
+
+void logs_load_runs(const char *db_name) {
+    if (!db_name || strlen(db_name) == 0) return;
+
+    snprintf(logs_current_db_path, sizeof(logs_current_db_path), "%s/%s.db", db_dir_path, db_name);
+
+    GtkListBox *list = GTK_LIST_BOX(logs_runs_list);
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(list))) != NULL) {
+        gtk_list_box_remove(list, child);
+    }
+
+    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_run_info_text));
+    gtk_text_buffer_set_text(info_buffer, "", -1);
+    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+    gtk_text_buffer_set_text(note_buffer, "", -1);
+    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+    gtk_text_buffer_set_text(logs_buffer, "", -1);
+
+    if (access(logs_current_db_path, F_OK) != 0) return;
+
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
+
+    const char *query =
+        "SELECT id, COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
+        "verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, "
+        "update_mode, note FROM meta ORDER BY id DESC";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        sqlite3_int64 id = sqlite3_column_int64(stmt, 0);
+        const char *run_date = (const char *)sqlite3_column_text(stmt, 1);
+        const char *machine = (const char *)sqlite3_column_text(stmt, 2);
+        int unchanged = sqlite3_column_int(stmt, 3);
+        int changed = sqlite3_column_int(stmt, 4);
+        int new = sqlite3_column_int(stmt, 5);
+        int missing = sqlite3_column_int(stmt, 6);
+        int ignored = sqlite3_column_int(stmt, 7);
+        const char *update_mode = (const char *)sqlite3_column_text(stmt, 8);
+        const char *note = (const char *)sqlite3_column_text(stmt, 9);
+
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        gtk_widget_set_margin_start(row, 8);
+        gtk_widget_set_margin_end(row, 8);
+        gtk_widget_set_margin_top(row, 6);
+        gtk_widget_set_margin_bottom(row, 6);
+
+        GtkWidget *date_label = gtk_label_new(run_date ? run_date : "Unknown");
+        gtk_label_set_xalign(GTK_LABEL(date_label), 0.0);
+        gtk_widget_add_css_class(date_label, "heading");
+        gtk_box_append(GTK_BOX(row), date_label);
+
+        char stats[256];
+        snprintf(stats, sizeof(stats), "U:%d C:%d N:%d M:%d I:%d on %s%s%s",
+                unchanged, changed, new, missing, ignored,
+                machine ? machine : "N/A",
+                update_mode && strcmp(update_mode, "OFF") == 0 ? " [RO]" : "",
+                note && strlen(note) > 0 ? " 📝" : "");
+
+        GtkWidget *stats_label = gtk_label_new(stats);
+        gtk_label_set_xalign(GTK_LABEL(stats_label), 0.0);
+        gtk_widget_add_css_class(stats_label, "dim-label");
+        gtk_box_append(GTK_BOX(row), stats_label);
+
+        g_object_set_data(G_OBJECT(row), "run_id", GINT_TO_POINTER((gint)id));
+        gtk_list_box_append(list, row);
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+
+void logs_load_details() {
+    if (logs_selected_run_id == 0) return;
+
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
+
+    const char *query =
+        "SELECT COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
+        "verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, "
+        "update_mode, note FROM meta WHERE id = ?";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return;
+    }
+
+    sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *run_date = (const char *)sqlite3_column_text(stmt, 0);
+        const char *machine = (const char *)sqlite3_column_text(stmt, 1);
+        int unchanged = sqlite3_column_int(stmt, 2);
+        int changed = sqlite3_column_int(stmt, 3);
+        int new = sqlite3_column_int(stmt, 4);
+        int missing = sqlite3_column_int(stmt, 5);
+        int ignored = sqlite3_column_int(stmt, 6);
+        int errors = sqlite3_column_int(stmt, 7);
+        const char *update_mode = (const char *)sqlite3_column_text(stmt, 8);
+        const char *note = (const char *)sqlite3_column_text(stmt, 9);
+
+        char info[512];
+        snprintf(info, sizeof(info),
+                "Run Date: %s\n"
+                "Machine: %s\n"
+                "Mode: %s\n"
+                "Legend: U/C/N/M/I/E\n\n"
+                "Unchanged: %'d\n"
+                "Changed:   %'d\n"
+                "New:       %'d\n"
+                "Missing:   %'d\n"
+                "Ignored:   %'d\n"
+                "Errors:    %'d\n",
+                run_date ? run_date : "Unknown",
+                machine ? machine : "N/A",
+                update_mode ? update_mode : "N/A",
+                unchanged, changed, new, missing, ignored, errors);
+
+        GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_run_info_text));
+        gtk_text_buffer_set_text(info_buffer, info, -1);
+
+        GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+        gtk_text_buffer_set_text(note_buffer, note ? note : "", -1);
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+
+void logs_load_logs() {
+    if (logs_selected_run_id == 0) return;
+
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
+
+    char status_filter[512] = "";
+    int any_filter = 0;
+
+    if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_all_check))) {
+        strcpy(status_filter, "1=1");
+        any_filter = 1;
+    } else {
+        int first = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_new_check))) {
+            strcat(status_filter, "status = 'NEW'");
+            first = 0;
+            any_filter = 1;
+        }
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_changed_check))) {
+            if (!first) strcat(status_filter, " OR ");
+            strcat(status_filter, "status LIKE 'CHANGED%'");
+            first = 0;
+            any_filter = 1;
+        }
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_missing_check))) {
+            if (!first) strcat(status_filter, " OR ");
+            strcat(status_filter, "status = 'MISSING'");
+            first = 0;
+            any_filter = 1;
+        }
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_unchanged_check))) {
+            if (!first) strcat(status_filter, " OR ");
+            strcat(status_filter, "status = 'UNCHANGED'");
+            first = 0;
+            any_filter = 1;
+        }
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_ignored_check))) {
+            if (!first) strcat(status_filter, " OR ");
+            strcat(status_filter, "status = 'IGNORED'");
+            first = 0;
+            any_filter = 1;
+        }
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_errors_check))) {
+            if (!first) strcat(status_filter, " OR ");
+            strcat(status_filter, "status = 'ERROR'");
+            any_filter = 1;
+        }
+    }
+
+    if (!any_filter) {
+        GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+        gtk_text_buffer_set_text(logs_buffer, "No filters selected. Select at least one filter or 'All'.", -1);
+        sqlite3_close(db);
+        return;
+    }
+
+    char query[1024];
+    snprintf(query, sizeof(query),
+             "SELECT status, full_path FROM run_logs WHERE run_id = ? AND (%s) ORDER BY id",
+             status_filter);
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return;
+    }
+
+    sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+
+    GString *text = g_string_new("");
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *status = (const char *)sqlite3_column_text(stmt, 0);
+        const char *path = (const char *)sqlite3_column_text(stmt, 1);
+        g_string_append_printf(text, "[%-18s] %s\n", status, path);
+    }
+
+    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+    gtk_text_buffer_set_text(logs_buffer, text->str, -1);
+    g_string_free(text, TRUE);
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+
+void on_logs_db_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
+    if (db_name) {
+        logs_load_runs(db_name);
+        g_free(db_name);
+    }
+}
+
+void on_logs_run_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
+    (void)box; (void)user_data;
+    if (!row) return;
+
+    GtkWidget *row_widget = gtk_list_box_row_get_child(GTK_LIST_BOX_ROW(row));
+    logs_selected_run_id = (sqlite3_int64)GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row_widget), "run_id"));
+
+    logs_load_details();
+    logs_load_logs();
+}
+
+void on_logs_filter_toggled(GtkCheckButton *button, gpointer user_data) {
+    (void)user_data;
+
+    if (button == GTK_CHECK_BUTTON(logs_filter_all_check) &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_all_check))) {
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_new_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_changed_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_missing_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_unchanged_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_ignored_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_errors_check), FALSE);
+    } else if (button != GTK_CHECK_BUTTON(logs_filter_all_check) &&
+               gtk_check_button_get_active(button)) {
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_all_check), FALSE);
+    }
+
+    logs_load_logs();
+}
+
+GtkWidget *create_logs_tab() {
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+
+    // Left: Database and runs list
+    GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_size_request(left_box, 350, -1);
+    gtk_widget_set_margin_start(left_box, 8);
+    gtk_widget_set_margin_end(left_box, 8);
+    gtk_widget_set_margin_top(left_box, 8);
+    gtk_widget_set_margin_bottom(left_box, 8);
+
+    GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *db_label = gtk_label_new("Database:");
+    logs_db_combo = gtk_combo_box_text_new();
+    g_signal_connect(logs_db_combo, "changed", G_CALLBACK(on_logs_db_changed), NULL);
+    gtk_widget_set_hexpand(logs_db_combo, TRUE);
+    gtk_box_append(GTK_BOX(db_box), db_label);
+    gtk_box_append(GTK_BOX(db_box), logs_db_combo);
+    gtk_box_append(GTK_BOX(left_box), db_box);
+
+    GtkWidget *runs_label = gtk_label_new("Scan Runs:");
+    gtk_label_set_xalign(GTK_LABEL(runs_label), 0.0);
+    gtk_box_append(GTK_BOX(left_box), runs_label);
+
+    logs_runs_list = gtk_list_box_new();
+    g_signal_connect(logs_runs_list, "row-activated", G_CALLBACK(on_logs_run_selected), NULL);
+    GtkWidget *runs_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(runs_scroll), logs_runs_list);
+    gtk_widget_set_vexpand(runs_scroll, TRUE);
+    gtk_box_append(GTK_BOX(left_box), runs_scroll);
+
+    gtk_paned_set_start_child(GTK_PANED(paned), left_box);
+
+    // Right: Run details and logs
+    GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(right_box, 8);
+    gtk_widget_set_margin_end(right_box, 8);
+    gtk_widget_set_margin_top(right_box, 8);
+    gtk_widget_set_margin_bottom(right_box, 8);
+
+    // Run info
+    GtkWidget *info_label = gtk_label_new("Run Information:");
+    gtk_label_set_xalign(GTK_LABEL(info_label), 0.0);
+    logs_run_info_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_run_info_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(logs_run_info_text), TRUE);
+    gtk_widget_set_size_request(logs_run_info_text, -1, 150);
+    GtkWidget *info_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(info_scroll), logs_run_info_text);
+    gtk_box_append(GTK_BOX(right_box), info_label);
+    gtk_box_append(GTK_BOX(right_box), info_scroll);
+
+    // Note
+    GtkWidget *note_label = gtk_label_new("Note:");
+    gtk_label_set_xalign(GTK_LABEL(note_label), 0.0);
+    logs_note_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_note_text), FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(logs_note_text), GTK_WRAP_WORD);
+    gtk_widget_set_size_request(logs_note_text, -1, 60);
+    GtkWidget *note_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), logs_note_text);
+    gtk_box_append(GTK_BOX(right_box), note_label);
+    gtk_box_append(GTK_BOX(right_box), note_scroll);
+
+    // Filters
+    GtkWidget *filter_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *filter_label = gtk_label_new("Filters:");
+
+    logs_filter_all_check = gtk_check_button_new_with_label("All");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_all_check), TRUE);
+    g_signal_connect(logs_filter_all_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+
+    logs_filter_new_check = gtk_check_button_new_with_label("New");
+    g_signal_connect(logs_filter_new_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+
+    logs_filter_changed_check = gtk_check_button_new_with_label("Changed");
+    g_signal_connect(logs_filter_changed_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+
+    logs_filter_missing_check = gtk_check_button_new_with_label("Missing");
+    g_signal_connect(logs_filter_missing_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+
+    logs_filter_unchanged_check = gtk_check_button_new_with_label("Unchanged");
+    g_signal_connect(logs_filter_unchanged_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+
+    logs_filter_ignored_check = gtk_check_button_new_with_label("Ignored");
+    g_signal_connect(logs_filter_ignored_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+
+    logs_filter_errors_check = gtk_check_button_new_with_label("Errors");
+    g_signal_connect(logs_filter_errors_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+
+    gtk_box_append(GTK_BOX(filter_box), filter_label);
+    gtk_box_append(GTK_BOX(filter_box), logs_filter_all_check);
+    gtk_box_append(GTK_BOX(filter_box), logs_filter_new_check);
+    gtk_box_append(GTK_BOX(filter_box), logs_filter_changed_check);
+    gtk_box_append(GTK_BOX(filter_box), logs_filter_missing_check);
+    gtk_box_append(GTK_BOX(filter_box), logs_filter_unchanged_check);
+    gtk_box_append(GTK_BOX(filter_box), logs_filter_ignored_check);
+    gtk_box_append(GTK_BOX(filter_box), logs_filter_errors_check);
+    gtk_box_append(GTK_BOX(right_box), filter_box);
+
+    // Logs
+    GtkWidget *logs_label = gtk_label_new("Logs:");
+    gtk_label_set_xalign(GTK_LABEL(logs_label), 0.0);
+    logs_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(logs_text), TRUE);
+    gtk_widget_set_vexpand(logs_text, TRUE);
+    GtkWidget *logs_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(logs_scroll), logs_text);
+    gtk_widget_set_vexpand(logs_scroll, TRUE);
+    gtk_box_append(GTK_BOX(right_box), logs_label);
+    gtk_box_append(GTK_BOX(right_box), logs_scroll);
+
+    gtk_paned_set_end_child(GTK_PANED(paned), right_box);
+    gtk_paned_set_position(GTK_PANED(paned), 370);
+
+    return paned;
+}
+
+// ============================================================================
+// TAB 5: FULL FILE SCANNER
 // ============================================================================
 
 typedef struct {
@@ -1216,7 +1652,7 @@ GtkWidget *create_scanner_tab() {
 }
 
 // ============================================================================
-// TAB 5: ABOUT
+// TAB 6: ABOUT
 // ============================================================================
 
 GtkWidget *create_about_tab() {
@@ -1243,8 +1679,9 @@ GtkWidget *create_about_tab() {
         "• File Locator - Search files across databases\n"
         "• Drives Manager - Track and manage storage drives\n"
         "• Summary Viewer - View scan run statistics\n"
+        "• Logs Viewer - View detailed run logs with filters\n"
         "• File Scanner - Full file scanning with progress tracking\n\n"
-        "All major File Tracker features\n"
+        "Complete File Tracker functionality\n"
         "in one convenient application.");
     gtk_label_set_justify(GTK_LABEL(desc), GTK_JUSTIFY_CENTER);
     gtk_box_append(GTK_BOX(box), desc);
@@ -1302,6 +1739,8 @@ void activate(GtkApplication *app, gpointer user_data) {
                             gtk_label_new("Drives"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_summary_tab(),
                             gtk_label_new("Summary"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_logs_tab(),
+                            gtk_label_new("Logs"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_scanner_tab(),
                             gtk_label_new("File Scanner"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_about_tab(),
@@ -1309,8 +1748,9 @@ void activate(GtkApplication *app, gpointer user_data) {
 
     gtk_window_set_child(GTK_WINDOW(window), main_notebook);
 
-    // Initialize scanner volumes list
+    // Initialize scanner volumes list and logs databases
     scanner_refresh_volumes();
+    logs_refresh_databases();
     gtk_window_present(GTK_WINDOW(window));
 
     // Initialize
