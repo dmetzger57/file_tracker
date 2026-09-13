@@ -193,6 +193,44 @@ int mkdir_p(const char *path) {
 }
 
 // ==== Core Logic ====
+void process_ignored_file(ThreadContext *ctx, const char *path, const char *name, sqlite3 *db) {
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ctx->ignored++;
+        return;
+    }
+
+    log_message(ctx, "IGNORED", path);
+
+    if (update) {
+        // Check if file already exists in database
+        sqlite3_stmt *check_stmt;
+        sqlite3_prepare_v2(db, "SELECT id FROM files WHERE full_path = ? LIMIT 1", -1, &check_stmt, NULL);
+        sqlite3_bind_text(check_stmt, 1, path, -1, SQLITE_STATIC);
+        int exists = (sqlite3_step(check_stmt) == SQLITE_ROW);
+        sqlite3_finalize(check_stmt);
+
+        if (!exists) {
+            // Add to files table without checksum
+            char owner[256];
+            get_owner(st.st_uid, owner, sizeof(owner));
+            sqlite3_stmt *ins_stmt;
+            sqlite3_prepare_v2(db, "INSERT INTO files (file_name, full_path, size, created, last_modified, owner, checksum) VALUES (?, ?, ?, ?, ?, ?, ?)", -1, &ins_stmt, NULL);
+            sqlite3_bind_text(ins_stmt, 1, name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins_stmt, 2, path, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(ins_stmt, 3, st.st_size);
+            sqlite3_bind_int64(ins_stmt, 4, st.st_ctime);
+            sqlite3_bind_int64(ins_stmt, 5, st.st_mtime);
+            sqlite3_bind_text(ins_stmt, 6, owner, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins_stmt, 7, "", -1, SQLITE_STATIC);  // Empty checksum
+            sqlite3_step(ins_stmt);
+            sqlite3_finalize(ins_stmt);
+        }
+    }
+
+    ctx->ignored++;
+}
+
 void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite3 *db) {
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
@@ -279,10 +317,7 @@ void traverse_directory(ThreadContext *ctx, const char *dir_path, sqlite3 *db) {
     struct dirent *entry;
     while ((entry = readdir(dir))) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-        if (is_ignored(entry->d_name)) {
-            ctx->ignored++;
-            continue;
-        }
+
         char full_path[MAX_PATH];
         struct stat st;
         int path_len = snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
@@ -292,6 +327,17 @@ void traverse_directory(ThreadContext *ctx, const char *dir_path, sqlite3 *db) {
             log_error(ctx, err_msg);
             continue;
         }
+
+        if (is_ignored(entry->d_name)) {
+            // Process ignored files to record them in database
+            if (stat(full_path, &st) == 0 && S_ISREG(st.st_mode)) {
+                process_ignored_file(ctx, full_path, entry->d_name, db);
+            } else {
+                ctx->ignored++;
+            }
+            continue;
+        }
+
         if (stat(full_path, &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
                 traverse_directory(ctx, full_path, db);

@@ -722,6 +722,47 @@ gboolean scanner_update_current_file(gpointer data) {
 
 gboolean scanner_scan_completed(gpointer data);
 
+void scanner_process_ignored_file(ScannerContext *ctx, const char *filepath, const char *filename) {
+    struct stat sb;
+    if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+        ctx->ignored++;
+        g_idle_add(scanner_update_progress, ctx);
+        return;
+    }
+
+    scanner_log_message(ctx, "IGNORED", filepath);
+
+    if (ctx->update_mode) {
+        // Check if file already exists in database
+        sqlite3_stmt *check_stmt;
+        if (sqlite3_prepare_v2(ctx->db, "SELECT id FROM files WHERE full_path = ? LIMIT 1", -1, &check_stmt, 0) == SQLITE_OK) {
+            sqlite3_bind_text(check_stmt, 1, filepath, -1, SQLITE_STATIC);
+            int exists = (sqlite3_step(check_stmt) == SQLITE_ROW);
+            sqlite3_finalize(check_stmt);
+
+            if (!exists) {
+                // Add to files table without checksum
+                sqlite3_stmt *ins;
+                if (sqlite3_prepare_v2(ctx->db, "INSERT INTO files (file_name, full_path, size, created, last_modified, owner, checksum) VALUES (?, ?, ?, ?, ?, ?, ?)", -1, &ins, NULL) == SQLITE_OK) {
+                    struct passwd *pw = getpwuid(sb.st_uid);
+                    sqlite3_bind_text(ins, 1, filename, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ins, 2, filepath, -1, SQLITE_STATIC);
+                    sqlite3_bind_int64(ins, 3, sb.st_size);
+                    sqlite3_bind_int64(ins, 4, sb.st_ctime);
+                    sqlite3_bind_int64(ins, 5, sb.st_mtime);
+                    sqlite3_bind_text(ins, 6, pw ? pw->pw_name : "unknown", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ins, 7, "", -1, SQLITE_STATIC);  // Empty checksum
+                    sqlite3_step(ins);
+                    sqlite3_finalize(ins);
+                }
+            }
+        }
+    }
+
+    ctx->ignored++;
+    g_idle_add(scanner_update_progress, ctx);
+}
+
 void scanner_process_file(ScannerContext *ctx, const char *filepath, const char *filename) {
     if (ctx->should_stop) return;
 
@@ -792,10 +833,20 @@ void scanner_scan_directory(ScannerContext *ctx, const char *dirpath) {
     while ((entry = readdir(dir)) != NULL) {
         if (ctx->should_stop) break;
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-        if (is_ignored(entry->d_name)) { ctx->ignored++; continue; }
 
         char filepath[MAX_PATH];
         snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
+
+        if (is_ignored(entry->d_name)) {
+            // Process ignored files to record them in database
+            struct stat sb;
+            if (stat(filepath, &sb) == 0 && S_ISREG(sb.st_mode)) {
+                scanner_process_ignored_file(ctx, filepath, entry->d_name);
+            } else {
+                ctx->ignored++;
+            }
+            continue;
+        }
 
         struct stat sb;
         if (stat(filepath, &sb) == 0) {
