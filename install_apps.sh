@@ -4,7 +4,7 @@ echo "Installing File Tracker GUI Applications to /Applications..."
 echo ""
 
 # Copy each .app bundle to /Applications
-for app in "File Tracker.app" "File Tracker Logs.app" "File Tracker Summary.app" "File Tracker Drives.app"; do
+for app in "File Tracker.app" "File Tracker Logs.app" "File Tracker Summary.app" "File Tracker Drives.app" "File Tracker Unified.app"; do
     if [ -d "$app" ]; then
         echo "Installing $app..."
         cp -r "$app" /Applications/
