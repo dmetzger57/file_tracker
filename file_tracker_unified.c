@@ -289,6 +289,7 @@ GtkWidget *create_locator_tab() {
 
 GtkWidget *drives_tree;
 GtkWidget *drives_name_entry;
+GtkWidget *drives_location_entry;
 GtkWidget *drives_desc_text;
 sqlite3_int64 selected_drive_id = -1;
 
@@ -302,25 +303,28 @@ void drives_refresh_list() {
     sqlite3 *db;
     if (sqlite3_open(drives_db, &db) != SQLITE_OK) return;
 
-    const char *sql = "SELECT drive_id, drive_name, capacity, space_available, description, last_verified "
+    const char *sql = "SELECT drive_id, drive_name, storage_container, capacity, space_available, description, last_verified "
                      "FROM drives ORDER BY drive_name;";
     sqlite3_stmt *stmt;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             char cap_str[64], avail_str[64];
-            format_size(sqlite3_column_int64(stmt, 2), cap_str, sizeof(cap_str));
-            format_size(sqlite3_column_int64(stmt, 3), avail_str, sizeof(avail_str));
+            format_size(sqlite3_column_int64(stmt, 3), cap_str, sizeof(cap_str));
+            format_size(sqlite3_column_int64(stmt, 4), avail_str, sizeof(avail_str));
+
+            const char *location = (const char *)sqlite3_column_text(stmt, 2);
 
             GtkTreeIter iter;
             gtk_list_store_append(store, &iter);
             gtk_list_store_set(store, &iter,
                               0, sqlite3_column_int64(stmt, 0),
                               1, sqlite3_column_text(stmt, 1),
-                              2, cap_str,
-                              3, avail_str,
-                              4, sqlite3_column_text(stmt, 4),
+                              2, location ? location : "",
+                              3, cap_str,
+                              4, avail_str,
                               5, sqlite3_column_text(stmt, 5),
+                              6, sqlite3_column_text(stmt, 6),
                               -1);
         }
         sqlite3_finalize(stmt);
@@ -338,6 +342,8 @@ void on_drives_add_clicked(GtkButton *button, gpointer user_data) {
         g_object_unref(alert);
         return;
     }
+
+    const char *location = gtk_editable_get_text(GTK_EDITABLE(drives_location_entry));
 
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
     GtkTextIter start, end;
@@ -364,12 +370,13 @@ void on_drives_add_clicked(GtkButton *button, gpointer user_data) {
         char timestamp[64];
         get_timestamp(timestamp, sizeof(timestamp));
 
-        const char *insert_sql = "INSERT INTO drives (drive_name, description, last_updated) VALUES (?, ?, ?);";
+        const char *insert_sql = "INSERT INTO drives (drive_name, storage_container, description, last_updated) VALUES (?, ?, ?, ?);";
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, insert_sql, -1, &stmt, 0) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, desc, -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 3, timestamp, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, location, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, desc, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 4, timestamp, -1, SQLITE_STATIC);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
@@ -378,6 +385,7 @@ void on_drives_add_clicked(GtkButton *button, gpointer user_data) {
 
     g_free(desc);
     gtk_editable_set_text(GTK_EDITABLE(drives_name_entry), "");
+    gtk_editable_set_text(GTK_EDITABLE(drives_location_entry), "");
     gtk_text_buffer_set_text(buffer, "", -1);
     drives_refresh_list();
 }
@@ -436,6 +444,10 @@ GtkWidget *create_drives_tab() {
     drives_name_entry = gtk_entry_new();
     gtk_widget_set_hexpand(drives_name_entry, TRUE);
 
+    GtkWidget *location_label = gtk_label_new("Location:");
+    drives_location_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(drives_location_entry, TRUE);
+
     GtkWidget *add_btn = gtk_button_new_with_label("Add");
     gtk_widget_add_css_class(add_btn, "suggested-action");
     g_signal_connect(add_btn, "clicked", G_CALLBACK(on_drives_add_clicked), NULL);
@@ -449,6 +461,8 @@ GtkWidget *create_drives_tab() {
 
     gtk_box_append(GTK_BOX(add_box), name_label);
     gtk_box_append(GTK_BOX(add_box), drives_name_entry);
+    gtk_box_append(GTK_BOX(add_box), location_label);
+    gtk_box_append(GTK_BOX(add_box), drives_location_entry);
     gtk_box_append(GTK_BOX(add_box), add_btn);
     gtk_box_append(GTK_BOX(add_box), del_btn);
     gtk_box_append(GTK_BOX(add_box), refresh_btn);
@@ -467,17 +481,17 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(box), desc_box);
 
     // Drives list
-    GtkListStore *store = gtk_list_store_new(6, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
-                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkListStore *store = gtk_list_store_new(7, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     drives_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
-    const char *titles[] = {"ID", "Name", "Capacity", "Available", "Description", "Last Verified"};
-    for (int i = 0; i < 6; i++) {
+    const char *titles[] = {"ID", "Name", "Location", "Capacity", "Available", "Description", "Last Verified"};
+    for (int i = 0; i < 7; i++) {
         GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
-        if (i == 4) gtk_tree_view_column_set_expand(column, TRUE);
+        if (i == 5) gtk_tree_view_column_set_expand(column, TRUE);
         gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), column);
     }
 
