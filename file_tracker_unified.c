@@ -595,6 +595,8 @@ void on_drives_add_clicked(GtkButton *button, gpointer user_data) {
     gtk_editable_set_text(GTK_EDITABLE(drives_name_entry), "");
     gtk_editable_set_text(GTK_EDITABLE(drives_location_entry), "");
     gtk_text_buffer_set_text(buffer, "", -1);
+    gtk_editable_set_editable(GTK_EDITABLE(drives_name_entry), TRUE);
+    selected_drive_id = -1;
     drives_refresh_list();
 }
 
@@ -625,6 +627,53 @@ void on_drives_delete_clicked(GtkButton *button, gpointer user_data) {
     drives_refresh_list();
 }
 
+void on_drives_update_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    if (selected_drive_id < 0) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a drive to update");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        return;
+    }
+
+    const char *location = gtk_editable_get_text(GTK_EDITABLE(drives_location_entry));
+
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buffer, &start, &end);
+    char *desc = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+
+    char drives_db[MAX_PATH];
+    snprintf(drives_db, sizeof(drives_db), "%s/drives.db", db_dir_path);
+
+    sqlite3 *db;
+    if (sqlite3_open(drives_db, &db) == SQLITE_OK) {
+        char timestamp[64];
+        get_timestamp(timestamp, sizeof(timestamp));
+
+        const char *update_sql = "UPDATE drives SET storage_container = ?, description = ?, last_updated = ? WHERE drive_id = ?;";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, 0) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, location, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, desc, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, timestamp, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(stmt, 4, selected_drive_id);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        sqlite3_close(db);
+    }
+
+    g_free(desc);
+
+    GtkAlertDialog *alert = gtk_alert_dialog_new("Drive information updated");
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+
+    drives_refresh_list();
+}
+
 void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data) {
     (void)user_data;
 
@@ -632,7 +681,36 @@ void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data
     GtkTreeIter iter;
 
     if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
-        gtk_tree_model_get(model, &iter, 0, &selected_drive_id, -1);
+        char *name, *location, *description;
+
+        gtk_tree_model_get(model, &iter,
+                          0, &selected_drive_id,
+                          1, &name,
+                          2, &location,
+                          5, &description,
+                          -1);
+
+        // Populate fields with selected drive's data
+        gtk_editable_set_text(GTK_EDITABLE(drives_name_entry), name ? name : "");
+        gtk_editable_set_text(GTK_EDITABLE(drives_location_entry), location ? location : "");
+
+        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
+        gtk_text_buffer_set_text(buffer, description ? description : "", -1);
+
+        // Make name field read-only when editing existing drive
+        gtk_editable_set_editable(GTK_EDITABLE(drives_name_entry), FALSE);
+
+        g_free(name);
+        g_free(location);
+        g_free(description);
+    } else {
+        selected_drive_id = -1;
+        // Clear fields and make name editable again for adding new drives
+        gtk_editable_set_text(GTK_EDITABLE(drives_name_entry), "");
+        gtk_editable_set_text(GTK_EDITABLE(drives_location_entry), "");
+        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
+        gtk_text_buffer_set_text(buffer, "", -1);
+        gtk_editable_set_editable(GTK_EDITABLE(drives_name_entry), TRUE);
     }
 }
 
@@ -660,6 +738,9 @@ GtkWidget *create_drives_tab() {
     gtk_widget_add_css_class(add_btn, "suggested-action");
     g_signal_connect(add_btn, "clicked", G_CALLBACK(on_drives_add_clicked), NULL);
 
+    GtkWidget *update_btn = gtk_button_new_with_label("Update");
+    g_signal_connect(update_btn, "clicked", G_CALLBACK(on_drives_update_clicked), NULL);
+
     GtkWidget *del_btn = gtk_button_new_with_label("Delete");
     gtk_widget_add_css_class(del_btn, "destructive-action");
     g_signal_connect(del_btn, "clicked", G_CALLBACK(on_drives_delete_clicked), NULL);
@@ -675,6 +756,7 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(add_box), location_label);
     gtk_box_append(GTK_BOX(add_box), drives_location_entry);
     gtk_box_append(GTK_BOX(add_box), add_btn);
+    gtk_box_append(GTK_BOX(add_box), update_btn);
     gtk_box_append(GTK_BOX(add_box), del_btn);
     gtk_box_append(GTK_BOX(add_box), refresh_btn);
     gtk_box_append(GTK_BOX(add_box), update_mounted_btn);
