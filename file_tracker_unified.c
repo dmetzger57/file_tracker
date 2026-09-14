@@ -2348,13 +2348,9 @@ void compare_perform_comparison() {
             strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
             strcmp(result->checksum_run1, result->checksum_run2) != 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run2)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
-            strcmp(result->status_run1, "MISSING") != 0 &&
-            strcmp(result->status_run2, "MISSING") == 0) show = 1;
+            strcmp(result->status_run2, "NOT_IN_RUN") == 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run1)) &&
-            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
-            strcmp(result->status_run2, "MISSING") != 0 &&
-            strcmp(result->status_run1, "MISSING") == 0) show = 1;
+            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run1)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") != 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
@@ -2381,9 +2377,7 @@ void compare_perform_comparison() {
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run2)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run1)) &&
-            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
-            strcmp(result->status_run2, "MISSING") != 0 &&
-            strcmp(result->status_run1, "MISSING") == 0) show = 1;
+            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
 
