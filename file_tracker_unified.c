@@ -1280,6 +1280,50 @@ void on_logs_filter_toggled(GtkCheckButton *button, gpointer user_data) {
     logs_load_logs();
 }
 
+void on_logs_save_note_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    if (logs_selected_run_id == 0) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a run to update");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        return;
+    }
+
+    // Get note text
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buffer, &start, &end);
+    char *note = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+
+    // Open database
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to open database");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        g_free(note);
+        return;
+    }
+
+    // Update note in database
+    const char *update_sql = "UPDATE meta SET note = ? WHERE id = ?";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, note, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 2, logs_selected_run_id);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(db);
+    g_free(note);
+
+    GtkAlertDialog *alert = gtk_alert_dialog_new("Note saved successfully");
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+}
+
 void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer user_data);
 
 void on_logs_delete_run_clicked(GtkButton *button, gpointer user_data) {
@@ -1461,15 +1505,25 @@ GtkWidget *create_logs_tab() {
     gtk_box_append(GTK_BOX(right_box), info_scroll);
 
     // Note
+    GtkWidget *note_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *note_label = gtk_label_new("Note:");
     gtk_label_set_xalign(GTK_LABEL(note_label), 0.0);
+    gtk_widget_set_hexpand(note_label, TRUE);
+
+    GtkWidget *save_note_btn = gtk_button_new_with_label("Save Note");
+    gtk_widget_add_css_class(save_note_btn, "suggested-action");
+    g_signal_connect(save_note_btn, "clicked", G_CALLBACK(on_logs_save_note_clicked), NULL);
+
+    gtk_box_append(GTK_BOX(note_box), note_label);
+    gtk_box_append(GTK_BOX(note_box), save_note_btn);
+
     logs_note_text = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_note_text), FALSE);
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_note_text), TRUE);
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(logs_note_text), GTK_WRAP_WORD);
     gtk_widget_set_size_request(logs_note_text, -1, 60);
     GtkWidget *note_scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), logs_note_text);
-    gtk_box_append(GTK_BOX(right_box), note_label);
+    gtk_box_append(GTK_BOX(right_box), note_box);
     gtk_box_append(GTK_BOX(right_box), note_scroll);
 
     // Filters
