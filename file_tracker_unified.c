@@ -211,7 +211,50 @@ void add_drive_to_tracker(const char *drive_name, const char *source_path) {
     sqlite3_close(drives_db);
 }
 
-void auto_add_drive_to_tracker(const char *db_path, const char *source_path) {
+void update_drive_stats(const char *drive_name, const char *source_path) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char drives_db_path[MAX_PATH];
+    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home);
+
+    sqlite3 *drives_db = NULL;
+    if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
+        if (drives_db) sqlite3_close(drives_db);
+        return;
+    }
+
+    // Get drive stats
+    long long capacity = 0, available = 0, used = 0;
+    int has_stats = get_drive_stats(source_path, &capacity, &available, &used);
+
+    if (!has_stats) {
+        sqlite3_close(drives_db);
+        return;
+    }
+
+    char timestamp[64];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    const char *update_sql =
+        "UPDATE drives SET capacity = ?, space_available = ?, space_used = ?, last_updated = ? "
+        "WHERE drive_name = ?;";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(drives_db, update_sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, capacity);
+        sqlite3_bind_int64(stmt, 2, available);
+        sqlite3_bind_int64(stmt, 3, used);
+        sqlite3_bind_text(stmt, 4, timestamp, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 5, drive_name, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(drives_db);
+}
+
+void auto_add_or_update_drive(const char *db_path, const char *source_path) {
     // Extract drive name from db_path
     // db_path format: ~/db/FileTracker/DriveName.db
     char *last_slash = strrchr(db_path, '/');
@@ -227,13 +270,38 @@ void auto_add_drive_to_tracker(const char *db_path, const char *source_path) {
         *dot = '\0';
     }
 
-    // Check if drive already exists
-    if (!drive_exists_in_tracker(drive_name)) {
+    // Check if drive already exists - if so, update; if not, add
+    if (drive_exists_in_tracker(drive_name)) {
+        update_drive_stats(drive_name, source_path);
+    } else {
         add_drive_to_tracker(drive_name, source_path);
     }
 }
 
+void update_all_mounted_drives() {
+    DIR *dir = opendir("/Volumes");
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+
+        char full_path[MAX_PATH];
+        snprintf(full_path, sizeof(full_path), "/Volumes/%s", entry->d_name);
+
+        struct stat sb;
+        if (stat(full_path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+            // Check if this drive is in the database
+            if (drive_exists_in_tracker(entry->d_name)) {
+                update_drive_stats(entry->d_name, full_path);
+            }
+        }
+    }
+    closedir(dir);
+}
+
 void refresh_all_database_combos();
+void drives_refresh_list();
 
 // ============================================================================
 // TAB 1: FILE LOCATOR (Simplified - most commonly used)
@@ -422,6 +490,17 @@ GtkWidget *drives_location_entry;
 GtkWidget *drives_desc_text;
 sqlite3_int64 selected_drive_id = -1;
 
+void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    update_all_mounted_drives();
+    drives_refresh_list();
+
+    GtkAlertDialog *alert = gtk_alert_dialog_new("Updated stats for all mounted drives");
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+}
+
 void drives_refresh_list() {
     char drives_db[MAX_PATH];
     snprintf(drives_db, sizeof(drives_db), "%s/drives.db", db_dir_path);
@@ -588,6 +667,9 @@ GtkWidget *create_drives_tab() {
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
     g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)drives_refresh_list), NULL);
 
+    GtkWidget *update_mounted_btn = gtk_button_new_with_label("Update Mounted Drives");
+    g_signal_connect(update_mounted_btn, "clicked", G_CALLBACK(on_drives_update_mounted_clicked), NULL);
+
     gtk_box_append(GTK_BOX(add_box), name_label);
     gtk_box_append(GTK_BOX(add_box), drives_name_entry);
     gtk_box_append(GTK_BOX(add_box), location_label);
@@ -595,6 +677,7 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(add_box), add_btn);
     gtk_box_append(GTK_BOX(add_box), del_btn);
     gtk_box_append(GTK_BOX(add_box), refresh_btn);
+    gtk_box_append(GTK_BOX(add_box), update_mounted_btn);
     gtk_box_append(GTK_BOX(box), add_box);
 
     // Description
@@ -1516,8 +1599,8 @@ gpointer scanner_thread_func(gpointer data) {
             ctx->log_buffer = NULL;
         }
 
-        // Auto-add drive to drive tracker
-        auto_add_drive_to_tracker(ctx->db_path, ctx->scan_path);
+        // Auto-add or update drive in drive tracker
+        auto_add_or_update_drive(ctx->db_path, ctx->scan_path);
     }
 
     g_idle_add(scanner_scan_completed, ctx);
