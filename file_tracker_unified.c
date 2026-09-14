@@ -1280,6 +1280,129 @@ void on_logs_filter_toggled(GtkCheckButton *button, gpointer user_data) {
     logs_load_logs();
 }
 
+void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer user_data);
+
+void on_logs_delete_run_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    if (logs_selected_run_id == 0) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a run to delete");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        return;
+    }
+
+    // Open database
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to open database");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        return;
+    }
+
+    // Get run info for confirmation message
+    char run_info[256] = "this run";
+    const char *query = "SELECT last_date_verify FROM meta WHERE id = ?";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *date = (const char *)sqlite3_column_text(stmt, 0);
+            if (date) {
+                snprintf(run_info, sizeof(run_info), "Run #%lld from %s", logs_selected_run_id, date);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(db);
+
+    // Confirm deletion
+    char message[512];
+    snprintf(message, sizeof(message),
+            "Delete %s?\n\nThis will remove:\n"
+            "• Run metadata from the database\n"
+            "• All log entries for this run\n\n"
+            "This action cannot be undone.",
+            run_info);
+
+    GtkAlertDialog *confirm = gtk_alert_dialog_new(message);
+    gtk_alert_dialog_set_buttons(confirm, (const char *[]){"Cancel", "Delete", NULL});
+    gtk_alert_dialog_set_cancel_button(confirm, 0);
+    gtk_alert_dialog_set_default_button(confirm, 0);
+
+    // Use async API to get response
+    g_object_set_data(G_OBJECT(confirm), "run_id", GINT_TO_POINTER((int)logs_selected_run_id));
+    gtk_alert_dialog_choose(confirm, GTK_WINDOW(window), NULL,
+                           (GAsyncReadyCallback)on_logs_delete_confirmed, NULL);
+}
+
+void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer user_data) {
+    (void)user_data;
+
+    GtkAlertDialog *dialog = GTK_ALERT_DIALOG(source);
+    int response = gtk_alert_dialog_choose_finish(dialog, result, NULL);
+
+    if (response != 1) {  // Not "Delete" button
+        g_object_unref(dialog);
+        return;
+    }
+
+    sqlite3_int64 run_id = (sqlite3_int64)GPOINTER_TO_INT(g_object_get_data(source, "run_id"));
+    g_object_unref(dialog);
+
+    // Open database
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to open database");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        return;
+    }
+
+    // Delete run_logs entries first (foreign key constraint)
+    const char *delete_logs_sql = "DELETE FROM run_logs WHERE run_id = ?";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, delete_logs_sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, run_id);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    // Delete meta entry
+    const char *delete_meta_sql = "DELETE FROM meta WHERE id = ?";
+    if (sqlite3_prepare_v2(db, delete_meta_sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, run_id);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(db);
+
+    // Clear selection and refresh
+    logs_selected_run_id = 0;
+
+    // Clear text buffers
+    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_run_info_text));
+    gtk_text_buffer_set_text(info_buffer, "", -1);
+    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+    gtk_text_buffer_set_text(note_buffer, "", -1);
+    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+    gtk_text_buffer_set_text(logs_buffer, "", -1);
+
+    // Reload runs list
+    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(logs_db_combo));
+    if (db_name) {
+        logs_load_runs(db_name);
+        g_free((void *)db_name);
+    }
+
+    GtkAlertDialog *alert = gtk_alert_dialog_new("Run deleted successfully");
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+}
+
 GtkWidget *create_logs_tab() {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
@@ -1310,6 +1433,11 @@ GtkWidget *create_logs_tab() {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(runs_scroll), logs_runs_list);
     gtk_widget_set_vexpand(runs_scroll, TRUE);
     gtk_box_append(GTK_BOX(left_box), runs_scroll);
+
+    GtkWidget *delete_btn = gtk_button_new_with_label("Delete Selected Run");
+    gtk_widget_add_css_class(delete_btn, "destructive-action");
+    g_signal_connect(delete_btn, "clicked", G_CALLBACK(on_logs_delete_run_clicked), NULL);
+    gtk_box_append(GTK_BOX(left_box), delete_btn);
 
     gtk_paned_set_start_child(GTK_PANED(paned), left_box);
 
