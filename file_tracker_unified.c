@@ -2171,6 +2171,8 @@ GtkWidget *compare_results_tree;
 GtkWidget *compare_filter_only_run1;
 GtkWidget *compare_filter_only_run2;
 GtkWidget *compare_filter_different;
+GtkWidget *compare_filter_missing_run1;
+GtkWidget *compare_filter_missing_run2;
 GtkWidget *compare_filter_all_run1;
 GtkWidget *compare_filter_all_run2;
 
@@ -2345,6 +2347,14 @@ void compare_perform_comparison() {
             strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
             strcmp(result->checksum_run1, result->checksum_run2) != 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run2)) &&
+            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
+            strcmp(result->status_run1, "MISSING") != 0 &&
+            strcmp(result->status_run2, "MISSING") == 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run1)) &&
+            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
+            strcmp(result->status_run2, "MISSING") != 0 &&
+            strcmp(result->status_run1, "MISSING") == 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run1)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") != 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
@@ -2370,6 +2380,10 @@ void compare_perform_comparison() {
         int show = 0;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run2)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run1)) &&
+            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
+            strcmp(result->status_run2, "MISSING") != 0 &&
+            strcmp(result->status_run1, "MISSING") == 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
 
@@ -2552,6 +2566,14 @@ GtkWidget *create_compare_tab() {
     compare_filter_different = gtk_check_button_new_with_label("Different Checksum");
     g_signal_connect(compare_filter_different, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
     gtk_box_append(GTK_BOX(left_box), compare_filter_different);
+
+    compare_filter_missing_run2 = gtk_check_button_new_with_label("Missing in Run 2");
+    g_signal_connect(compare_filter_missing_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_missing_run2);
+
+    compare_filter_missing_run1 = gtk_check_button_new_with_label("Missing in Run 1");
+    g_signal_connect(compare_filter_missing_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_missing_run1);
 
     compare_filter_all_run1 = gtk_check_button_new_with_label("All Files in Run 1");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(compare_filter_all_run1), TRUE);
