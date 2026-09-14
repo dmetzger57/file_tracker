@@ -2244,12 +2244,34 @@ void on_compare_run2_run_changed(GtkComboBox *combo, gpointer user_data) {
 }
 
 typedef struct {
-    char path[MAX_PATH];
+    char path_run1[MAX_PATH];
+    char path_run2[MAX_PATH];
     char status_run1[32];
     char status_run2[32];
     char checksum_run1[HASH_SIZE];
     char checksum_run2[HASH_SIZE];
 } CompareResult;
+
+// Strip mount point (first two path components) for comparison
+// e.g., "/Volumes/MediaArch-C2/folder/file" -> "/folder/file"
+const char* get_relative_path(const char *full_path) {
+    if (!full_path || full_path[0] != '/') return full_path;
+
+    const char *p = full_path + 1; // Skip first '/'
+    int slashes = 0;
+
+    while (*p && slashes < 2) {
+        if (*p == '/') slashes++;
+        p++;
+    }
+
+    // If we found 2 slashes, return pointer after them
+    // Otherwise return original path
+    if (slashes == 2 && *p) {
+        return p - 1; // Return including the slash
+    }
+    return full_path;
+}
 
 void compare_perform_comparison() {
     if (compare_run1_id == 0 || compare_run2_id == 0) {
@@ -2288,14 +2310,19 @@ void compare_perform_comparison() {
             const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
             const char *status = (const char *)sqlite3_column_text(stmt, 2);
 
+            // Use relative path (without mount point) as comparison key
+            const char *rel_path = get_relative_path(path);
+
             CompareResult *result = g_new0(CompareResult, 1);
-            strncpy(result->path, path, MAX_PATH - 1);
+            strncpy(result->path_run1, path, MAX_PATH - 1);  // Store full path for display
+            result->path_run1[MAX_PATH - 1] = '\0';
+            strcpy(result->path_run2, "");  // Not in run 2 yet
             strncpy(result->status_run1, status ? status : "UNKNOWN", 31);
             strncpy(result->checksum_run1, checksum ? checksum : "", HASH_SIZE - 1);
             strcpy(result->status_run2, "NOT_IN_RUN");
             strcpy(result->checksum_run2, "");
 
-            g_hash_table_insert(files_run1, g_strdup(path), result);
+            g_hash_table_insert(files_run1, g_strdup(rel_path), result);
         }
         sqlite3_finalize(stmt);
     }
@@ -2310,18 +2337,27 @@ void compare_perform_comparison() {
             const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
             const char *status = (const char *)sqlite3_column_text(stmt, 2);
 
-            CompareResult *result = g_hash_table_lookup(files_run1, path);
+            // Use relative path (without mount point) as comparison key
+            const char *rel_path = get_relative_path(path);
+
+            CompareResult *result = g_hash_table_lookup(files_run1, rel_path);
             if (result) {
+                // File exists in both runs - update run 2 info
+                strncpy(result->path_run2, path, MAX_PATH - 1);  // Store full path from run 2
+                result->path_run2[MAX_PATH - 1] = '\0';
                 strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
                 strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
             } else {
+                // File only in run 2
                 result = g_new0(CompareResult, 1);
-                strncpy(result->path, path, MAX_PATH - 1);
+                strcpy(result->path_run1, "");  // Not in run 1
+                strncpy(result->path_run2, path, MAX_PATH - 1);  // Store full path for display
+                result->path_run2[MAX_PATH - 1] = '\0';
                 strcpy(result->status_run1, "NOT_IN_RUN");
                 strcpy(result->checksum_run1, "");
                 strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
                 strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
-                g_hash_table_insert(files_run2, g_strdup(path), result);
+                g_hash_table_insert(files_run2, g_strdup(rel_path), result);
             }
         }
         sqlite3_finalize(stmt);
@@ -2357,10 +2393,15 @@ void compare_perform_comparison() {
             strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
 
         if (show) {
+            // Use relative path for display (common portion)
+            const char *display_path = get_relative_path(
+                strlen(result->path_run1) > 0 ? result->path_run1 : result->path_run2
+            );
+
             GtkTreeIter tree_iter;
             gtk_list_store_append(store, &tree_iter);
             gtk_list_store_set(store, &tree_iter,
-                              0, result->path,
+                              0, display_path,
                               1, result->status_run1,
                               2, result->status_run2,
                               3, result->checksum_run1,
@@ -2382,10 +2423,15 @@ void compare_perform_comparison() {
             strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
 
         if (show) {
+            // Use relative path for display (common portion)
+            const char *display_path = get_relative_path(
+                strlen(result->path_run1) > 0 ? result->path_run1 : result->path_run2
+            );
+
             GtkTreeIter tree_iter;
             gtk_list_store_append(store, &tree_iter);
             gtk_list_store_set(store, &tree_iter,
-                              0, result->path,
+                              0, display_path,
                               1, result->status_run1,
                               2, result->status_run2,
                               3, result->checksum_run1,
