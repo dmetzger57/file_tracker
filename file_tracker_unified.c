@@ -278,10 +278,11 @@ void auto_add_or_update_drive(const char *db_path, const char *source_path) {
     }
 }
 
-void update_all_mounted_drives() {
+int update_all_mounted_drives() {
     DIR *dir = opendir("/Volumes");
-    if (!dir) return;
+    if (!dir) return 0;
 
+    int updated_count = 0;
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
@@ -294,10 +295,12 @@ void update_all_mounted_drives() {
             // Check if this drive is in the database
             if (drive_exists_in_tracker(entry->d_name)) {
                 update_drive_stats(entry->d_name, full_path);
+                updated_count++;
             }
         }
     }
     closedir(dir);
+    return updated_count;
 }
 
 void refresh_all_database_combos();
@@ -493,10 +496,20 @@ sqlite3_int64 selected_drive_id = -1;
 void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
     (void)button; (void)user_data;
 
-    update_all_mounted_drives();
+    int count = update_all_mounted_drives();
     drives_refresh_list();
 
-    GtkAlertDialog *alert = gtk_alert_dialog_new("Updated stats for all mounted drives");
+    char message[256];
+    if (count > 0) {
+        snprintf(message, sizeof(message),
+                "Updated capacity and available space for %d mounted drive%s",
+                count, count == 1 ? "" : "s");
+    } else {
+        snprintf(message, sizeof(message),
+                "No tracked drives are currently mounted");
+    }
+
+    GtkAlertDialog *alert = gtk_alert_dialog_new(message);
     gtk_alert_dialog_show(alert, GTK_WINDOW(window));
     g_object_unref(alert);
 }
