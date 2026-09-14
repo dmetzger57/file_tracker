@@ -2160,7 +2160,454 @@ GtkWidget *create_scanner_tab() {
 }
 
 // ============================================================================
-// TAB 6: ABOUT
+// TAB 6: COMPARE RUNS
+// ============================================================================
+
+GtkWidget *compare_run1_drive_combo;
+GtkWidget *compare_run1_run_combo;
+GtkWidget *compare_run2_drive_combo;
+GtkWidget *compare_run2_run_combo;
+GtkWidget *compare_results_tree;
+GtkWidget *compare_filter_only_run1;
+GtkWidget *compare_filter_only_run2;
+GtkWidget *compare_filter_different;
+GtkWidget *compare_filter_all_run1;
+GtkWidget *compare_filter_all_run2;
+
+char compare_run1_db_path[MAX_PATH] = "";
+char compare_run2_db_path[MAX_PATH] = "";
+sqlite3_int64 compare_run1_id = 0;
+sqlite3_int64 compare_run2_id = 0;
+
+void compare_load_runs_for_drive(GtkComboBoxText *combo, const char *db_name) {
+    gtk_combo_box_text_remove_all(combo);
+
+    if (!db_name || strlen(db_name) == 0) return;
+
+    char db_path[MAX_PATH];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", db_dir_path, db_name);
+
+    sqlite3 *db;
+    if (sqlite3_open(db_path, &db) != SQLITE_OK) return;
+
+    const char *sql = "SELECT id, last_date_verify FROM meta ORDER BY id DESC;";
+    sqlite3_stmt *stmt;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(stmt, 0);
+            const char *date = (const char *)sqlite3_column_text(stmt, 1);
+            char label[256];
+            snprintf(label, sizeof(label), "Run #%d - %s", id, date ? date : "Unknown");
+
+            char id_str[32];
+            snprintf(id_str, sizeof(id_str), "%d", id);
+            gtk_combo_box_text_append(combo, id_str, label);
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+}
+
+void on_compare_run1_drive_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
+    if (db_name) {
+        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(compare_run1_run_combo), db_name);
+        snprintf(compare_run1_db_path, sizeof(compare_run1_db_path), "%s/%s.db", db_dir_path, db_name);
+        g_free((void *)db_name);
+    }
+}
+
+void on_compare_run2_drive_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
+    if (db_name) {
+        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(compare_run2_run_combo), db_name);
+        snprintf(compare_run2_db_path, sizeof(compare_run2_db_path), "%s/%s.db", db_dir_path, db_name);
+        g_free((void *)db_name);
+    }
+}
+
+void on_compare_run1_run_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    const char *id_str = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
+    compare_run1_id = id_str ? atoll(id_str) : 0;
+}
+
+void on_compare_run2_run_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    const char *id_str = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
+    compare_run2_id = id_str ? atoll(id_str) : 0;
+}
+
+typedef struct {
+    char path[MAX_PATH];
+    char status_run1[32];
+    char status_run2[32];
+    char checksum_run1[HASH_SIZE];
+    char checksum_run2[HASH_SIZE];
+} CompareResult;
+
+void compare_perform_comparison() {
+    if (compare_run1_id == 0 || compare_run2_id == 0) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select both runs to compare");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        return;
+    }
+
+    // Clear existing results
+    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(compare_results_tree)));
+    gtk_list_store_clear(store);
+
+    // Open both databases
+    sqlite3 *db1, *db2;
+    if (sqlite3_open(compare_run1_db_path, &db1) != SQLITE_OK) return;
+    if (sqlite3_open(compare_run2_db_path, &db2) != SQLITE_OK) {
+        sqlite3_close(db1);
+        return;
+    }
+
+    // Get files from run 1
+    GHashTable *files_run1 = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    GHashTable *files_run2 = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+    const char *sql = "SELECT full_path, checksum FROM files WHERE id IN "
+                      "(SELECT DISTINCT full_path FROM run_logs WHERE run_id = ? AND status != 'MISSING')";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db1, "SELECT rl.full_path, f.checksum, rl.status FROM run_logs rl "
+                                "LEFT JOIN files f ON rl.full_path = f.full_path WHERE rl.run_id = ?",
+                          -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, compare_run1_id);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *path = (const char *)sqlite3_column_text(stmt, 0);
+            const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
+            const char *status = (const char *)sqlite3_column_text(stmt, 2);
+
+            CompareResult *result = g_new0(CompareResult, 1);
+            strncpy(result->path, path, MAX_PATH - 1);
+            strncpy(result->status_run1, status ? status : "UNKNOWN", 31);
+            strncpy(result->checksum_run1, checksum ? checksum : "", HASH_SIZE - 1);
+            strcpy(result->status_run2, "NOT_IN_RUN");
+            strcpy(result->checksum_run2, "");
+
+            g_hash_table_insert(files_run1, g_strdup(path), result);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // Get files from run 2 and update comparison
+    if (sqlite3_prepare_v2(db2, "SELECT rl.full_path, f.checksum, rl.status FROM run_logs rl "
+                                "LEFT JOIN files f ON rl.full_path = f.full_path WHERE rl.run_id = ?",
+                          -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, compare_run2_id);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *path = (const char *)sqlite3_column_text(stmt, 0);
+            const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
+            const char *status = (const char *)sqlite3_column_text(stmt, 2);
+
+            CompareResult *result = g_hash_table_lookup(files_run1, path);
+            if (result) {
+                strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
+                strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
+            } else {
+                result = g_new0(CompareResult, 1);
+                strncpy(result->path, path, MAX_PATH - 1);
+                strcpy(result->status_run1, "NOT_IN_RUN");
+                strcpy(result->checksum_run1, "");
+                strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
+                strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
+                g_hash_table_insert(files_run2, g_strdup(path), result);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(db1);
+    sqlite3_close(db2);
+
+    // Apply filters and populate tree view
+    GHashTableIter iter;
+    gpointer key, value;
+
+    g_hash_table_iter_init(&iter, files_run1);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        CompareResult *result = (CompareResult *)value;
+
+        int show = 0;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run1)) &&
+            strcmp(result->status_run2, "NOT_IN_RUN") == 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run2)) &&
+            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_different)) &&
+            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
+            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
+            strcmp(result->checksum_run1, result->checksum_run2) != 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run1)) &&
+            strcmp(result->status_run1, "NOT_IN_RUN") != 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
+            strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
+
+        if (show) {
+            GtkTreeIter tree_iter;
+            gtk_list_store_append(store, &tree_iter);
+            gtk_list_store_set(store, &tree_iter,
+                              0, result->path,
+                              1, result->status_run1,
+                              2, result->status_run2,
+                              3, result->checksum_run1,
+                              4, result->checksum_run2,
+                              -1);
+        }
+    }
+
+    g_hash_table_iter_init(&iter, files_run2);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        CompareResult *result = (CompareResult *)value;
+
+        int show = 0;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run2)) &&
+            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
+            strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
+
+        if (show) {
+            GtkTreeIter tree_iter;
+            gtk_list_store_append(store, &tree_iter);
+            gtk_list_store_set(store, &tree_iter,
+                              0, result->path,
+                              1, result->status_run1,
+                              2, result->status_run2,
+                              3, result->checksum_run1,
+                              4, result->checksum_run2,
+                              -1);
+        }
+    }
+
+    g_hash_table_destroy(files_run1);
+    g_hash_table_destroy(files_run2);
+}
+
+void on_compare_filter_toggled(GtkCheckButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+    compare_perform_comparison();
+}
+
+void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpointer user_data);
+
+void on_compare_export_csv_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Export Comparison to CSV");
+    gtk_file_dialog_set_initial_name(dialog, "comparison.csv");
+
+    gtk_file_dialog_save(dialog, GTK_WINDOW(window), NULL,
+                        (GAsyncReadyCallback)on_compare_export_csv_response, NULL);
+}
+
+void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpointer user_data) {
+    (void)user_data;
+
+    GtkFileDialog *dialog = GTK_FILE_DIALOG(source);
+    GFile *file = gtk_file_dialog_save_finish(dialog, result, NULL);
+
+    if (!file) return;
+
+    char *path = g_file_get_path(file);
+    g_object_unref(file);
+
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to create CSV file");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+        g_free(path);
+        return;
+    }
+
+    // Write CSV header
+    fprintf(fp, "File Path,Status Run 1,Status Run 2,Checksum Run 1,Checksum Run 2\n");
+
+    // Write data
+    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(compare_results_tree));
+    GtkTreeIter iter;
+    gboolean valid = gtk_tree_model_get_iter_first(model, &iter);
+
+    while (valid) {
+        char *path_str, *status1, *status2, *check1, *check2;
+        gtk_tree_model_get(model, &iter,
+                          0, &path_str,
+                          1, &status1,
+                          2, &status2,
+                          3, &check1,
+                          4, &check2,
+                          -1);
+
+        fprintf(fp, "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",
+                path_str, status1, status2, check1, check2);
+
+        g_free(path_str);
+        g_free(status1);
+        g_free(status2);
+        g_free(check1);
+        g_free(check2);
+
+        valid = gtk_tree_model_iter_next(model, &iter);
+    }
+
+    fclose(fp);
+    g_free(path);
+
+    GtkAlertDialog *alert = gtk_alert_dialog_new("Comparison exported successfully");
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+}
+
+GtkWidget *create_compare_tab() {
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+
+    // Left panel: Selection and filters
+    GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_size_request(left_box, 350, -1);
+    gtk_widget_set_margin_start(left_box, 8);
+    gtk_widget_set_margin_end(left_box, 8);
+    gtk_widget_set_margin_top(left_box, 8);
+    gtk_widget_set_margin_bottom(left_box, 8);
+
+    // Run 1 selection
+    GtkWidget *run1_label = gtk_label_new("Run 1");
+    gtk_widget_add_css_class(run1_label, "heading");
+    gtk_label_set_xalign(GTK_LABEL(run1_label), 0.0);
+    gtk_box_append(GTK_BOX(left_box), run1_label);
+
+    GtkWidget *run1_drive_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *run1_drive_label = gtk_label_new("Drive:");
+    gtk_widget_set_size_request(run1_drive_label, 60, -1);
+    compare_run1_drive_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(compare_run1_drive_combo, TRUE);
+    g_signal_connect(compare_run1_drive_combo, "changed", G_CALLBACK(on_compare_run1_drive_changed), NULL);
+    gtk_box_append(GTK_BOX(run1_drive_box), run1_drive_label);
+    gtk_box_append(GTK_BOX(run1_drive_box), compare_run1_drive_combo);
+    gtk_box_append(GTK_BOX(left_box), run1_drive_box);
+
+    GtkWidget *run1_run_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *run1_run_label = gtk_label_new("Run:");
+    gtk_widget_set_size_request(run1_run_label, 60, -1);
+    compare_run1_run_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(compare_run1_run_combo, TRUE);
+    g_signal_connect(compare_run1_run_combo, "changed", G_CALLBACK(on_compare_run1_run_changed), NULL);
+    gtk_box_append(GTK_BOX(run1_run_box), run1_run_label);
+    gtk_box_append(GTK_BOX(run1_run_box), compare_run1_run_combo);
+    gtk_box_append(GTK_BOX(left_box), run1_run_box);
+
+    // Run 2 selection
+    GtkWidget *run2_label = gtk_label_new("Run 2");
+    gtk_widget_add_css_class(run2_label, "heading");
+    gtk_label_set_xalign(GTK_LABEL(run2_label), 0.0);
+    gtk_box_append(GTK_BOX(left_box), run2_label);
+
+    GtkWidget *run2_drive_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *run2_drive_label = gtk_label_new("Drive:");
+    gtk_widget_set_size_request(run2_drive_label, 60, -1);
+    compare_run2_drive_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(compare_run2_drive_combo, TRUE);
+    g_signal_connect(compare_run2_drive_combo, "changed", G_CALLBACK(on_compare_run2_drive_changed), NULL);
+    gtk_box_append(GTK_BOX(run2_drive_box), run2_drive_label);
+    gtk_box_append(GTK_BOX(run2_drive_box), compare_run2_drive_combo);
+    gtk_box_append(GTK_BOX(left_box), run2_drive_box);
+
+    GtkWidget *run2_run_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *run2_run_label = gtk_label_new("Run:");
+    gtk_widget_set_size_request(run2_run_label, 60, -1);
+    compare_run2_run_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(compare_run2_run_combo, TRUE);
+    g_signal_connect(compare_run2_run_combo, "changed", G_CALLBACK(on_compare_run2_run_changed), NULL);
+    gtk_box_append(GTK_BOX(run2_run_box), run2_run_label);
+    gtk_box_append(GTK_BOX(run2_run_box), compare_run2_run_combo);
+    gtk_box_append(GTK_BOX(left_box), run2_run_box);
+
+    // Compare button
+    GtkWidget *compare_btn = gtk_button_new_with_label("Compare Runs");
+    gtk_widget_add_css_class(compare_btn, "suggested-action");
+    g_signal_connect(compare_btn, "clicked", G_CALLBACK((GCallback)compare_perform_comparison), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_btn);
+
+    // Filters
+    GtkWidget *filter_label = gtk_label_new("View By:");
+    gtk_widget_add_css_class(filter_label, "heading");
+    gtk_label_set_xalign(GTK_LABEL(filter_label), 0.0);
+    gtk_box_append(GTK_BOX(left_box), filter_label);
+
+    compare_filter_only_run1 = gtk_check_button_new_with_label("Only in Run 1");
+    g_signal_connect(compare_filter_only_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_only_run1);
+
+    compare_filter_only_run2 = gtk_check_button_new_with_label("Only in Run 2");
+    g_signal_connect(compare_filter_only_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_only_run2);
+
+    compare_filter_different = gtk_check_button_new_with_label("Different Checksum");
+    g_signal_connect(compare_filter_different, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_different);
+
+    compare_filter_all_run1 = gtk_check_button_new_with_label("All Files in Run 1");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(compare_filter_all_run1), TRUE);
+    g_signal_connect(compare_filter_all_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_all_run1);
+
+    compare_filter_all_run2 = gtk_check_button_new_with_label("All Files in Run 2");
+    g_signal_connect(compare_filter_all_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_all_run2);
+
+    // Export button
+    GtkWidget *export_btn = gtk_button_new_with_label("Export to CSV");
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_compare_export_csv_clicked), NULL);
+    gtk_box_append(GTK_BOX(left_box), export_btn);
+
+    gtk_paned_set_start_child(GTK_PANED(paned), left_box);
+
+    // Right panel: Results table
+    GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_start(right_box, 8);
+    gtk_widget_set_margin_end(right_box, 8);
+    gtk_widget_set_margin_top(right_box, 8);
+    gtk_widget_set_margin_bottom(right_box, 8);
+
+    GtkWidget *results_label = gtk_label_new("Comparison Results");
+    gtk_widget_add_css_class(results_label, "heading");
+    gtk_label_set_xalign(GTK_LABEL(results_label), 0.0);
+    gtk_box_append(GTK_BOX(right_box), results_label);
+
+    GtkListStore *store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING);
+    compare_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    g_object_unref(store);
+
+    const char *titles[] = {"File Path", "Status Run 1", "Status Run 2", "Checksum Run 1", "Checksum Run 2"};
+    for (int i = 0; i < 5; i++) {
+        GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+        GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
+        gtk_tree_view_column_set_resizable(column, TRUE);
+        if (i == 0) gtk_tree_view_column_set_expand(column, TRUE);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(compare_results_tree), column);
+    }
+
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), compare_results_tree);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_box_append(GTK_BOX(right_box), scroll);
+
+    gtk_paned_set_end_child(GTK_PANED(paned), right_box);
+    gtk_paned_set_position(GTK_PANED(paned), 370);
+
+    return paned;
+}
+
+// ============================================================================
+// TAB 7: ABOUT
 // ============================================================================
 
 GtkWidget *create_about_tab() {
@@ -2212,13 +2659,23 @@ void refresh_all_database_combos() {
     // Refresh summary combo
     gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(summary_db_combo));
 
+    // Refresh compare combos
+    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo));
+    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo));
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         size_t len = strlen(entry->d_name);
         if (len > 3 && strcmp(entry->d_name + len - 3, ".db") == 0 &&
             strcmp(entry->d_name, "drives.db") != 0) {
+            char db_name[256];
+            strncpy(db_name, entry->d_name, len - 3);
+            db_name[len - 3] = '\0';
+
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_db_combo), entry->d_name);
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(summary_db_combo), entry->d_name);
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo), db_name);
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo), db_name);
         }
     }
     closedir(dir);
@@ -2226,6 +2683,12 @@ void refresh_all_database_combos() {
     gtk_combo_box_set_active(GTK_COMBO_BOX(locator_db_combo), 0);
     if (gtk_combo_box_get_active(GTK_COMBO_BOX(summary_db_combo)) < 0) {
         gtk_combo_box_set_active(GTK_COMBO_BOX(summary_db_combo), 0);
+    }
+    if (gtk_combo_box_get_active(GTK_COMBO_BOX(compare_run1_drive_combo)) < 0) {
+        gtk_combo_box_set_active(GTK_COMBO_BOX(compare_run1_drive_combo), 0);
+    }
+    if (gtk_combo_box_get_active(GTK_COMBO_BOX(compare_run2_drive_combo)) < 0) {
+        gtk_combo_box_set_active(GTK_COMBO_BOX(compare_run2_drive_combo), 0);
     }
 }
 
@@ -2249,6 +2712,8 @@ void activate(GtkApplication *app, gpointer user_data) {
                             gtk_label_new("Summary"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_logs_tab(),
                             gtk_label_new("Logs"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_compare_tab(),
+                            gtk_label_new("Compare"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_scanner_tab(),
                             gtk_label_new("File Scanner"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_about_tab(),
