@@ -104,6 +104,135 @@ int compute_sha256(const char *path, char *output_buffer) {
     return 1;
 }
 
+// ==== Drive Tracking Integration ====
+
+int get_drive_stats(const char *path, long long *capacity, long long *available, long long *used) {
+    struct statfs fs_stats;
+    if (statfs(path, &fs_stats) != 0) {
+        return 0;
+    }
+
+    *capacity = (long long)fs_stats.f_blocks * fs_stats.f_bsize;
+    *available = (long long)fs_stats.f_bavail * fs_stats.f_bsize;
+    *used = *capacity - (*available + (long long)(fs_stats.f_bfree - fs_stats.f_bavail) * fs_stats.f_bsize);
+
+    return 1;
+}
+
+int drive_exists_in_tracker(const char *drive_name) {
+    const char *home = getenv("HOME");
+    if (!home) return 0;
+
+    char drives_db_path[MAX_PATH];
+    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home);
+
+    sqlite3 *drives_db = NULL;
+    if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
+        if (drives_db) sqlite3_close(drives_db);
+        return 0;
+    }
+
+    const char *sql = "SELECT COUNT(*) FROM drives WHERE drive_name = ?;";
+    sqlite3_stmt *stmt;
+    int exists = 0;
+
+    if (sqlite3_prepare_v2(drives_db, sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            exists = sqlite3_column_int(stmt, 0) > 0;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(drives_db);
+    return exists;
+}
+
+void add_drive_to_tracker(const char *drive_name, const char *source_path) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char drives_db_path[MAX_PATH];
+    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home);
+
+    sqlite3 *drives_db = NULL;
+    if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
+        if (drives_db) sqlite3_close(drives_db);
+        return;
+    }
+
+    // Initialize drives schema if needed
+    const char *create_table =
+        "CREATE TABLE IF NOT EXISTS drives ("
+        "drive_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "drive_name TEXT NOT NULL UNIQUE,"
+        "capacity INTEGER,"
+        "space_available INTEGER,"
+        "space_used INTEGER,"
+        "description TEXT,"
+        "last_updated TEXT,"
+        "last_verified TEXT,"
+        "storage_container TEXT"
+        ");";
+
+    sqlite3_exec(drives_db, create_table, 0, 0, 0);
+
+    // Try to get drive stats
+    long long capacity = 0, available = 0, used = 0;
+    int has_stats = get_drive_stats(source_path, &capacity, &available, &used);
+
+    char timestamp[64];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    const char *insert_sql = has_stats ?
+        "INSERT INTO drives (drive_name, capacity, space_available, space_used, description, last_updated) "
+        "VALUES (?, ?, ?, ?, ?, ?);" :
+        "INSERT INTO drives (drive_name, description, last_updated) VALUES (?, ?, ?);";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(drives_db, insert_sql, -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
+
+        if (has_stats) {
+            sqlite3_bind_int64(stmt, 2, capacity);
+            sqlite3_bind_int64(stmt, 3, available);
+            sqlite3_bind_int64(stmt, 4, used);
+            sqlite3_bind_text(stmt, 5, "Auto-added by file_tracker", -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 6, timestamp, -1, SQLITE_STATIC);
+        } else {
+            sqlite3_bind_text(stmt, 2, "Auto-added by file_tracker", -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, timestamp, -1, SQLITE_STATIC);
+        }
+
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_close(drives_db);
+}
+
+void auto_add_drive_to_tracker(const char *db_path, const char *source_path) {
+    // Extract drive name from db_path
+    // db_path format: ~/db/FileTracker/DriveName.db
+    char *last_slash = strrchr(db_path, '/');
+    if (!last_slash) return;
+
+    char drive_name[256];
+    strncpy(drive_name, last_slash + 1, sizeof(drive_name) - 1);
+    drive_name[sizeof(drive_name) - 1] = '\0';
+
+    // Remove .db extension
+    char *dot = strrchr(drive_name, '.');
+    if (dot && strcmp(dot, ".db") == 0) {
+        *dot = '\0';
+    }
+
+    // Check if drive already exists
+    if (!drive_exists_in_tracker(drive_name)) {
+        add_drive_to_tracker(drive_name, source_path);
+    }
+}
+
 void refresh_all_database_combos();
 
 // ============================================================================
@@ -1386,6 +1515,9 @@ gpointer scanner_thread_func(gpointer data) {
             free(ctx->log_buffer);
             ctx->log_buffer = NULL;
         }
+
+        // Auto-add drive to drive tracker
+        auto_add_drive_to_tracker(ctx->db_path, ctx->scan_path);
     }
 
     g_idle_add(scanner_scan_completed, ctx);
