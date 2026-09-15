@@ -198,12 +198,14 @@ int mkdir_p(const char *path) {
 // ==== Core Logic ====
 void process_ignored_file(ThreadContext *ctx, const char *path, const char *name, sqlite3 *db) {
     struct stat st;
+
+    // Always log ignored files, even if they can't be stat'd or aren't regular files
+    log_message(ctx, "IGNORED", path, "");
+
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
         ctx->ignored++;
         return;
     }
-
-    log_message(ctx, "IGNORED", path, "");
 
     if (update) {
         // Check if file already exists in database
@@ -337,6 +339,8 @@ void traverse_directory(ThreadContext *ctx, const char *dir_path, sqlite3 *db) {
             if (stat(full_path, &st) == 0 && S_ISREG(st.st_mode)) {
                 process_ignored_file(ctx, full_path, entry->d_name, db);
             } else {
+                // Log non-regular ignored files (directories, symlinks, etc.)
+                log_message(ctx, "IGNORED", full_path, "");
                 ctx->ignored++;
             }
             continue;

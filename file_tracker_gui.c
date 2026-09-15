@@ -284,13 +284,15 @@ gboolean scan_completed(gpointer data) {
 
 void process_ignored_file(ScanContext *ctx, const char *filepath, const char *filename) {
     struct stat sb;
+
+    // Always log ignored files, even if they can't be stat'd or aren't regular files
+    log_message(ctx, "IGNORED", filepath, "");
+
     if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) {
         ctx->ignored++;
         g_idle_add(update_progress, ctx);
         return;
     }
-
-    log_message(ctx, "IGNORED", filepath, "");
 
     if (ctx->update_mode) {
         // Check if file already exists in database
@@ -477,6 +479,8 @@ void scan_directory(ScanContext *ctx, const char *dirpath) {
             if (stat(filepath, &sb) == 0 && S_ISREG(sb.st_mode)) {
                 process_ignored_file(ctx, filepath, entry->d_name);
             } else {
+                // Log non-regular ignored files (directories, symlinks, etc.)
+                log_message(ctx, "IGNORED", filepath, "");
                 ctx->ignored++;
             }
             continue;

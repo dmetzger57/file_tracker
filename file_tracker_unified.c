@@ -1787,6 +1787,8 @@ void scanner_scan_directory(ScannerContext *ctx, const char *dirpath) {
             if (stat(filepath, &sb) == 0 && S_ISREG(sb.st_mode)) {
                 scanner_process_ignored_file(ctx, filepath, entry->d_name);
             } else {
+                // Log non-regular ignored files (directories, symlinks, etc.)
+                scanner_log_message(ctx, "IGNORED", filepath);
                 ctx->ignored++;
             }
             continue;
