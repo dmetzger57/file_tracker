@@ -19,6 +19,7 @@
 typedef struct {
     char status[32];
     char path[MAX_PATH];
+    char checksum[HASH_SIZE];
 } LogEntry;
 
 // Global UI elements
@@ -99,7 +100,7 @@ char *get_file_owner(struct stat *sb) {
     return pw ? pw->pw_name : "unknown";
 }
 
-void log_message(ScanContext *ctx, const char *status, const char *path) {
+void log_message(ScanContext *ctx, const char *status, const char *path, const char *checksum) {
     // Buffer log message for database insertion later
     if (ctx->log_count >= ctx->log_capacity) {
         ctx->log_capacity = ctx->log_capacity == 0 ? 1024 : ctx->log_capacity * 2;
@@ -110,12 +111,14 @@ void log_message(ScanContext *ctx, const char *status, const char *path) {
     ctx->log_buffer[ctx->log_count].status[sizeof(ctx->log_buffer[ctx->log_count].status) - 1] = '\0';
     strncpy(ctx->log_buffer[ctx->log_count].path, path, sizeof(ctx->log_buffer[ctx->log_count].path) - 1);
     ctx->log_buffer[ctx->log_count].path[sizeof(ctx->log_buffer[ctx->log_count].path) - 1] = '\0';
+    strncpy(ctx->log_buffer[ctx->log_count].checksum, checksum ? checksum : "", sizeof(ctx->log_buffer[ctx->log_count].checksum) - 1);
+    ctx->log_buffer[ctx->log_count].checksum[sizeof(ctx->log_buffer[ctx->log_count].checksum) - 1] = '\0';
     ctx->log_count++;
 }
 
 // Log error message with descriptive text
 void log_error(ScanContext *ctx, const char *error_msg) {
-    log_message(ctx, "ERROR", error_msg);
+    log_message(ctx, "ERROR", error_msg, "");
     ctx->errors++;
 }
 
@@ -181,6 +184,7 @@ int init_database(sqlite3 *db) {
         "run_id INTEGER, "
         "status TEXT, "
         "full_path TEXT, "
+        "checksum TEXT, "
         "FOREIGN KEY(run_id) REFERENCES meta(id));";
 
     char *err = NULL;
@@ -286,7 +290,7 @@ void process_ignored_file(ScanContext *ctx, const char *filepath, const char *fi
         return;
     }
 
-    log_message(ctx, "IGNORED", filepath);
+    log_message(ctx, "IGNORED", filepath, "");
 
     if (ctx->update_mode) {
         // Check if file already exists in database
@@ -359,15 +363,16 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
         const char *db_checksum = (const char *)sqlite3_column_text(stmt, 2);
 
         if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
-            // File changed
+            // File changed - compute checksum for logging
+            char checksum[HASH_SIZE] = "";
+            if (ctx->enable_checksum) {
+                compute_sha256(filepath, checksum);
+            }
+
             ctx->changed++;
-            log_message(ctx, "CHANGED", filepath);
+            log_message(ctx, "CHANGED", filepath, checksum);
 
             if (ctx->update_mode) {
-                char checksum[HASH_SIZE] = "";
-                if (ctx->enable_checksum) {
-                    compute_sha256(filepath, checksum);
-                }
 
                 const char *update_sql = "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?;";
                 sqlite3_stmt *update_stmt;
@@ -386,10 +391,10 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
             if (compute_sha256(filepath, checksum)) {
                 if (db_checksum && strcmp(checksum, db_checksum) == 0) {
                     ctx->unchanged++;
-                    log_message(ctx, "UNCHANGED", filepath);
+                    log_message(ctx, "UNCHANGED", filepath, checksum);
                 } else {
                     ctx->changed++;
-                    log_message(ctx, "CHANGED", filepath);
+                    log_message(ctx, "CHANGED", filepath, checksum);
 
                     if (ctx->update_mode) {
                         const char *update_sql = "UPDATE files SET checksum=? WHERE full_path=?;";
@@ -405,12 +410,17 @@ void process_file(ScanContext *ctx, const char *filepath, const char *filename) 
             }
         } else {
             ctx->unchanged++;
-            log_message(ctx, "UNCHANGED", filepath);
+            log_message(ctx, "UNCHANGED", filepath, db_checksum ? db_checksum : "");
         }
     } else {
-        // New file
+        // New file - compute checksum for logging
+        char checksum[HASH_SIZE] = "";
+        if (ctx->enable_checksum) {
+            compute_sha256(filepath, checksum);
+        }
+
         ctx->new_files++;
-        log_message(ctx, "NEW", filepath);
+        log_message(ctx, "NEW", filepath, checksum);
 
         if (ctx->update_mode) {
             char checksum[HASH_SIZE] = "";
@@ -686,12 +696,13 @@ gpointer scan_thread_func(gpointer data) {
         // Insert buffered log messages into run_logs
         if (ctx->log_count > 0) {
             sqlite3_stmt *log_stmt;
-            const char *log_sql = "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)";
+            const char *log_sql = "INSERT INTO run_logs (run_id, status, full_path, checksum) VALUES (?, ?, ?, ?)";
             if (sqlite3_prepare_v2(ctx->db, log_sql, -1, &log_stmt, 0) == SQLITE_OK) {
                 for (int i = 0; i < ctx->log_count; i++) {
                     sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
                     sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
                     sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(log_stmt, 4, ctx->log_buffer[i].checksum, -1, SQLITE_STATIC);
                     sqlite3_step(log_stmt);
                     sqlite3_reset(log_stmt);
                 }

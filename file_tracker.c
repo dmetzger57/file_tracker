@@ -61,6 +61,7 @@ void signal_handler(int signum) {
 typedef struct {
     char status[32];
     char path[MAX_PATH];
+    char checksum[HASH_SIZE];
 } LogEntry;
 
 typedef struct {
@@ -103,7 +104,7 @@ int is_ignored(const char *name) {
 }
 
 // ==== Logging Helper ====
-void log_message(ThreadContext *ctx, const char *status, const char *path) {
+void log_message(ThreadContext *ctx, const char *status, const char *path, const char *checksum) {
     if (ctx->log_fp) {
         fprintf(ctx->log_fp, "[%-18s] %s\n", status, path);
         if (verbose) {
@@ -121,6 +122,8 @@ void log_message(ThreadContext *ctx, const char *status, const char *path) {
     ctx->log_buffer[ctx->log_count].status[sizeof(ctx->log_buffer[ctx->log_count].status) - 1] = '\0';
     strncpy(ctx->log_buffer[ctx->log_count].path, path, sizeof(ctx->log_buffer[ctx->log_count].path) - 1);
     ctx->log_buffer[ctx->log_count].path[sizeof(ctx->log_buffer[ctx->log_count].path) - 1] = '\0';
+    strncpy(ctx->log_buffer[ctx->log_count].checksum, checksum ? checksum : "", sizeof(ctx->log_buffer[ctx->log_count].checksum) - 1);
+    ctx->log_buffer[ctx->log_count].checksum[sizeof(ctx->log_buffer[ctx->log_count].checksum) - 1] = '\0';
     ctx->log_count++;
 }
 
@@ -130,7 +133,7 @@ void log_error(ThreadContext *ctx, const char *error_msg) {
     if (ctx->log_fp) {
         fprintf(ctx->log_fp, "[ERROR            ] %s\n", error_msg);
     }
-    log_message(ctx, "ERROR", error_msg);
+    log_message(ctx, "ERROR", error_msg, "");
     ctx->error++;
 }
 
@@ -200,7 +203,7 @@ void process_ignored_file(ThreadContext *ctx, const char *path, const char *name
         return;
     }
 
-    log_message(ctx, "IGNORED", path);
+    log_message(ctx, "IGNORED", path, "");
 
     if (update) {
         // Check if file already exists in database
@@ -264,7 +267,7 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
         int mtime_match = (db_mtime == st.st_mtime);
 
         if (!verifyChecksum && mtime_match) {
-            log_message(ctx, "UNCHANGED", path);
+            log_message(ctx, "UNCHANGED", path, db_checksum ? db_checksum : "");
             ctx->unchanged++;
         } else {
             char checksum[HASH_SIZE];
@@ -272,10 +275,10 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
             int checksum_match = (db_checksum && strcmp(checksum, db_checksum) == 0);
 
             if (verifyChecksum && checksum_match) {
-                log_message(ctx, "UNCHANGED", path);
+                log_message(ctx, "UNCHANGED", path, checksum);
                 ctx->unchanged++;
             } else {
-                log_message(ctx, (!mtime_match) ? "CHANGED (Metadata)" : "CHANGED (Checksum)", path);
+                log_message(ctx, (!mtime_match) ? "CHANGED (Metadata)" : "CHANGED (Checksum)", path, checksum);
                 if (update) {
                     sqlite3_stmt *up_stmt;
                     sqlite3_prepare_v2(db, "UPDATE files SET checksum = ?, last_modified = ? WHERE full_path = ?", -1, &up_stmt, NULL);
@@ -289,10 +292,11 @@ void process_file(ThreadContext *ctx, const char *path, const char *name, sqlite
             }
         }
     } else {
-        log_message(ctx, "NEW", path);
+        char checksum[HASH_SIZE];
+        compute_sha256(path, checksum);
+        log_message(ctx, "NEW", path, checksum);
         if (update) {
-            char checksum[HASH_SIZE], owner[256];
-            compute_sha256(path, checksum);
+            char owner[256];
             get_owner(st.st_uid, owner, sizeof(owner));
             sqlite3_stmt *ins_stmt;
             sqlite3_prepare_v2(db, "INSERT INTO files (file_name, full_path, size, created, last_modified, owner, checksum) VALUES (?, ?, ?, ?, ?, ?, ?)", -1, &ins_stmt, NULL);
@@ -367,7 +371,7 @@ void *path_worker(void *arg) {
 
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
-    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
 
     // Begin transaction for better performance and reduced lock contention
     sqlite3_exec(ctx->db, "BEGIN TRANSACTION;", 0, 0, 0);
@@ -425,7 +429,7 @@ void *path_worker(void *arg) {
     // Log and delete the collected missing paths (before inserting buffered logs)
     for (int i = 0; i < missing_count; i++) {
         if( verbose ) printf("Deleting missing files from the database\n");
-        log_message(ctx, "MISSING", missing_paths[i]);
+        log_message(ctx, "MISSING", missing_paths[i], "");
         if (update) {
             sqlite3_stmt *dStmt;
             sqlite3_prepare_v2(ctx->db, "DELETE FROM files WHERE full_path = ?", -1, &dStmt, NULL);
@@ -441,13 +445,14 @@ void *path_worker(void *arg) {
     // Insert buffered log messages into database (includes MISSING from above)
     if (ctx->log_count > 0) {
         sqlite3_stmt *log_stmt;
-        const char *log_sql = "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)";
+        const char *log_sql = "INSERT INTO run_logs (run_id, status, full_path, checksum) VALUES (?, ?, ?, ?)";
         sqlite3_prepare_v2(ctx->db, log_sql, -1, &log_stmt, NULL);
 
         for (int i = 0; i < ctx->log_count; i++) {
             sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
             sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
             sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
+            sqlite3_bind_text(log_stmt, 4, ctx->log_buffer[i].checksum, -1, SQLITE_STATIC);
             sqlite3_step(log_stmt);
             sqlite3_reset(log_stmt);
         }

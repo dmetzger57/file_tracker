@@ -2305,8 +2305,8 @@ void compare_perform_comparison() {
                       "(SELECT DISTINCT full_path FROM run_logs WHERE run_id = ? AND status != 'MISSING')";
 
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db1, "SELECT rl.full_path, f.checksum, rl.status FROM run_logs rl "
-                                "LEFT JOIN files f ON rl.full_path = f.full_path WHERE rl.run_id = ?",
+    if (sqlite3_prepare_v2(db1, "SELECT rl.full_path, rl.checksum, rl.status FROM run_logs rl "
+                                "WHERE rl.run_id = ?",
                           -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, compare_run1_id);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -2332,8 +2332,8 @@ void compare_perform_comparison() {
     }
 
     // Get files from run 2 and update comparison
-    if (sqlite3_prepare_v2(db2, "SELECT rl.full_path, f.checksum, rl.status FROM run_logs rl "
-                                "LEFT JOIN files f ON rl.full_path = f.full_path WHERE rl.run_id = ?",
+    if (sqlite3_prepare_v2(db2, "SELECT rl.full_path, rl.checksum, rl.status FROM run_logs rl "
+                                "WHERE rl.run_id = ?",
                           -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, compare_run2_id);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
