@@ -1106,7 +1106,7 @@ void logs_load_details() {
     const char *query =
         "SELECT COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
         "verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, "
-        "update_mode, note FROM meta WHERE id = ?";
+        "update_mode, note, last_checksum_verify_date FROM meta WHERE id = ?";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) != SQLITE_OK) {
@@ -1127,12 +1127,14 @@ void logs_load_details() {
         int errors = sqlite3_column_int(stmt, 7);
         const char *update_mode = (const char *)sqlite3_column_text(stmt, 8);
         const char *note = (const char *)sqlite3_column_text(stmt, 9);
+        const char *checksum_date = (const char *)sqlite3_column_text(stmt, 10);
 
         char info[512];
         snprintf(info, sizeof(info),
                 "Run Date: %s\n"
                 "Machine: %s\n"
                 "Mode: %s\n"
+                "Checksum: %s\n"
                 "Legend: U/C/N/M/I/E\n\n"
                 "Unchanged: %'d\n"
                 "Changed:   %'d\n"
@@ -1143,6 +1145,7 @@ void logs_load_details() {
                 run_date ? run_date : "Unknown",
                 machine ? machine : "N/A",
                 update_mode ? update_mode : "N/A",
+                checksum_date ? "Verified" : "Not Verified",
                 unchanged, changed, new, missing, ignored, errors);
 
         GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_run_info_text));
@@ -1838,45 +1841,46 @@ gpointer scanner_thread_func(gpointer data) {
 
     scanner_scan_directory(ctx, ctx->scan_path);
 
-    if (ctx->update_mode) {
-        char timestamp[64], hostname[256];
-        get_timestamp(timestamp, sizeof(timestamp));
-        gethostname(hostname, sizeof(hostname));
+    // Always create meta record for all scans (both update and read-only)
+    char timestamp[64], hostname[256];
+    get_timestamp(timestamp, sizeof(timestamp));
+    gethostname(hostname, sizeof(hostname));
 
-        sqlite3_stmt *stmt;
-        sqlite3_prepare_v2(ctx->db, "INSERT INTO meta (last_checksum_verify_date, last_date_verify, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, update_mode, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", -1, &stmt, 0);
-        sqlite3_bind_text(stmt, 1, ctx->enable_checksum ? timestamp : NULL, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, timestamp, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 3, hostname, -1, SQLITE_STATIC);
-        sqlite3_bind_int(stmt, 4, ctx->unchanged);
-        sqlite3_bind_int(stmt, 5, ctx->changed);
-        sqlite3_bind_int(stmt, 6, ctx->new_files);
-        sqlite3_bind_int(stmt, 7, ctx->missing);
-        sqlite3_bind_int(stmt, 8, ctx->ignored);
-        sqlite3_bind_int(stmt, 9, ctx->errors);
-        sqlite3_bind_text(stmt, 10, "ON", -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 11, ctx->note, -1, SQLITE_STATIC);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(ctx->db, "INSERT INTO meta (last_checksum_verify_date, last_date_verify, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors, update_mode, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", -1, &stmt, 0);
+    sqlite3_bind_text(stmt, 1, ctx->enable_checksum ? timestamp : NULL, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, timestamp, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, hostname, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, ctx->unchanged);
+    sqlite3_bind_int(stmt, 5, ctx->changed);
+    sqlite3_bind_int(stmt, 6, ctx->new_files);
+    sqlite3_bind_int(stmt, 7, ctx->missing);
+    sqlite3_bind_int(stmt, 8, ctx->ignored);
+    sqlite3_bind_int(stmt, 9, ctx->errors);
+    sqlite3_bind_text(stmt, 10, ctx->update_mode ? "ON" : "OFF", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 11, ctx->note, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
 
-        ctx->run_id = sqlite3_last_insert_rowid(ctx->db);
+    ctx->run_id = sqlite3_last_insert_rowid(ctx->db);
 
-        if (ctx->log_count > 0) {
-            sqlite3_stmt *log_stmt;
-            sqlite3_prepare_v2(ctx->db, "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)", -1, &log_stmt, 0);
-            for (int i = 0; i < ctx->log_count; i++) {
-                sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
-                sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
-                sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
-                sqlite3_step(log_stmt);
-                sqlite3_reset(log_stmt);
-            }
-            sqlite3_finalize(log_stmt);
-            free(ctx->log_buffer);
-            ctx->log_buffer = NULL;
+    if (ctx->log_count > 0) {
+        sqlite3_stmt *log_stmt;
+        sqlite3_prepare_v2(ctx->db, "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)", -1, &log_stmt, 0);
+        for (int i = 0; i < ctx->log_count; i++) {
+            sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
+            sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
+            sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
+            sqlite3_step(log_stmt);
+            sqlite3_reset(log_stmt);
         }
+        sqlite3_finalize(log_stmt);
+        free(ctx->log_buffer);
+        ctx->log_buffer = NULL;
+    }
 
-        // Auto-add or update drive in drive tracker
+    // Auto-add or update drive in drive tracker (only in update mode)
+    if (ctx->update_mode) {
         auto_add_or_update_drive(ctx->db_path, ctx->scan_path);
     }
 
