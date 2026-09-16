@@ -1712,6 +1712,8 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
 
     g_idle_add(scanner_update_current_file, g_strdup(filename));
 
+    char log_mesg[256];
+
     struct stat sb;
     if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) return;
 
@@ -1732,7 +1734,22 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
 
         if (ctx->enable_checksum && has_checksum && db_checksum && strlen(db_checksum) > 0 && strcmp(db_checksum, checksum) != 0) {
             ctx->changed++;
-            scanner_log_message(ctx, "CHANGED-CHECKSUM", filepath);
+
+            if ((db_size != sb.st_size) && (db_mtime != sb.st_mtime)) {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, Date-Time, File-Size");
+            }
+            else if((db_size != sb.st_size) && (db_mtime == sb.st_mtime)) {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, File-Size");
+            }
+            else if((db_size == sb.st_size) && (db_mtime != sb.st_mtime)) {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, Date-Time");
+            }
+            else {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
+            }
+
+            scanner_log_message(ctx, log_mesg, filepath);
+
             if (ctx->update_mode) {
                 sqlite3_stmt *up;
                 sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
@@ -1743,9 +1760,25 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
                 sqlite3_step(up);
                 sqlite3_finalize(up);
             }
+
         } else if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
             ctx->changed++;
-            scanner_log_message(ctx, "CHANGED-META", filepath);
+
+            if ((db_size != sb.st_size) && (db_mtime != sb.st_mtime)) {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: Date-Time, File-Size");
+            }
+            else if((db_size != sb.st_size) && (db_mtime == sb.st_mtime)) {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: File-Size");
+            }
+            else if((db_size == sb.st_size) && (db_mtime != sb.st_mtime)) {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: Date-Time");
+            }
+            else {
+	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
+            }
+
+            scanner_log_message(ctx, log_mesg, filepath);
+
             if (ctx->update_mode) {
                 if (!has_checksum && ctx->enable_checksum) {
                     compute_sha256(filepath, checksum);
