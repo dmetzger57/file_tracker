@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -Wall -Wextra -O2 -Wno-deprecated-declarations
 UNAME_S := $(shell uname -s)
 
 # macOS specific paths (Homebrew)
