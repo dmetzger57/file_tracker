@@ -1722,13 +1722,34 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         long long db_size = sqlite3_column_int64(stmt, 0);
         long long db_mtime = sqlite3_column_int64(stmt, 1);
+        const char *db_checksum = (const char *)sqlite3_column_text(stmt, 2);
 
-        if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
+        char checksum[HASH_SIZE] = "";
+        int has_checksum = 0;
+        if (ctx->enable_checksum) {
+            has_checksum = compute_sha256(filepath, checksum);
+        }
+
+        if (ctx->enable_checksum && has_checksum && db_checksum && strlen(db_checksum) > 0 && strcmp(db_checksum, checksum) != 0) {
             ctx->changed++;
-            scanner_log_message(ctx, "CHANGED", filepath);
+            scanner_log_message(ctx, "CHANGED-CHECKSUM", filepath);
             if (ctx->update_mode) {
-                char checksum[HASH_SIZE] = "";
-                if (ctx->enable_checksum) compute_sha256(filepath, checksum);
+                sqlite3_stmt *up;
+                sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
+                sqlite3_bind_int64(up, 1, sb.st_size);
+                sqlite3_bind_int64(up, 2, sb.st_mtime);
+                sqlite3_bind_text(up, 3, checksum, -1, SQLITE_STATIC);
+                sqlite3_bind_text(up, 4, filepath, -1, SQLITE_STATIC);
+                sqlite3_step(up);
+                sqlite3_finalize(up);
+            }
+        } else if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
+            ctx->changed++;
+            scanner_log_message(ctx, "CHANGED-META", filepath);
+            if (ctx->update_mode) {
+                if (!has_checksum && ctx->enable_checksum) {
+                    compute_sha256(filepath, checksum);
+                }
                 sqlite3_stmt *up;
                 sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
                 sqlite3_bind_int64(up, 1, sb.st_size);
