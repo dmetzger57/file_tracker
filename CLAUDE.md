@@ -7,22 +7,22 @@ File tracking suite using SHA-256 checksums to detect bit-rot and silent corrupt
 
 ## Architecture
 
-### Tool Categories
-1. **Core Scanner:** `file_tracker` (CLI), `file_tracker_gui` (GUI)
-2. **Search:** `file_locator` (CLI), `file_locator_gui` (GUI) 
-3. **History/Stats:** `ft_summary` (CLI), `ft_summary_gui` (GUI)
-4. **Logs:** `ft_logs` (CLI), `ft_logs_gui` (GUI)
-5. **Drive Management:** `ft_drives` (CLI), `ft_drives_gui` (GUI)
-6. **Utilities:** `ft_find_dupes` (duplicate finder)
-7. **Unified:** `file_tracker_unified` (all-in-one GUI with tabs)
+### Application
+**Unified GUI:** `file_tracker_unified` - All-in-one GTK4 application with tabbed interface:
+1. **Scanner** - Scan directories and compute checksums
+2. **Summary** - View scan history and statistics
+3. **Logs** - Browse detailed per-file change logs
+4. **Drives** - Track external drive information
+5. **Locator** - Search for files across databases
+6. **Compare** - Compare two scan runs
 
 ### Data Flow
 ```
-file_tracker → SQLite DB (~/db/FileTracker/*.db) ← all other tools read/query
-              ↓
-         run_logs table (detailed per-file status)
-              ↓
-         meta table (run summary stats)
+file_tracker_unified → SQLite DB (~/db/FileTracker/*.db)
+                       ↓
+                  run_logs table (detailed per-file status)
+                       ↓
+                  meta table (run summary stats)
 ```
 
 ## Database Schema Quick Reference
@@ -42,54 +42,48 @@ file_tracker → SQLite DB (~/db/FileTracker/*.db) ← all other tools read/quer
 ## Build System
 
 ### Dependencies
-- **Required:** GCC, OpenSSL 3 (`libssl`, `libcrypto`), SQLite3, pthreads
-- **Optional:** GTK4 (for GUI tools)
+- **Required:** GCC, OpenSSL 3 (`libssl`, `libcrypto`), SQLite3, GTK4, pthreads
 - **macOS:** Homebrew paths auto-detected in Makefile
 - **Install:** `brew install openssl@3 sqlite gtk4` (macOS)
 
 ### Build Targets
 ```bash
-make              # Build all tools
-make apps         # Build GUIs and create .app bundles
+make              # Build file_tracker_unified
+make apps         # Build and create .app bundle
 make clean        # Remove binaries
-make install      # Move binaries to ~/bin
+make install      # Move binary to ~/bin
 ```
 
-### Single Tool Compilation Pattern
+### Manual Compilation
 ```bash
-# CLI tools: OpenSSL + SQLite + pthreads
-gcc -Wall -Wextra -O2 -o tool tool.c -lssl -lcrypto -lsqlite3 -lpthread
-
-# GUI tools: Add GTK4
-gcc -Wall -Wextra -O2 `pkg-config --cflags --libs gtk4` -o tool_gui tool_gui.c -lsqlite3
+gcc -Wall -Wextra -O2 \
+  -I/opt/homebrew/opt/openssl@3/include \
+  -L/opt/homebrew/opt/openssl@3/lib \
+  `pkg-config --cflags --libs gtk4` \
+  -o file_tracker_unified file_tracker_unified.c \
+  -lssl -lcrypto -lsqlite3
 ```
 
 ## Key Source Files
 
-### Core Scanners
-- `file_tracker.c` (31KB): Multi-threaded scanner with SHA-256, mtime comparison
-- `file_tracker_gui.c` (40KB): GTK4 GUI with mounted volumes list, live progress
-- `file_tracker_unified.c` (72KB): All-in-one tabbed GUI (Scanner, Summary, Logs, Drives, Locator)
-
-### Query/Display Tools
-- `file_locator.c` (5KB): Search by filename across all databases, checksum comparison
-- `ft_summary.c` (20KB): Run history and statistics viewer
-- `ft_logs.c` (17KB): Per-run detailed log viewer with filters
-- `ft_drives.c` (26KB): Drive metadata tracking with auto-capacity detection
-
-### GUI Implementations
-- `*_gui.c` files: GTK4 interfaces for corresponding CLI tools
-- Pattern: Same functionality as CLI, added visual progress/filtering
+### Application
+- `file_tracker_unified.c` (~120KB): All-in-one GTK4 application with tabbed interface
+  - Scanner tab: Multi-threaded scanner with SHA-256, mtime comparison
+  - Summary tab: Run history and statistics viewer
+  - Logs tab: Per-run detailed log viewer with filters
+  - Drives tab: Drive metadata tracking with auto-capacity detection
+  - Locator tab: Search by filename across databases, checksum comparison
+  - Compare tab: Compare two scan runs to see changes
 
 ### Scripts
-- `install_apps.sh`: Install .app bundles to /Applications
-- `create_app_bundles.sh`: Create macOS app bundles from binaries
+- `install_apps.sh`: Install .app bundle to /Applications
+- `create_app_bundles.sh`: Create macOS app bundle from binary
 - `migrate_add_*.sh`: Database schema migration scripts (idempotent)
 
 ## Code Conventions
 
 ### Multi-threading
-- `file_tracker` spawns one thread per path argument
+- Scanner tab spawns one thread per path argument
 - Uses pthreads with mutex locks for database writes
 - Pattern: `pthread_create()` → worker function → `pthread_join()`
 
@@ -101,8 +95,8 @@ gcc -Wall -Wextra -O2 `pkg-config --cflags --libs gtk4` -o tool_gui tool_gui.c -
 
 ### Error Handling
 - Errors logged to `run_logs` table with status='ERROR'
-- GUI tools: Show error dialogs with GTK `gtk_alert_dialog_show()`
-- CLI tools: Print to stderr, continue processing
+- GUI: Show error dialogs with GTK `gtk_alert_dialog_show()`
+- Continue processing after errors (don't abort entire scan)
 
 ### Checksum Strategy
 - Default: Compare mtime only (fast verification)
@@ -119,59 +113,62 @@ gcc -Wall -Wextra -O2 `pkg-config --cflags --libs gtk4` -o tool_gui tool_gui.c -
 
 ## Common Workflows
 
-### Initial Setup
-```bash
-# First scan - baseline
-file_tracker -p /Volumes/ExternalDrive -u -s -t "Initial baseline"
+### Initial Setup (Scanner Tab)
+1. Launch File Tracker Unified
+2. Go to Scanner tab
+3. Select drive from Mounted Volumes list
+4. Enable "Update Database"
+5. Add note: "Initial baseline"
+6. Click "Start Scan"
 
-# Add drive to tracking
-ft_drives add ExternalDrive -d "Backup drive" -c "Drawer A"
-```
+### Periodic Verification (Scanner Tab)
+**Quick check (mtime only):**
+1. Select drive
+2. Enable "Update Database"
+3. **Disable** "Enable Checksum Verification"
+4. Add note: "Weekly check"
+5. Start scan
 
-### Periodic Verification
-```bash
-# Quick check (mtime only)
-file_tracker -p /Volumes/ExternalDrive -u -s -t "Weekly check"
+**Deep verification (full checksum):**
+1. Select drive
+2. Enable "Update Database"
+3. **Enable** "Enable Checksum Verification"
+4. Add note: "Monthly deep scan"
+5. Start scan
 
-# Deep verification (full checksum)
-file_tracker -p /Volumes/ExternalDrive -c -u -s -t "Monthly deep scan"
-```
+### Investigation (Summary/Logs/Compare Tabs)
+**What changed?**
+1. Go to Summary tab
+2. Select database
+3. View Changed Files tab
 
-### Investigation
-```bash
-# What changed?
-ft_summary -d ExternalDrive -c -m
+**View detailed logs:**
+1. Go to Logs tab
+2. Select database and run
+3. Filter by status (CHANGED, NEW, MISSING, etc.)
 
-# View detailed logs
-ft_logs -d ExternalDrive -l  # List runs
-ft_logs -d ExternalDrive -r <run-id> -C  # Changed files only
+**Compare two runs:**
+1. Go to Compare tab
+2. Select database
+3. Choose two runs to compare
+4. View differences
 
-# Find duplicates
-ft_find_dupes -d ExternalDrive -v
-```
+**Find duplicates:**
+1. Go to Locator tab
+2. Search for filename
+3. View results across all databases
 
-### Multi-Path Scanning
-```bash
-# Scan multiple paths into one database
-file_tracker -p /path1,/path2,/path3 -n shared_db -u -s
-```
-
-## GUI Application Bundles
+## GUI Application Bundle
 
 Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
-- **File Tracker.app:** Scanner GUI
-- **File Tracker Unified.app:** All-in-one tabbed interface (recommended)
-- **File Tracker Summary.app:** History viewer
-- **File Tracker Logs.app:** Log browser
-- **File Tracker Drives.app:** Drive manager
-- **File Locator.app:** File search
+- **File Tracker Unified.app:** All-in-one tabbed interface with Scanner, Summary, Logs, Drives, Locator, and Compare tabs
 
 ## Development Notes
 
 ### When Modifying Scanner Logic
-- Update both `file_tracker.c` and `file_tracker_gui.c`
-- Test with `-u` (update mode) and without (read-only)
-- Test with `-c` (checksum mode) and without (mtime-only)
+- Update `file_tracker_unified.c` Scanner tab code
+- Test with "Update Database" enabled and disabled (read-only)
+- Test with "Enable Checksum Verification" on and off (mtime-only)
 - Verify thread safety for database writes
 
 ### When Adding Database Fields
@@ -182,20 +179,25 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 5. Update all tools that query the table
 
 ### GUI Development
-- Use GTK4 builder pattern for complex UIs
+- Tabbed interface using `GtkNotebook`
 - Progress updates: `g_idle_add()` for thread-safe UI updates
 - Use `GtkColumnView` for tables, `GtkTextView` for logs
 - File dialogs: `GtkFileDialog` (async API)
+- Each tab has independent functionality and state
 
 ### Testing Checklist
-- [ ] CLI tool with no arguments (should show usage)
-- [ ] Read-only mode (no `-u`)
-- [ ] Update mode (`-u`)
-- [ ] With and without checksum (`-c`)
-- [ ] Multi-threaded (multiple `-p` paths)
-- [ ] Missing/changed/new file detection
+- [ ] Scanner tab: Read-only mode (Update Database disabled)
+- [ ] Scanner tab: Update mode (Update Database enabled)
+- [ ] Scanner tab: With and without checksum verification
+- [ ] Scanner tab: Multi-threaded (multiple paths, comma-separated)
+- [ ] Scanner tab: Missing/changed/new file detection
+- [ ] Summary tab: Run history and tabbed file lists
+- [ ] Logs tab: Filtering by status
+- [ ] Drives tab: Add, verify, edit operations
+- [ ] Locator tab: Search across databases
+- [ ] Compare tab: Run comparison and filtering
 - [ ] GUI responsiveness during long scans
-- [ ] Database schema compatibility
+- [ ] Database schema compatibility across all tabs
 
 ## Performance Characteristics
 
@@ -248,37 +250,45 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 - Error patterns (logged to run_logs with status='ERROR')
 - Multi-threading uses standard pthread pattern
 
-## Quick Command Reference
+## Quick Reference
 
+### Launch Application
 ```bash
-# Scan
-file_tracker -p <path> -u -c -s -t "note"
+./file_tracker_unified
+# Or double-click File Tracker Unified.app
+```
 
-# Query
-ft_summary -d <db>              # Stats
-ft_logs -d <db> -l              # List runs  
-ft_logs -d <db> -r <run-id> -C  # Changed files
-file_locator -f <filename>      # Find file
+### Scanner Tab
+1. Select drive/path
+2. Enable "Update Database" to save changes
+3. Enable "Enable Checksum Verification" for deep scan
+4. Add note (optional)
+5. Click "Start Scan"
 
-# Manage
-ft_drives add <name> -d "desc"  # Add drive
-ft_drives verify <name>         # Mark verified
-ft_find_dupes -d <db>           # Find duplicates
+### Query Operations
+- **Summary tab:** View run history and file lists
+- **Logs tab:** Browse detailed change logs with filters
+- **Locator tab:** Search for files across databases
+- **Compare tab:** Compare two runs to see differences
 
-# Build
-make                            # All tools
-make apps                       # + app bundles
+### Drive Management
+- **Drives tab:** Add, verify, edit drive metadata
+
+### Build
+```bash
+make                            # Build application
+make apps                       # Build + create .app bundle
 ```
 
 ## Current Development Status
 
-**Latest Changes (from git log):**
-- Added Logs Viewer tab to file_tracker_unified
-- Record ignored files in database with IGNORED status
-- Replaced Quick Scanner with full File Scanner functionality
-- Created file_tracker_unified - all-in-one GUI
+**Latest Changes:**
+- Consolidated all functionality into file_tracker_unified
+- Removed legacy individual CLI and GUI tools
+- Updated documentation to focus on unified application
+- All features accessible via tabbed interface
 
 **Active Development:**
-- Focus on unified GUI application
-- Integration of all tools into tabbed interface
-- Improved error logging and status tracking
+- Enhancements to unified GUI application
+- Additional tab features and improvements
+- Database schema optimizations

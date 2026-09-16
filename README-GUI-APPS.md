@@ -1,44 +1,75 @@
-# File Tracker GUI Applications
+# File Tracker GUI Application
 
-## How to Launch the GUI Apps
+## How to Launch
 
-The GUI applications are packaged as macOS `.app` bundles. **Double-click these in Finder**:
+The application is packaged as a macOS `.app` bundle. **Double-click in Finder**:
 
-- **File Tracker.app** - Main file tracking GUI
-- **File Tracker Logs.app** - Log viewer GUI  
-- **File Tracker Summary.app** - Summary viewer GUI
-- **File Tracker Drives.app** - Drive management GUI
+- **File Tracker Unified.app** - All-in-one file tracking application
 
-These .app bundles will launch **without showing a terminal window**.
+This `.app` bundle will launch **without showing a terminal window**.
 
-## Important: Don't Click the Raw Executables
+## Features
 
-Do **NOT** double-click these raw executables directly:
-- `file_tracker_gui`
-- `ft_logs_gui`
-- `ft_summary_gui`
-- `ft_drives_gui`
+File Tracker Unified is a tabbed GTK4 application that provides:
 
-These are command-line executables that will always open a terminal window. They are meant to be run from the terminal or wrapped by the .app bundles.
+1. **File Scanner** - Scan directories and compute SHA-256 checksums
+2. **Summary** - View scan history and statistics
+3. **Logs** - Browse detailed per-file change logs
+4. **Drives** - Track external drive information
+5. **Locator** - Search for files across databases
+6. **Compare** - Compare two scan runs
+
+## Important: Don't Click the Raw Executable
+
+Do **NOT** double-click the raw executable directly:
+- `file_tracker_unified`
+
+This is a command-line executable that will open a terminal window. It's meant to be run from the terminal or wrapped by the `.app` bundle.
 
 ## Installation (Optional)
 
 For easier access, you can:
 
-1. **Move the .app bundles to /Applications**:
+1. **Move the .app bundle to /Applications**:
    ```bash
-   cp -r "File Tracker Logs.app" /Applications/
+   cp -r "File Tracker Unified.app" /Applications/
+   ```
+   Or run the provided install script:
+   ```bash
+   ./install_apps.sh
    ```
 
-2. **Or create aliases/shortcuts** on your Desktop or in Finder favorites
+2. **Or create an alias/shortcut** on your Desktop or in Finder favorites
 
-3. **Or add them to your Dock** by dragging the .app bundles to the Dock
+3. **Or add it to your Dock** by dragging the .app bundle to the Dock
 
-## Rebuilding the .app Bundles
+## Running from Terminal
 
-If you rebuild the executables, recreate the .app bundles:
+You can also run the executable directly from terminal if you prefer:
+
+```bash
+./file_tracker_unified
+```
+
+## Rebuilding the .app Bundle
+
+If you rebuild the executable, recreate the .app bundle:
+
 ```bash
 make apps
 ```
 
-This will rebuild all GUI executables and create fresh .app bundles.
+This will rebuild the executable and create a fresh `.app` bundle.
+
+## System Requirements
+
+- macOS (tested on recent versions)
+- GTK4 runtime (installed via Homebrew)
+- OpenSSL 3 (installed via Homebrew)
+- SQLite3 (included with macOS)
+
+If launching the app shows errors about missing libraries, ensure dependencies are installed:
+
+```bash
+brew install gtk4 openssl@3
+```

@@ -1,604 +1,272 @@
 # File Tracker
 
-A comprehensive suite of command-line and GUI tools for tracking files via SHA-256 checksums stored in SQLite databases. Designed for detecting bit-rot and silent corruption on archival storage drives.
+A comprehensive file tracking application using SHA-256 checksums to detect bit-rot and silent corruption on archival storage. All functionality is unified in a single GTK4 application with a tabbed interface.
 
-Run `file_tracker` against your storage media periodically to detect unauthorized changes or silent file corruption via checksum verification.
+## Quick Start
 
-## Quick Overview
+### Installation
 
-**CLI Tools:**
-- `file_tracker` - Scan directories and compute checksums
-- `file_locator` - Search for files across databases
-- `ft_summary` - View scan history and statistics
-- `ft_logs` - View detailed per-file logs
-- `ft_find_dupes` - Find duplicate files by checksum
-- `ft_drives` - Track external drive information
+```bash
+# Build the application
+make
 
-**GUI Tools:**
-- `file_tracker_gui` - Visual interface for directory scanning
-- `ft_summary_gui` - Browse scan history with tabbed file lists
-- `ft_logs_gui` - View and filter log messages interactively
-- `ft_drives_gui` - Manage drive tracking visually
-
-**All tools share the same SQLite databases** - use CLI and GUI interchangeably!
-
-## Tools
-
-### file_tracker
-
-The core engine. Recursively scans directory trees, computes SHA-256 hashes, and stores file metadata in per-path SQLite databases. On subsequent runs, detects new, changed, and missing files by comparing against stored records. Spawns one thread per path for parallel processing.
-
-```
-file_tracker -p path1,path2,pathN [-n db_name] [-c] [-u] [-v] [-l] [-L] [-s] [-t note] [-N notefile]
+# Create macOS app bundle (optional)
+make apps
 ```
 
-| Option | Description |
-|--------|-------------|
-| `-p`   | Paths to scan (required, comma-separated). One thread per path. |
-| `-n`   | Database file name (without `.db` extension). Stored in `~/db/FileTracker/`. When omitted, the database is named after each path's basename. When provided with multiple paths, all paths share the same database file. |
-| `-c`   | Compare checksums even when file modification time is unchanged. |
-| `-u`   | Update the database with changes. Without this, differences are only reported. |
-| `-v`   | Verbose output. |
-| `-l`   | Live view — show file count and current filename being processed (format: `####: filename`). |
-| `-L`   | Live view with full path instead of filename (format: `####: /full/path`). Implies `-l`. |
-| `-s`   | Print an aggregate summary when processing completes. |
-| `-t`   | Add a note to this run's metadata (requires `-u`). Use for documenting the purpose of the scan. |
-| `-N`   | Read note text from a file and attach it to this run's metadata (requires `-u`). Useful for multi-line notes. |
+### Launch
 
-**Default behavior (no `-c`):** Files are compared by modification time only. If the mtime matches the stored value, the file is marked unchanged without recomputing its hash. Use `-c` for a full checksum verification pass.
+```bash
+# From command line
+./file_tracker_unified
 
-**Notes:** Use `-t` or `-N` to attach contextual information to each run (e.g., "Weekly backup", "Post-migration verification"). Notes are stored in the database's `meta` table and can be queried later for audit purposes. When running without `-u` (read-only mode), the previous run's note is automatically displayed after the summary (if `-s` is enabled) to provide context about the last update.
-
-**Drive Tracking Integration:** When running in update mode (`-u`), file_tracker automatically adds the scanned drive to the drive tracking database (`ft_drives`) if it's not already tracked. This ensures all scanned drives are automatically registered for drive management. The drive is added with:
-- Auto-detected capacity information if the path is accessible
-- Description: "Auto-added by file_tracker"
-- Current timestamp as last updated
-- No duplication - drives already in the tracker are not re-added
-
-### file_tracker_gui
-
-Graphical user interface for file_tracker. Provides visual progress tracking, real-time status updates, and results display for directory scanning and checksum verification.
-
-```sh
-file_tracker_gui
+# Or double-click "File Tracker Unified.app" in Finder
 ```
+
+## Overview
+
+**File Tracker Unified** is an all-in-one application that provides:
+
+- **File Scanner** - Scan directories and compute SHA-256 checksums
+- **Summary** - View scan history and statistics  
+- **Logs** - Browse detailed per-file change logs
+- **Drives** - Track external drive information
+- **Locator** - Search for files across databases
+- **Compare** - Compare two scan runs to see what changed
+
+All tools share the same SQLite database format. Scan once, query many ways.
+
+## Features
+
+### File Scanner Tab
+
+Recursively scans directory trees, computes SHA-256 hashes, and stores file metadata in SQLite databases. Multi-threaded for performance.
 
 **Features:**
-
 - **Mounted Volumes List:** Shows all drives mounted at `/Volumes/` with capacity info
-  - Click any volume to auto-select for scanning
-  - Refresh button to reload volumes
-  - Perfect for external drive verification
-- **Directory Selection:** Browse button for any path selection, or manual entry
-- **Database Configuration:** Optional database name (auto-fills from volume name)
+- **Directory Selection:** Browse button or manual path entry
 - **Scan Options:**
-  - Enable Checksum Verification (SHA-256)
-  - Update Database mode (vs read-only)
-- **Note Field:** Add contextual notes to scan runs
-- **Live Progress:**
-  - Progress bar showing scan completion
-  - Real-time file counts (unchanged, changed, new, missing, errors)
-  - Current file being processed
+  - Enable Checksum Verification (SHA-256) - compare checksums even when mtime unchanged
+  - Update Database mode - save changes vs read-only scan
+  - Record Ignored Files - track files matching `.rsync-ignore` patterns
+- **Note Field:** Add contextual notes to scan runs for audit trail
+- **Live Progress:** Real-time file counts and current file being processed
 - **Results Display:** Detailed summary upon completion
-- **Stop Button:** Abort scan in progress
 
-**Usage:**
-
-**Method 1 - Select from Mounted Volumes:**
-1. View mounted drives in the left panel
-2. Click any volume (e.g., external drive) to select it
-3. Path and database name auto-populate
-4. Configure options (checksum, update mode, note)
-5. Click "Start Scan"
-6. Monitor progress and view results
-
-**Method 2 - Browse or Enter Path Manually:**
-1. Click "Browse..." or type path directly in Scan Path field
-2. Optionally specify a database name (or use default)
-3. Check "Enable Checksum Verification" for full SHA-256 verification
-4. Check "Update Database" to save changes (uncheck for read-only scan)
-5. Add an optional note describing this scan
+**Typical Workflow:**
+1. Select a mounted drive from the volumes list (or browse to any path)
+2. Choose database name (auto-fills from volume name)
+3. Enable "Update Database" to save changes
+4. Optionally enable "Enable Checksum Verification" for deep scan
+5. Add a note (e.g., "Monthly verification - Dec 2024")
 6. Click "Start Scan"
-7. Monitor progress in real-time
-8. View results when complete
 
-**Database:** Uses the same schema and storage location as the CLI tool (`~/db/FileTracker/`)
+**File Status Values:**
+- **UNCHANGED** - File matches database record
+- **CHANGED** - Metadata or checksum differs from stored value
+- **NEW** - File found on disk, not in database
+- **MISSING** - In database, not found on disk
+- **IGNORED** - Matched `.rsync-ignore` pattern (if "Record Ignored Files" enabled)
+- **ERROR** - Processing failed (path too long, permission denied, etc.)
 
-**Drive Tracking Integration:** When "Update Database" is checked, the GUI automatically adds the scanned drive to the drive tracking database (`ft_drives`) if it's not already tracked. Same auto-registration behavior as the CLI tool.
+**Drive Integration:** Scanned drives are automatically registered in the drive tracking database.
 
-**Requirements:** GTK4 (`brew install gtk4`)
+### Summary Tab
 
-### file_locator
-
-Search tracker databases for a specific file by name. Scans all `.db` files in `~/db/FileTracker/` by default, or a single database when specified. When the same filename appears across multiple databases (or multiple times within one), `file_locator` compares checksums against the first match and flags any that differ — useful for verifying that copies of a file on different volumes are identical.
-
-```
-file_locator -f filename [-p] [-d database] [-v]
-```
-
-| Option | Description |
-|--------|-------------|
-| `-f`   | Filename to search for (required). |
-| `-p`   | Partial match. Wraps the filename in SQL `%` wildcards so `LIKE` matches any path containing the string. |
-| `-d`   | Search only the named database file (relative to `~/db/FileTracker/`) instead of all databases. |
-| `-v`   | Verbose output: prints full metadata for each match (ID, full path, size, created, last modified, owner, checksum). |
-
-**Default (compact) output:** One line per match showing the database name and full path. If a match's checksum differs from the first result, `, Checksum Mismatch` is appended.
-
-**Exit code:** Returns the number of matches found (0 = no matches).
-
-### ft_summary
-
-Report run history and statistics from a tracker database. When no database is specified, displays information for all databases in `~/db/FileTracker/`.
-
-```
-ft_summary [-d database] [-a] [-N] [-m] [-c] [-n] [-e]
-```
-
-| Option | Description |
-|--------|-------------|
-| `-d`   | Database name, without the `.db` extension. If omitted, shows all databases. |
-| `-a`   | Show all recorded runs. Default: last run only. |
-| `-N`   | Show run notes (Run #, Run Date, Note). Displays "None" for runs without notes. |
-| `-m`   | List files found missing in the last run. |
-| `-c`   | List files found changed in the last run. |
-| `-n`   | List files found new in the last run. |
-| `-e`   | List errors encountered in the last run. |
-
-**Default output format (single database with `-d`):** Run #, Run Date, Update (On/Off), Checksum (On/Off), Unchanged, Changed, New, Missing, Errors
-
-**Multi-database compact format (no options):** When run without any options, displays all databases in a single-line-per-database format with columns: Database, Run #, Run Date, Update, Checksum, Unchanged, Changed, New, Missing, Errors
-
-**Multi-database detailed format (with `-a`, `-N`, `-m`, `-c`, `-n`, or `-e`):** When `-d` is omitted but other options are specified, displays a separate header for each database followed by its detailed summary.
-
-**Notes output format (`-N`):** Run #, Run Date, Note
-
-**Error Logging:** Errors such as "path too long" or "SQLite errors" are now logged to the database and can be viewed with the `-e` option. See [ERROR_LOGGING_FEATURE.md](ERROR_LOGGING_FEATURE.md) for details.
-
-Databases without the expected schema are skipped with a warning.
-
-### ft_summary_gui
-
-Graphical interface for viewing run history, statistics, and file lists from tracker databases. Provides an intuitive way to browse scan results with detailed information and file listings.
-
-```sh
-ft_summary_gui
-```
+View scan history and statistics for any database. Shows run-level summaries and per-file details.
 
 **Features:**
+- **Database Selector:** Choose from tracked drives or browse to any `.db` file
+- **Run History:** List of all scans with date, counts, and notes
+- **Tabbed File Lists:**
+  - Changed Files (with details on what changed)
+  - New Files
+  - Missing Files
+  - Unchanged Files
+  - Errors
+- **Metadata Display:** Run notes and verification dates
+- **Search/Filter:** Find specific files in results
 
-- **Database Selection:** Dropdown menu showing all available databases
-- **Run History Table:** View all runs or just the most recent
-  - Columns: Run #, Date, Update Mode, Checksum Status, File Counts
-  - Click any run to view details
-- **Tabbed Details View:**
-  - **Details Tab:** Complete run information, statistics, and notes
-  - **Missing Files Tab:** List of files in database but not found on disk
-  - **Changed Files Tab:** List of files that changed since last scan
-  - **New Files Tab:** List of newly discovered files
-  - **Errors Tab:** List of errors encountered during the scan run
-- **Export Functionality:** Save current tab contents to text file
-- **Real-time Updates:** Refresh button to reload database information
+### Logs Tab
 
-**Usage:**
-
-1. Launch `ft_summary_gui`
-2. Select a database from dropdown
-3. Check "Show All Runs" to see complete history (or leave unchecked for latest run only)
-4. Click a run in the table to view details
-5. Switch between tabs to see different file lists
-6. Click "Export" to save current tab to a text file
-
-**Integration:** Uses the same databases as CLI `ft_summary`, providing a visual way to explore the same data.
-
-**Requirements:** GTK4 (`brew install gtk4`)
-
-### ft_logs
-
-View detailed log messages from a specific file_tracker run, or list all runs in a database. All file operations (NEW, CHANGED, UNCHANGED, MISSING, ERROR) are stored in the database and can be queried by run identifier.
-
-```
-ft_logs -d database_name [-l | -r run_identifier [-N] [-C] [-M] [-U] [-E] [-n] [-s]]
-```
-
-| Option | Description |
-|--------|-------------|
-| `-d`   | Database name, without the `.db` extension (required). |
-| `-l`   | List all runs in the database with summary statistics and run identifiers. |
-| `-r`   | Run identifier in format `dbname-YYYY-MM-DD-HH-MM-SS` (use `-l` to see available identifiers). |
-| `-N`   | Filter: show only NEW file messages. |
-| `-C`   | Filter: show only CHANGED file messages (includes "CHANGED (Metadata)" and "CHANGED (Checksum)"). |
-| `-M`   | Filter: show only MISSING file messages. |
-| `-U`   | Filter: show only UNCHANGED file messages. |
-| `-E`   | Filter: show only ERROR messages. |
-| `-n`   | Display the note associated with the run. |
-| `-s`   | Show only run information summary (no log messages). |
-
-**Listing all runs (`-l` option):** Displays a table of all runs showing run identifier, machine, file counts (Unchanged/Changed/New/Missing), read-only mode indicator `[RO]`, and notes if present. Copy the run identifier from this list to use with the `-r` option.
-
-**Viewing specific run:** Use the run identifier displayed by `-l` with the `-r` option. Multiple filters can be combined (e.g., `-N -C` shows both NEW and CHANGED files, `-E -M` shows errors and missing files). If no filters are specified, all log messages are displayed with run information header and summary footer.
-
-**Filtered output:** When file status filters (`-N`, `-C`, `-U`, `-M`, `-E`) are specified, ft_logs outputs only the matching log records without headers or summary. This makes the output suitable for piping to other commands or processing with scripts.
-
-**Error Messages:** Errors encountered during file_tracker runs (such as "path too long" or database errors) are now logged to the database with status 'ERROR' and can be viewed using the `-E` filter. See [ERROR_LOGGING_FEATURE.md](ERROR_LOGGING_FEATURE.md) for details.
-
-**Run identifier format:** `dbname-YYYY-MM-DD-HH-MM-SS` (e.g., `archive-2024-03-15-14-30-45`)
-
-### ft_logs_gui
-
-Graphical interface for viewing and filtering log messages from file_tracker runs. Provides an easy way to browse run history and filter logs by status type.
-
-```sh
-ft_logs_gui
-```
+Browse detailed per-file change logs with filtering.
 
 **Features:**
+- **Run Selection:** View logs from any historical scan
+- **Status Filters:** Filter by CHANGED, NEW, MISSING, ERROR, IGNORED, ALL
+- **File List:** Full paths of files matching filter
+- **Quick Stats:** Counts for each status category
 
-- **Database Selection:** Dropdown menu showing all available databases
-- **Runs List:** Displays all runs with identifiers and statistics
-  - Click any run to view its details and logs
-- **Run Information:** Shows run metadata (date, machine, file counts, notes)
-- **Status Filters:** Interactive checkboxes to filter log messages
-  - **All:** Show all log messages
-  - **New:** Show only newly discovered files
-  - **Changed:** Show only files that changed
-  - **Missing:** Show only files not found on disk
-  - **Unchanged:** Show only files that haven't changed
-  - **Errors:** Show only error messages from the run
-- **Log Viewer:** Monospace display of filtered log messages
-- **Real-time Filtering:** Logs update immediately when filters change
+### Drives Tab
 
-**Usage:**
-
-1. Launch `ft_logs_gui`
-2. Select a database from dropdown
-3. Click a run from the runs list
-4. Use filter checkboxes to show specific log types
-5. Combine multiple filters to see multiple statuses
-6. Click "Refresh" to reload database
-
-**Filter Behavior:** Selecting "All" unchecks all individual filters. Selecting any individual filter unchecks "All". Multiple individual filters can be combined (e.g., check both "New" and "Changed" to see both types).
-
-**Integration:** Uses the same databases as CLI `ft_logs`, providing a visual way to explore log data with interactive filtering.
-
-**Requirements:** GTK4 (`brew install gtk4`)
-
-### ft_find_dupes
-
-Find and report duplicate files based on SHA-256 checksums stored in the database. Groups files with identical checksums and displays their full paths.
-
-```
-ft_find_dupes -d database_name [-v]
-```
-
-| Option | Description |
-|--------|-------------|
-| `-d`   | Database name, without the `.db` extension (required). |
-| `-v`   | Verbose output: show checksums and file counts for each duplicate group. |
-
-**Output format:** Files are grouped by their checksum. Each group represents files that are identical (same SHA-256 hash). The full path of each duplicate file is displayed with indentation.
-
-**Default output:** Shows duplicate file groups with file paths only.
-
-**Verbose output (`-v`):** Includes checksum values and count of duplicates in each group.
-
-**Summary:** At the end, displays the number of duplicate groups found and the total count of duplicate files.
-
-### ft_drives
-
-Track and manage information about external drives. Stores drive metadata (capacity, usage, description, storage location) in a SQLite database. Automatically detects capacity information when drives are mounted at `/Volumes/<drive_name>`.
-
-```
-ft_drives <command> [options]
-```
-
-**Commands:**
-
-| Command | Description |
-|---------|-------------|
-| `add <drive_name> [-d description] [-c container]` | Add a new drive. Auto-detects capacity if currently mounted. |
-| `show <drive_name>` | Display detailed information for a specific drive. |
-| `search <keyword>` | Search for drives by keyword in description or container fields. |
-| `list` | List all tracked drives with summary information. |
-| `update <drive_name> [-d description] [-c container] [-s capacity] [-u used] [-a available]` | Update drive information. Refreshes capacity if mounted, or set manually with -s/-u/-a options. |
-| `verify <drive_name>` | Mark drive as verified (updates last_verified timestamp). |
-| `delete <drive_name>` | Delete a drive from tracking (requires confirmation). |
-
-**Options:**
-
-| Option | Description |
-|--------|-------------|
-| `-d`   | Description of drive purpose/contents. |
-| `-c`   | Storage container location (e.g., "Drawer A", "Safe", "Office Shelf"). |
-| `-s`   | Manual capacity in GB (overrides auto-detection). |
-| `-u`   | Manual used space in GB. |
-| `-a`   | Manual available space in GB. |
-
-**Examples:**
-
-```sh
-# Add a new external drive (will auto-detect capacity if mounted)
-ft_drives add "BackupDrive2024" -d "Time Machine backups" -c "Drawer A"
-
-# Show details for a specific drive
-ft_drives show BackupDrive2024
-
-# Search for drives containing "backup" in their description
-ft_drives search backup
-
-# List all tracked drives
-ft_drives list
-
-# Update drive information (refreshes capacity if mounted)
-ft_drives update BackupDrive2024 -d "Time Machine and file archives"
-
-# Manually set capacity for unmounted drive
-ft_drives update BackupDrive2024 -s 2000 -u 1500 -a 500
-
-# Update just the description
-ft_drives update BackupDrive2024 -d "Updated description"
-
-# Mark drive as verified after running file_tracker
-ft_drives verify BackupDrive2024
-
-# Delete a drive from tracking (requires typing drive name to confirm)
-ft_drives delete BackupDrive2024
-```
-
-**Drive tracking workflow:**
-
-1. Add drive to tracking when you first initialize it: `ft_drives add "DriveName" -d "Purpose" -c "Location"`
-2. Run file_tracker against the mounted drive: `file_tracker -p /Volumes/DriveName -u -c`
-3. Mark drive as verified: `ft_drives verify DriveName`
-4. Update drive stats periodically: `ft_drives update DriveName`
-
-**Database:** Drive information is stored in `~/db/FileTracker/drives.db`.
-
-**Auto-Discovery:** Automatically discovers and adds drives from existing file_tracker databases on startup. Click "Sync from Databases" to manually trigger discovery.
-
-### ft_drives_gui
-
-Graphical user interface for drive tracking. Provides the same functionality as `ft_drives` with a visual interface.
+Track external drive metadata, verification history, and storage location.
 
 **Features:**
+- **Drive List:** All tracked drives with capacity, description, location
+- **Add Drive:** Register new drives with auto-detected capacity
+- **Verify Drive:** Mark drive as verified on current date
+- **Edit Metadata:** Update description, physical location notes
+- **Auto-Discovery:** Detects drives when scanning (no manual registration needed)
 
-- Browse all tracked drives in a searchable list
-- View detailed drive information including capacity visualization
-- Add new drives with a dialog form
-- Edit drive details (description, capacity, container) with a dialog form
-- Update drive capacity information with one click (auto-detect from mounted drives)
-- Mark drives as verified
-- Real-time search filtering
-- Visual progress bar showing disk usage
+### Locator Tab
 
-**Usage:**
+Search for files across all tracked databases by filename. Compare checksums between databases to find duplicates or verify copies.
 
-```sh
-ft_drives_gui
-```
+**Features:**
+- **Filename Search:** Find files by name across all databases
+- **Multi-Database Results:** Shows which databases contain matching files
+- **Checksum Comparison:** Automatic duplicate detection
+- **Path Information:** Full paths and database locations
 
-The GUI provides:
-- **Left panel:** Searchable list of all drives showing name, capacity, and description
-- **Right panel:** Detailed information for the selected drive including:
-  - Drive name
-  - Capacity usage with visual progress bar
-  - Storage statistics (capacity, used, available)
-  - Description and storage container location
-  - Last updated and verified timestamps
-  - Action buttons for updating and verifying
+### Compare Tab
 
-**Requirements:** GTK4 (install via `brew install gtk4` on macOS)
+Compare two scan runs from the same database to see exactly what changed between dates.
 
-## Storage Layout
+**Features:**
+- **Run Selection:** Pick any two runs from database history
+- **Change Detection:**
+  - Files with different checksums
+  - Files with different modification times
+  - Files with different sizes
+  - Status changes (NEW → UNCHANGED, etc.)
+- **Filter Options:**
+  - Checksum differences only
+  - Date/time differences only  
+  - Size differences only
+  - All differences combined
+- **Detailed View:** Shows old vs new values for each changed attribute
 
-| Path | Contents |
-|------|----------|
-| `~/db/FileTracker/` | SQLite databases (one per scanned path, named after the path's basename unless overridden with `-n`) |
-| `~/logs/FileTracker/` | Timestamped log files from each run |
-| `~/.rsync-ignore` | Optional ignore list (one entry per line); matched files/directories are skipped |
+## Database Structure
 
-## Building
+### Storage Location
+Databases are stored in `~/db/FileTracker/`
 
-Requires GCC, OpenSSL 3, SQLite3, and pthreads.
+### Primary Tables
 
-```sh
-make          # build all tools
-make install  # copy binaries to ~/bin
-make clean    # remove build artifacts
-```
+**files:** File metadata and checksums
+- `id, file_name, full_path (UNIQUE), size, created, last_modified, owner, checksum, keywords, status`
 
-On macOS the Makefile automatically picks up Homebrew paths for OpenSSL and SQLite. On Linux no extra flags are needed if the libraries are installed system-wide.
+**meta:** Scan run summaries
+- `id, last_checksum_verify_date, last_date_verify, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note`
+
+**run_logs:** Detailed per-file status for each run
+- `id, run_id (FK to meta.id), status, full_path, checksum, last_modified, size`
+- Enables historical comparison and change tracking
+
+**drives:** External drive tracking (in `drives.db`)
+- `id, drive_name, description, capacity_gb, physical_location, last_verified_date, last_updated`
+
+### Ignore Patterns
+Files matching patterns in `~/.rsync-ignore` can optionally be recorded with status `IGNORED` or skipped entirely.
+
+## Building from Source
 
 ### Dependencies
 
-| Library | Purpose |
-|---------|---------|
-| OpenSSL (`libssl`, `libcrypto`) | SHA-256 hashing |
-| SQLite3 | File metadata storage |
-| pthreads | Multi-path parallel scanning |
-| GTK4 (optional) | GUI for ft_drives_gui, file_tracker_gui, and ft_summary_gui |
+**Required:**
+- GCC
+- OpenSSL 3 (`libssl`, `libcrypto`)
+- SQLite3
+- GTK4
+- pthreads
 
-**macOS (Homebrew):**
-
-```sh
-brew install openssl@3 sqlite
-brew install gtk4  # Optional, for GUI
+**macOS Installation:**
+```bash
+brew install openssl@3 sqlite gtk4
 ```
 
-**Debian/Ubuntu:**
+### Build Commands
 
-```sh
-sudo apt install libssl-dev libsqlite3-dev
+```bash
+# Build application
+make
+
+# Build and create .app bundle
+make apps
+
+# Clean build artifacts
+make clean
+
+# Install to ~/bin
+make install
 ```
 
-**Fedora/RHEL:**
+### Manual Compilation
 
-```sh
-sudo dnf install openssl-devel sqlite-devel
+```bash
+gcc -Wall -Wextra -O2 \
+  -I/opt/homebrew/opt/openssl@3/include \
+  -L/opt/homebrew/opt/openssl@3/lib \
+  `pkg-config --cflags --libs gtk4` \
+  -o file_tracker_unified file_tracker_unified.c \
+  -lssl -lcrypto -lsqlite3
 ```
 
-## Example Workflow
+## Use Cases
 
-```sh
-# Initial scan — hash all files and record them in the database with a note
-file_tracker -p /mnt/archive -u -s -t "Initial baseline scan"
+### Initial Baseline
+Create a reference database for a new external drive:
+1. Connect drive
+2. Select from volumes list in Scanner tab
+3. Enable "Update Database"
+4. Add note: "Initial baseline"
+5. Start scan
 
-# Periodic quick check — compare modification times, update database
-file_tracker -p /mnt/archive -u -s -t "Weekly verification"
+### Periodic Verification (Quick)
+Fast verification using modification time only:
+1. Select drive
+2. Enable "Update Database"
+3. **Disable** "Enable Checksum Verification" (mtime comparison only)
+4. Add note: "Weekly quick check"
+5. Start scan
 
-# Read-only verification — see changes without updating, displays previous run's note
-file_tracker -p /mnt/archive -s
+### Deep Verification (Full Checksum)
+Monthly full checksum verification:
+1. Select drive
+2. Enable "Update Database"
+3. **Enable** "Enable Checksum Verification" (full SHA-256)
+4. Add note: "Monthly deep scan"
+5. Start scan
 
-# Scan multiple paths into a single named database
-file_tracker -p /mnt/photos,/mnt/videos -n media_archive -u -s
+### Investigate Changes
+1. Go to Summary tab
+2. Select database
+3. View Changed Files tab
+4. Or use Compare tab to diff two specific runs
 
-# Deep verification — recompute and compare every checksum
-file_tracker -p /mnt/archive -c -u -s -t "Full checksum verification"
+### Find Duplicates
+1. Go to Locator tab
+2. Search for filename
+3. Results show all databases containing that file
+4. Matching checksums indicate duplicates
 
-# Add a detailed multi-line note from a file
-echo "Post-migration scan
-Moved files from old_storage to new_storage
-Contact: admin@example.com" > /tmp/scan_note.txt
-file_tracker -p /mnt/archive -u -s -N /tmp/scan_note.txt
+## Performance
 
-# Live view — watch files being processed in real-time
-file_tracker -p /mnt/archive -u -l -s
+- **Speed:** ~500MB/s on SSD (checksum mode), ~10GB/s (mtime-only mode)
+- **Threading:** Multi-threaded scanner (one thread per path when scanning multiple paths)
+- **Bottlenecks:** I/O (reading files), SHA-256 computation
 
-# Live view with full paths
-file_tracker -p /mnt/archive -u -L -s
+## Logs
 
-# Check what changed in a specific database
-ft_summary -d archive -m -c
+Scan logs are written to `~/logs/FileTracker/` with timestamps.
 
-# View summary of all tracked databases
-ft_summary
+## macOS App Bundle
 
-# View all runs for all databases
-ft_summary -a
+After running `make apps`, you get:
+- **File Tracker Unified.app** - Complete application with all tabs
 
-# Find a file across all tracked volumes
-file_locator -f important_document.pdf
+Double-click to launch without terminal window. Optionally move to `/Applications/` for easy access.
 
-# Partial match — find any tracked file containing "report" in its name
-file_locator -f report -p
+## Architecture Notes
 
-# Verbose search in a specific database
-file_locator -f backup.tar.gz -d archive.db -v
+- Written in C
+- GTK4 for GUI
+- SQLite for storage  
+- Multi-threaded scanning (pthreads)
+- SHA-256 via OpenSSL
 
-# Query notes from previous runs
-sqlite3 ~/db/FileTracker/archive.db \
-  "SELECT last_date_verify, note FROM meta WHERE note IS NOT NULL ORDER BY id DESC LIMIT 5;"
+All functionality (scan, query, compare, manage) is in one unified application. No need to switch between multiple tools.
 
-# List all file_tracker runs in a database
-ft_logs -d archive -l
+## Support
 
-# View detailed logs from a specific run (with headers and summary)
-ft_logs -d archive -r archive-2024-03-15-14-30-45
-
-# Show only files that were changed (clean output for piping)
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -C
-
-# Show files that were added or changed
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -N -C
-
-# Show only unchanged files from a run
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -U
-
-# Display the note associated with a run
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -n
-
-# Combine note display with file filters
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -n -C
-
-# Count how many files changed in a run (using filtered output)
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -C | wc -l
-
-# Extract just the paths of new files
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -N | awk '{print $2}'
-
-# View only the run summary without log messages
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -s
-
-# View run summary with note
-ft_logs -d archive -r archive-2024-03-15-14-30-45 -s -n
-
-# Find duplicate files in a database
-ft_find_dupes -d archive
-
-# Find duplicates with verbose output (show checksums)
-ft_find_dupes -d archive -v
-```
-
-## Database Migration
-
-If you have existing databases that need schema updates, run the appropriate migration scripts:
-
-### Add note field (if upgrading from versions before note support)
-```sh
-# Migrate all databases in ~/db/FileTracker/
-./migrate_add_note.sh
-
-# Or migrate a specific database
-./migrate_add_note.sh ~/db/FileTracker/archive.db
-```
-
-### Add run_logs table (if upgrading from versions before log storage)
-```sh
-# Migrate all databases in ~/db/FileTracker/
-./migrate_add_run_logs.sh
-
-# Or migrate a specific database
-./migrate_add_run_logs.sh ~/db/FileTracker/archive.db
-```
-
-Both migrations are idempotent and safe to run multiple times.
-
-## Database Schema
-
-### files table
-Stores individual file metadata with SHA-256 checksums.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER | Primary key |
-| `file_name` | TEXT | Base filename |
-| `full_path` | TEXT | Absolute path (unique) |
-| `size` | INTEGER | File size in bytes |
-| `created` | INTEGER | Creation timestamp (Unix epoch) |
-| `last_modified` | INTEGER | Modification timestamp (Unix epoch) |
-| `owner` | TEXT | File owner username |
-| `checksum` | TEXT | SHA-256 hash (64 hex chars) |
-| `keywords` | TEXT | Reserved for future use |
-
-### meta table
-Stores run history and statistics.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER | Primary key (auto-increment) |
-| `last_checksum_verify_date` | TEXT | Timestamp of last checksum verification run |
-| `last_date_verify` | TEXT | Timestamp of last mtime-only run |
-| `verify_machine` | TEXT | Hostname of machine that performed the scan |
-| `num_unchanged` | INTEGER | Count of unchanged files |
-| `num_changed` | INTEGER | Count of changed files |
-| `num_new` | INTEGER | Count of new files |
-| `num_missing` | INTEGER | Count of missing files |
-| `num_errors` | INTEGER | Count of errors encountered |
-| `update_mode` | TEXT | "ON" if `-u` was used, "OFF" otherwise |
-| `note` | TEXT | Optional note attached to this run |
-
-### run_logs table
-Stores detailed log messages for each run.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER | Primary key (auto-increment) |
-| `run_id` | INTEGER | Foreign key to `meta.id` |
-| `status` | TEXT | File status (NEW, UNCHANGED, CHANGED (Metadata), CHANGED (Checksum), MISSING) |
-| `full_path` | TEXT | Absolute path of the file |
-
-**Indexes:** `run_id` and `status` are indexed for faster queries.
-
-## License
-
-This project is provided as-is with no warranty. See source files for details.
+For issues or questions, refer to the source code or documentation in the repository.

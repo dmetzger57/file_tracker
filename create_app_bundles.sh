@@ -55,15 +55,10 @@ PLIST
     echo "Created ${APP_NAME}.app"
 }
 
-# Create app bundles for all GUI applications
-create_app_bundle "File Tracker" "file_tracker_gui" "com.filetracker.gui"
-create_app_bundle "File Tracker Logs" "ft_logs_gui" "com.filetracker.logs"
-create_app_bundle "File Tracker Summary" "ft_summary_gui" "com.filetracker.summary"
-create_app_bundle "File Tracker Drives" "ft_drives_gui" "com.filetracker.drives"
-create_app_bundle "File Locator" "file_locator_gui" "com.filetracker.locator"
+# Create app bundle for unified application
 create_app_bundle "File Tracker Unified" "file_tracker_unified" "com.filetracker.unified"
 
 echo ""
-echo "All .app bundles created successfully!"
-echo "You can now drag these to /Applications or launch them from Finder."
-echo "The apps will launch without showing a terminal window."
+echo "App bundle created successfully!"
+echo "You can now drag File Tracker Unified.app to /Applications or launch it from Finder."
+echo "The app will launch without showing a terminal window."

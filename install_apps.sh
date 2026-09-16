@@ -1,19 +1,18 @@
 #!/bin/bash
 
-echo "Installing File Tracker GUI Applications to /Applications..."
+echo "Installing File Tracker Unified to /Applications..."
 echo ""
 
-# Copy each .app bundle to /Applications
-for app in "File Tracker.app" "File Tracker Logs.app" "File Tracker Summary.app" "File Tracker Drives.app" "File Tracker Unified.app"; do
-    if [ -d "$app" ]; then
-        echo "Installing $app..."
-        cp -r "$app" /Applications/
-    else
-        echo "Warning: $app not found. Run 'make apps' first."
-    fi
-done
-
-echo ""
-echo "Installation complete!"
-echo "The apps are now available in your Applications folder."
-echo "You can also add them to your Dock by dragging them from /Applications."
+# Copy the .app bundle to /Applications
+if [ -d "File Tracker Unified.app" ]; then
+    echo "Installing File Tracker Unified.app..."
+    cp -r "File Tracker Unified.app" /Applications/
+    echo ""
+    echo "Installation complete!"
+    echo "File Tracker Unified is now available in your Applications folder."
+    echo "You can also add it to your Dock by dragging it from /Applications."
+else
+    echo "Error: File Tracker Unified.app not found."
+    echo "Run 'make apps' first to create the app bundle."
+    exit 1
+fi
