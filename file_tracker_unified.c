@@ -1591,6 +1591,7 @@ GtkWidget *create_logs_tab() {
 typedef struct {
     char status[32];
     char path[MAX_PATH];
+    char checksum[HASH_SIZE];
 } ScanLogEntry;
 
 typedef struct {
@@ -1626,7 +1627,7 @@ GtkWidget *scanner_results_text;
 
 ScannerContext *current_scanner_scan = NULL;
 
-void scanner_log_message(ScannerContext *ctx, const char *status, const char *path) {
+void scanner_log_message(ScannerContext *ctx, const char *status, const char *path, const char *checksum) {
     if (ctx->log_count >= ctx->log_capacity) {
         ctx->log_capacity = ctx->log_capacity == 0 ? 1024 : ctx->log_capacity * 2;
         ctx->log_buffer = realloc(ctx->log_buffer, ctx->log_capacity * sizeof(ScanLogEntry));
@@ -1635,6 +1636,8 @@ void scanner_log_message(ScannerContext *ctx, const char *status, const char *pa
     ctx->log_buffer[ctx->log_count].status[31] = '\0';
     strncpy(ctx->log_buffer[ctx->log_count].path, path, MAX_PATH - 1);
     ctx->log_buffer[ctx->log_count].path[MAX_PATH - 1] = '\0';
+    strncpy(ctx->log_buffer[ctx->log_count].checksum, checksum ? checksum : "", HASH_SIZE - 1);
+    ctx->log_buffer[ctx->log_count].checksum[HASH_SIZE - 1] = '\0';
     ctx->log_count++;
 }
 
@@ -1668,7 +1671,7 @@ void scanner_process_ignored_file(ScannerContext *ctx, const char *filepath, con
     struct stat sb;
 
     // Always log ignored files, even if they can't be stat'd or aren't regular files
-    scanner_log_message(ctx, "IGNORED", filepath);
+    scanner_log_message(ctx, "IGNORED", filepath, "");
 
     if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) {
         ctx->ignored++;
@@ -1748,7 +1751,7 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
 	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
             }
 
-            scanner_log_message(ctx, log_mesg, filepath);
+            scanner_log_message(ctx, log_mesg, filepath, checksum);
 
             if (ctx->update_mode) {
                 sqlite3_stmt *up;
@@ -1777,7 +1780,7 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
 	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
             }
 
-            scanner_log_message(ctx, log_mesg, filepath);
+            scanner_log_message(ctx, log_mesg, filepath, checksum);
 
             if (ctx->update_mode) {
                 if (!has_checksum && ctx->enable_checksum) {
@@ -1794,14 +1797,14 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
             }
         } else {
             ctx->unchanged++;
-            scanner_log_message(ctx, "UNCHANGED", filepath);
+            scanner_log_message(ctx, "UNCHANGED", filepath, db_checksum ? db_checksum : "");
         }
     } else {
         ctx->new_files++;
-        scanner_log_message(ctx, "NEW", filepath);
+        char checksum[HASH_SIZE] = "";
+        if (ctx->enable_checksum) compute_sha256(filepath, checksum);
+        scanner_log_message(ctx, "NEW", filepath, checksum);
         if (ctx->update_mode) {
-            char checksum[HASH_SIZE] = "";
-            if (ctx->enable_checksum) compute_sha256(filepath, checksum);
             sqlite3_stmt *ins;
             sqlite3_prepare_v2(ctx->db, "INSERT INTO files (file_name, full_path, size, created, last_modified, owner, checksum) VALUES (?, ?, ?, ?, ?, ?, ?)", -1, &ins, NULL);
             sqlite3_bind_text(ins, 1, filename, -1, SQLITE_STATIC);
@@ -1842,7 +1845,7 @@ void scanner_scan_directory(ScannerContext *ctx, const char *dirpath) {
                 scanner_process_ignored_file(ctx, filepath, entry->d_name);
             } else {
                 // Log non-regular ignored files (directories, symlinks, etc.)
-                scanner_log_message(ctx, "IGNORED", filepath);
+                scanner_log_message(ctx, "IGNORED", filepath, "");
                 ctx->ignored++;
             }
             continue;
@@ -1890,7 +1893,7 @@ gpointer scanner_thread_func(gpointer data) {
 
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
-    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
 
     g_idle_add(scanner_update_current_file, g_strdup("Counting files..."));
     ctx->total_files = scanner_count_files(ctx->scan_path);
@@ -1922,11 +1925,12 @@ gpointer scanner_thread_func(gpointer data) {
 
     if (ctx->log_count > 0) {
         sqlite3_stmt *log_stmt;
-        sqlite3_prepare_v2(ctx->db, "INSERT INTO run_logs (run_id, status, full_path) VALUES (?, ?, ?)", -1, &log_stmt, 0);
+        sqlite3_prepare_v2(ctx->db, "INSERT INTO run_logs (run_id, status, full_path, checksum) VALUES (?, ?, ?, ?)", -1, &log_stmt, 0);
         for (int i = 0; i < ctx->log_count; i++) {
             sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
             sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
             sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
+            sqlite3_bind_text(log_stmt, 4, ctx->log_buffer[i].checksum, -1, SQLITE_STATIC);
             sqlite3_step(log_stmt);
             sqlite3_reset(log_stmt);
         }
