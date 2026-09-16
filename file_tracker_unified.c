@@ -509,7 +509,7 @@ void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
                 "No tracked drives are currently mounted");
     }
 
-    GtkAlertDialog *alert = gtk_alert_dialog_new(message);
+    GtkAlertDialog *alert = gtk_alert_dialog_new("%s", message);
     gtk_alert_dialog_show(alert, GTK_WINDOW(window));
     g_object_unref(alert);
 }
@@ -1374,7 +1374,7 @@ void on_logs_delete_run_clicked(GtkButton *button, gpointer user_data) {
             "This action cannot be undone.",
             run_info);
 
-    GtkAlertDialog *confirm = gtk_alert_dialog_new(message);
+    GtkAlertDialog *confirm = gtk_alert_dialog_new("%s", message);
     gtk_alert_dialog_set_buttons(confirm, (const char *[]){"Cancel", "Delete", NULL});
     gtk_alert_dialog_set_cancel_button(confirm, 0);
     gtk_alert_dialog_set_default_button(confirm, 0);
@@ -2373,9 +2373,6 @@ void compare_perform_comparison() {
     // Get files from run 1
     GHashTable *files_run1 = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     GHashTable *files_run2 = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-
-    const char *sql = "SELECT full_path, checksum FROM files WHERE id IN "
-                      "(SELECT DISTINCT full_path FROM run_logs WHERE run_id = ? AND status != 'MISSING')";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db1, "SELECT full_path, checksum, status, size, mtime FROM run_logs "
