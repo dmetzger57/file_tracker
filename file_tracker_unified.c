@@ -2240,6 +2240,8 @@ GtkWidget *compare_filter_missing_run2;
 GtkWidget *compare_filter_all_run1;
 GtkWidget *compare_filter_all_run2;
 GtkWidget *compare_filter_all_diffs;
+GtkWidget *compare_filter_mtime_diff;
+GtkWidget *compare_filter_size_diff;
 
 char compare_run1_db_path[MAX_PATH] = "";
 char compare_run2_db_path[MAX_PATH] = "";
@@ -2315,6 +2317,10 @@ typedef struct {
     char status_run2[32];
     char checksum_run1[HASH_SIZE];
     char checksum_run2[HASH_SIZE];
+    long long size_run1;
+    long long size_run2;
+    long long mtime_run1;
+    long long mtime_run2;
 } CompareResult;
 
 // Strip mount point (first two path components) for comparison
@@ -2366,7 +2372,10 @@ void compare_perform_comparison() {
                       "(SELECT DISTINCT full_path FROM run_logs WHERE run_id = ? AND status != 'MISSING')";
 
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db1, "SELECT rl.full_path, rl.checksum, rl.status FROM run_logs rl "
+    if (sqlite3_prepare_v2(db1, "SELECT rl.full_path, rl.checksum, rl.status, "
+                                "COALESCE(f.size, 0), COALESCE(f.last_modified, 0) "
+                                "FROM run_logs rl "
+                                "LEFT JOIN files f ON rl.full_path = f.full_path "
                                 "WHERE rl.run_id = ?",
                           -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, compare_run1_id);
@@ -2374,6 +2383,8 @@ void compare_perform_comparison() {
             const char *path = (const char *)sqlite3_column_text(stmt, 0);
             const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
             const char *status = (const char *)sqlite3_column_text(stmt, 2);
+            long long size = sqlite3_column_int64(stmt, 3);
+            long long mtime = sqlite3_column_int64(stmt, 4);
 
             // Use relative path (without mount point) as comparison key
             const char *rel_path = get_relative_path(path);
@@ -2386,6 +2397,10 @@ void compare_perform_comparison() {
             strncpy(result->checksum_run1, checksum ? checksum : "", HASH_SIZE - 1);
             strcpy(result->status_run2, "NOT_IN_RUN");
             strcpy(result->checksum_run2, "");
+            result->size_run1 = size;
+            result->mtime_run1 = mtime;
+            result->size_run2 = 0;
+            result->mtime_run2 = 0;
 
             g_hash_table_insert(files_run1, g_strdup(rel_path), result);
         }
@@ -2393,7 +2408,10 @@ void compare_perform_comparison() {
     }
 
     // Get files from run 2 and update comparison
-    if (sqlite3_prepare_v2(db2, "SELECT rl.full_path, rl.checksum, rl.status FROM run_logs rl "
+    if (sqlite3_prepare_v2(db2, "SELECT rl.full_path, rl.checksum, rl.status, "
+                                "COALESCE(f.size, 0), COALESCE(f.last_modified, 0) "
+                                "FROM run_logs rl "
+                                "LEFT JOIN files f ON rl.full_path = f.full_path "
                                 "WHERE rl.run_id = ?",
                           -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, compare_run2_id);
@@ -2401,6 +2419,8 @@ void compare_perform_comparison() {
             const char *path = (const char *)sqlite3_column_text(stmt, 0);
             const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
             const char *status = (const char *)sqlite3_column_text(stmt, 2);
+            long long size = sqlite3_column_int64(stmt, 3);
+            long long mtime = sqlite3_column_int64(stmt, 4);
 
             // Use relative path (without mount point) as comparison key
             const char *rel_path = get_relative_path(path);
@@ -2412,6 +2432,8 @@ void compare_perform_comparison() {
                 result->path_run2[MAX_PATH - 1] = '\0';
                 strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
                 strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
+                result->size_run2 = size;
+                result->mtime_run2 = mtime;
             } else {
                 // File only in run 2
                 result = g_new0(CompareResult, 1);
@@ -2422,6 +2444,10 @@ void compare_perform_comparison() {
                 strcpy(result->checksum_run1, "");
                 strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
                 strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
+                result->size_run1 = 0;
+                result->mtime_run1 = 0;
+                result->size_run2 = size;
+                result->mtime_run2 = mtime;
                 g_hash_table_insert(files_run2, g_strdup(rel_path), result);
             }
         }
@@ -2462,6 +2488,14 @@ void compare_perform_comparison() {
             strcmp(result->status_run1, "NOT_IN_RUN") != 0) show = 1;
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_mtime_diff)) &&
+            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
+            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
+            result->mtime_run1 != result->mtime_run2) show = 1;
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_size_diff)) &&
+            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
+            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
+            result->size_run1 != result->size_run2) show = 1;
 
         if (show) {
             // Use relative path for display (common portion)
@@ -2700,6 +2734,14 @@ GtkWidget *create_compare_tab() {
     compare_filter_all_run2 = gtk_check_button_new_with_label("All Files in Run 2");
     g_signal_connect(compare_filter_all_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
     gtk_box_append(GTK_BOX(left_box), compare_filter_all_run2);
+
+    compare_filter_mtime_diff = gtk_check_button_new_with_label("Date/Time Difference");
+    g_signal_connect(compare_filter_mtime_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_mtime_diff);
+
+    compare_filter_size_diff = gtk_check_button_new_with_label("Size Difference");
+    g_signal_connect(compare_filter_size_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
+    gtk_box_append(GTK_BOX(left_box), compare_filter_size_diff);
 
     // Export button
     GtkWidget *export_btn = gtk_button_new_with_label("Export to CSV");
