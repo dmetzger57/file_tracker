@@ -706,7 +706,7 @@ void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data
                           0, &selected_drive_id,
                           1, &name,
                           2, &location,
-                          5, &description,
+                          6, &description,
                           -1);
 
         // Populate fields with selected drive's data
