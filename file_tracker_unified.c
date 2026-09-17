@@ -530,9 +530,14 @@ void drives_refresh_list() {
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            char cap_str[64], avail_str[64];
-            format_size(sqlite3_column_int64(stmt, 3), cap_str, sizeof(cap_str));
-            format_size(sqlite3_column_int64(stmt, 4), avail_str, sizeof(avail_str));
+            long long capacity = sqlite3_column_int64(stmt, 3);
+            long long available = sqlite3_column_int64(stmt, 4);
+            long long used = capacity - available;
+
+            char cap_str[64], used_str[64], avail_str[64];
+            format_size(capacity, cap_str, sizeof(cap_str));
+            format_size(used, used_str, sizeof(used_str));
+            format_size(available, avail_str, sizeof(avail_str));
 
             const char *location = (const char *)sqlite3_column_text(stmt, 2);
 
@@ -543,9 +548,10 @@ void drives_refresh_list() {
                               1, sqlite3_column_text(stmt, 1),
                               2, location ? location : "",
                               3, cap_str,
-                              4, avail_str,
-                              5, sqlite3_column_text(stmt, 5),
-                              6, sqlite3_column_text(stmt, 6),
+                              4, used_str,
+                              5, avail_str,
+                              6, sqlite3_column_text(stmt, 5),
+                              7, sqlite3_column_text(stmt, 6),
                               -1);
         }
         sqlite3_finalize(stmt);
@@ -788,17 +794,17 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(box), desc_box);
 
     // Drives list
-    GtkListStore *store = gtk_list_store_new(7, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
-                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkListStore *store = gtk_list_store_new(8, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     drives_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
-    const char *titles[] = {"ID", "Name", "Location", "Capacity", "Available", "Description", "Last Verified"};
-    for (int i = 0; i < 7; i++) {
+    const char *titles[] = {"ID", "Name", "Location", "Capacity", "Used", "Available", "Description", "Last Verified"};
+    for (int i = 0; i < 8; i++) {
         GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
-        if (i == 5) gtk_tree_view_column_set_expand(column, TRUE);
+        if (i == 6) gtk_tree_view_column_set_expand(column, TRUE);
         gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), column);
     }
 
