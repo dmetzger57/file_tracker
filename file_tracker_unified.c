@@ -805,6 +805,10 @@ GtkWidget *create_drives_tab() {
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
         if (i == 6) gtk_tree_view_column_set_expand(column, TRUE);
+        // Enable sorting on Name and Location columns
+        if (i == 1 || i == 2) {
+            gtk_tree_view_column_set_sort_column_id(column, i);
+        }
         gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), column);
     }
 
