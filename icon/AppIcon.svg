@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a4a63"/>
+      <stop offset="1" stop-color="#1b2433"/>
+    </linearGradient>
+    <linearGradient id="hat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8a6a45"/>
+      <stop offset="1" stop-color="#5c452b"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cfe9ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7fb6e6" stop-opacity="0.25"/>
+    </linearGradient>
+    <clipPath id="clip"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+  <!-- macOS-style rounded square -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+
+  <g clip-path="url(#clip)">
+  <!-- coat / shoulders -->
+  <path d="M232 924 C232 760 340 700 512 700 C684 700 792 760 792 924 Z" fill="#12171f"/>
+  <!-- shirt collar -->
+  <path d="M440 705 L512 800 L584 705 Z" fill="#f2f2f2"/>
+  <!-- tie -->
+  <path d="M498 790 L526 790 L540 880 L512 910 L484 880 Z" fill="#a3272f"/>
+
+  <!-- face -->
+  <ellipse cx="512" cy="560" rx="132" ry="150" fill="#f0c9a4"/>
+  <!-- ears -->
+  <ellipse cx="378" cy="565" rx="20" ry="32" fill="#e3b78f"/>
+  <ellipse cx="646" cy="565" rx="20" ry="32" fill="#e3b78f"/>
+
+  <!-- hat brim -->
+  <ellipse cx="512" cy="470" rx="300" ry="62" fill="#4a3822"/>
+  <!-- hat crown -->
+  <path d="M362 462 C356 330 400 262 512 262 C624 262 668 330 662 462 Z" fill="url(#hat)"/>
+  <!-- hat pinch dent -->
+  <path d="M470 270 C490 300 534 300 554 270 C540 262 484 262 470 270 Z" fill="#4a3822"/>
+  <!-- hat band -->
+  <path d="M364 440 C420 462 604 462 660 440 L662 464 C610 486 414 486 362 464 Z" fill="#1c1c1c"/>
+
+  <!-- eyes -->
+  <circle cx="470" cy="548" r="11" fill="#1c1c1c"/>
+  <circle cx="554" cy="548" r="11" fill="#1c1c1c"/>
+  <!-- brows -->
+  <path d="M446 522 L494 530" stroke="#3a2a1a" stroke-width="10" stroke-linecap="round"/>
+  <path d="M578 522 L530 530" stroke="#3a2a1a" stroke-width="10" stroke-linecap="round"/>
+  <!-- mustache -->
+  <path d="M512 608 C490 590 448 596 442 622 C470 618 496 626 512 620 C528 626 554 618 582 622 C576 596 534 590 512 608 Z" fill="#3a2a1a"/>
+
+</g>
+  <!-- magnifying glass -->
+  <g clip-path="url(#clip)">
+  <line x1="745" y1="745" x2="880" y2="880" stroke="#3b2a18" stroke-width="44" stroke-linecap="round"/>
+  <circle cx="700" cy="700" r="90" fill="url(#glass)" stroke="#d9a441" stroke-width="28"/>
+  <path d="M645 680 C655 655 683 643 710 647" stroke="#ffffff" stroke-opacity="0.85" stroke-width="12" fill="none" stroke-linecap="round"/>
+  </g>
+</svg>
