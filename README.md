@@ -96,6 +96,7 @@ Browse detailed per-file change logs with filtering.
 - **Status Filters:** Filter by CHANGED, NEW, MISSING, ERROR, IGNORED, ALL
 - **File List:** Full paths of files matching filter
 - **Quick Stats:** Counts for each status category
+- **Export:** Save the records matching the current filter to a CSV file (`Status,Full Path`) via a file-save dialog
 
 ### Drives Tab
 

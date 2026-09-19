@@ -1169,14 +1169,10 @@ void logs_load_details() {
     sqlite3_close(db);
 }
 
-void logs_load_logs() {
-    if (logs_selected_run_id == 0) return;
-
-    sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
-
-    char status_filter[512] = "";
+// Builds SQL WHERE fragment from the Logs filter checkboxes. Returns 0 if none selected.
+static int logs_build_status_filter(char *status_filter) {
     int any_filter = 0;
+
 
     if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_all_check))) {
         strcpy(status_filter, "1=1");
@@ -1219,6 +1215,18 @@ void logs_load_logs() {
         }
     }
 
+    return any_filter;
+}
+
+void logs_load_logs() {
+    if (logs_selected_run_id == 0) return;
+
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
+
+    char status_filter[512] = "";
+    int any_filter = logs_build_status_filter(status_filter);
+
     if (!any_filter) {
         GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
         gtk_text_buffer_set_text(logs_buffer, "No filters selected. Select at least one filter or 'All'.", -1);
@@ -1252,6 +1260,105 @@ void logs_load_logs() {
 
     sqlite3_finalize(stmt);
     sqlite3_close(db);
+}
+
+static void logs_alert(const char *msg) {
+    GtkAlertDialog *alert = gtk_alert_dialog_new("%s", msg);
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+}
+
+static void logs_csv_field(FILE *fp, const char *s) {
+    fputc('"', fp);
+    for (; s && *s; s++) {
+        if (*s == '"') fputc('"', fp);
+        fputc(*s, fp);
+    }
+    fputc('"', fp);
+}
+
+static void on_logs_export_response(GObject *source, GAsyncResult *result, gpointer user_data) {
+    (void)user_data;
+
+    GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, NULL);
+    if (!file) return;
+
+    char *path = g_file_get_path(file);
+    g_object_unref(file);
+    if (!path) return;
+
+    char status_filter[512] = "";
+    if (!logs_build_status_filter(status_filter)) {
+        logs_alert("No filters selected. Select at least one filter or 'All'.");
+        g_free(path);
+        return;
+    }
+
+    sqlite3 *db;
+    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
+        logs_alert("Failed to open database");
+        g_free(path);
+        return;
+    }
+
+    char query[1024];
+    snprintf(query, sizeof(query),
+             "SELECT status, full_path FROM run_logs WHERE run_id = ? AND (%s) ORDER BY id",
+             status_filter);
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) != SQLITE_OK) {
+        logs_alert("Failed to query logs");
+        sqlite3_close(db);
+        g_free(path);
+        return;
+    }
+    sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        logs_alert("Failed to create export file");
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        g_free(path);
+        return;
+    }
+
+    fprintf(fp, "Status,Full Path\n");
+    long count = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        logs_csv_field(fp, (const char *)sqlite3_column_text(stmt, 0));
+        fputc(',', fp);
+        logs_csv_field(fp, (const char *)sqlite3_column_text(stmt, 1));
+        fputc('\n', fp);
+        count++;
+    }
+    fclose(fp);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    char msg[MAX_PATH + 64];
+    snprintf(msg, sizeof(msg), "Exported %ld log records to %s", count, path);
+    logs_alert(msg);
+    g_free(path);
+}
+
+void on_logs_export_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    if (logs_selected_run_id == 0) {
+        logs_alert("Please select a run to export");
+        return;
+    }
+
+    char name[64];
+    snprintf(name, sizeof(name), "run_%lld_logs.csv", (long long)logs_selected_run_id);
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Export Logs to CSV");
+    gtk_file_dialog_set_initial_name(dialog, name);
+    gtk_file_dialog_save(dialog, GTK_WINDOW(window), NULL, on_logs_export_response, NULL);
+    g_object_unref(dialog);
 }
 
 void on_logs_db_changed(GtkComboBox *combo, gpointer user_data) {
@@ -1573,6 +1680,12 @@ GtkWidget *create_logs_tab() {
     gtk_box_append(GTK_BOX(filter_box), logs_filter_unchanged_check);
     gtk_box_append(GTK_BOX(filter_box), logs_filter_ignored_check);
     gtk_box_append(GTK_BOX(filter_box), logs_filter_errors_check);
+
+    GtkWidget *export_btn = gtk_button_new_with_label("Export");
+    gtk_widget_set_hexpand(export_btn, TRUE);
+    gtk_widget_set_halign(export_btn, GTK_ALIGN_END);
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_logs_export_clicked), NULL);
+    gtk_box_append(GTK_BOX(filter_box), export_btn);
     gtk_box_append(GTK_BOX(right_box), filter_box);
 
     // Logs
