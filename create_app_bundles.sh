@@ -15,6 +15,9 @@ create_app_bundle() {
     # Copy executable to Resources
     cp "$EXECUTABLE" "${APP_NAME}.app/Contents/Resources/"
 
+    # Copy app icon
+    cp icon/AppIcon.icns "${APP_NAME}.app/Contents/Resources/AppIcon.icns"
+
     # Create a customized launcher.m for this app
     sed "s/APP_EXECUTABLE/$EXECUTABLE/g" launcher.m > "${APP_NAME}.app/Contents/MacOS/launcher_temp.m"
 
@@ -32,6 +35,8 @@ create_app_bundle() {
 <dict>
     <key>CFBundleExecutable</key>
     <string>launcher</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>
