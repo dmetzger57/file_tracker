@@ -12,29 +12,21 @@ create_app_bundle() {
     mkdir -p "${APP_NAME}.app/Contents/MacOS"
     mkdir -p "${APP_NAME}.app/Contents/Resources"
 
-    # Copy executable to Resources
-    cp "$EXECUTABLE" "${APP_NAME}.app/Contents/Resources/"
+    # Use the real binary as the bundle executable (no wrapper process), so the
+    # Dock shows a single icon tied to this bundle
+    cp "$EXECUTABLE" "${APP_NAME}.app/Contents/MacOS/${EXECUTABLE}"
 
     # Copy app icon
     cp icon/AppIcon.icns "${APP_NAME}.app/Contents/Resources/AppIcon.icns"
 
-    # Create a customized launcher.m for this app
-    sed "s/APP_EXECUTABLE/$EXECUTABLE/g" launcher.m > "${APP_NAME}.app/Contents/MacOS/launcher_temp.m"
-
-    # Compile the Objective-C wrapper with Cocoa framework
-    clang -framework Cocoa -o "${APP_NAME}.app/Contents/MacOS/launcher" "${APP_NAME}.app/Contents/MacOS/launcher_temp.m"
-
-    # Remove temporary source file
-    rm "${APP_NAME}.app/Contents/MacOS/launcher_temp.m"
-
-    # Create Info.plist - point to the compiled launcher
+    # Create Info.plist
     cat > "${APP_NAME}.app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>launcher</string>
+    <string>${EXECUTABLE}</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
