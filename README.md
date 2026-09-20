@@ -43,7 +43,7 @@ All tools share the same SQLite database format. Scan once, query many ways.
 Recursively scans directory trees, computes SHA-256 hashes, and stores file metadata in SQLite databases. Multi-threaded for performance.
 
 **Features:**
-- **Mounted Volumes List:** Shows all drives mounted at `/Volumes/` with capacity info
+- **Mounted Volumes List:** Shows all drives mounted at `/Volumes/` with capacity info (Time Machine volumes, `mbp_backup` and `Macintosh HD` are hidden; edit `is_excluded_volume()` in `file_tracker_unified.c` to change this)
 - **Directory Selection:** Browse button or manual path entry
 - **Scan Options:**
   - Enable Checksum Verification (SHA-256) - compare checksums even when mtime unchanged
@@ -107,7 +107,7 @@ Track external drive metadata, verification history, and storage location.
 - **Add Drive:** Register new drives with auto-detected capacity
 - **Verify Drive:** Mark drive as verified on current date
 - **Edit Metadata:** Update description, physical location notes
-- **Auto-Discovery:** Detects drives when scanning (no manual registration needed)
+- **Auto-Discovery:** Detects drives when scanning (no manual registration needed); the same excluded volumes as the Scanner list are skipped
 
 ### Locator Tab
 
@@ -254,7 +254,7 @@ Scan logs are written to `~/logs/FileTracker/` with timestamps.
 ## macOS App Bundle
 
 After running `make apps`, you get:
-- **File Tracker Unified.app** - Complete application with all tabs
+- **File Tracker Unified.app** - Complete application with all tabs, using the icon in `icon/AppIcon.icns`
 
 Double-click to launch without terminal window. Optionally move to `/Applications/` for easy access.
 
