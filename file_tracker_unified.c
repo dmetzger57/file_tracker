@@ -323,11 +323,12 @@ void drives_refresh_list();
 GtkWidget *locator_search_entry;
 GtkWidget *locator_db_combo;
 GtkWidget *locator_partial_check;
+GtkWidget *locator_mode_combo;   // 0 = File Name, 1 = Checksum
 GtkWidget *locator_results_tree;
 GtkWidget *locator_status_label;
 
 void locator_search_database(const char *dbname, const char *db_path, const char *filename,
-                              int partial, GtkListStore *store, char *first_checksum, int *count) {
+                              int by_checksum, int partial, GtkListStore *store, char *first_checksum, int *count) {
     sqlite3 *db;
     sqlite3_stmt *stmt;
 
@@ -336,9 +337,17 @@ void locator_search_database(const char *dbname, const char *db_path, const char
     if (sqlite3_open(db_path, &db) != SQLITE_OK) return;
 
     char sql[512];
-    snprintf(sql, sizeof(sql),
-             "SELECT full_path, size, last_modified, owner, checksum FROM files WHERE file_name %s ?;",
-             partial ? "LIKE" : "=");
+    if (by_checksum) {
+        // Checksums are hex; compare case-insensitively
+        snprintf(sql, sizeof(sql),
+                 "SELECT full_path, size, last_modified, owner, checksum FROM files "
+                 "WHERE lower(checksum) %s lower(?);",
+                 partial ? "LIKE" : "=");
+    } else {
+        snprintf(sql, sizeof(sql),
+                 "SELECT full_path, size, last_modified, owner, checksum FROM files WHERE file_name %s ?;",
+                 partial ? "LIKE" : "=");
+    }
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
         sqlite3_close(db);
@@ -379,6 +388,7 @@ void locator_search_database(const char *dbname, const char *db_path, const char
                           3, time_str,
                           4, sqlite3_column_text(stmt, 3),
                           5, match ? "✓" : "⚠",
+                          6, checksum ? checksum : "",
                           -1);
     }
 
@@ -389,9 +399,14 @@ void locator_search_database(const char *dbname, const char *db_path, const char
 void on_locator_search_clicked(GtkButton *button, gpointer user_data) {
     (void)button; (void)user_data;
 
-    const char *search_text = gtk_editable_get_text(GTK_EDITABLE(locator_search_entry));
+    int by_checksum = gtk_combo_box_get_active(GTK_COMBO_BOX(locator_mode_combo)) == 1;
+    char search_text[MAX_PATH];
+    snprintf(search_text, sizeof(search_text), "%s",
+             gtk_editable_get_text(GTK_EDITABLE(locator_search_entry)));
+    if (by_checksum) g_strstrip(search_text);
     if (strlen(search_text) == 0) {
-        gtk_label_set_text(GTK_LABEL(locator_status_label), "Enter a filename to search");
+        gtk_label_set_text(GTK_LABEL(locator_status_label),
+                           by_checksum ? "Enter a checksum to search" : "Enter a filename to search");
         return;
     }
 
@@ -414,7 +429,7 @@ void on_locator_search_clicked(GtkButton *button, gpointer user_data) {
                 if (len > 3 && strcmp(entry->d_name + len - 3, ".db") == 0) {
                     char db_path[MAX_PATH];
                     snprintf(db_path, sizeof(db_path), "%s/%s", db_dir_path, entry->d_name);
-                    locator_search_database(entry->d_name, db_path, search_text, partial, store, first_checksum, &count);
+                    locator_search_database(entry->d_name, db_path, search_text, by_checksum, partial, store, first_checksum, &count);
                 }
             }
             closedir(dir);
@@ -422,7 +437,7 @@ void on_locator_search_clicked(GtkButton *button, gpointer user_data) {
     } else if (selected_db) {
         char db_path[MAX_PATH];
         snprintf(db_path, sizeof(db_path), "%s/%s", db_dir_path, selected_db);
-        locator_search_database(selected_db, db_path, search_text, partial, store, first_checksum, &count);
+        locator_search_database(selected_db, db_path, search_text, by_checksum, partial, store, first_checksum, &count);
     }
 
     if (selected_db) g_free(selected_db);
@@ -430,6 +445,13 @@ void on_locator_search_clicked(GtkButton *button, gpointer user_data) {
     char status[256];
     snprintf(status, sizeof(status), "Found %d file%s", count, count == 1 ? "" : "s");
     gtk_label_set_text(GTK_LABEL(locator_status_label), status);
+}
+
+static void on_locator_mode_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    int by_checksum = gtk_combo_box_get_active(combo) == 1;
+    gtk_entry_set_placeholder_text(GTK_ENTRY(locator_search_entry),
+                                   by_checksum ? "Enter SHA-256 checksum..." : "Enter filename...");
 }
 
 GtkWidget *create_locator_tab() {
@@ -442,8 +464,14 @@ GtkWidget *create_locator_tab() {
     // Search controls
     GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 
-    GtkWidget *label = gtk_label_new("Search:");
+    GtkWidget *label = gtk_label_new("Search by:");
     gtk_widget_set_size_request(label, 70, -1);
+
+    locator_mode_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_mode_combo), "File Name");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_mode_combo), "Checksum");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(locator_mode_combo), 0);
+    g_signal_connect(locator_mode_combo, "changed", G_CALLBACK(on_locator_mode_changed), NULL);
 
     locator_search_entry = gtk_entry_new();
     gtk_widget_set_hexpand(locator_search_entry, TRUE);
@@ -459,6 +487,7 @@ GtkWidget *create_locator_tab() {
     g_signal_connect(search_btn, "clicked", G_CALLBACK(on_locator_search_clicked), NULL);
 
     gtk_box_append(GTK_BOX(search_box), label);
+    gtk_box_append(GTK_BOX(search_box), locator_mode_combo);
     gtk_box_append(GTK_BOX(search_box), locator_search_entry);
     gtk_box_append(GTK_BOX(search_box), locator_partial_check);
     gtk_box_append(GTK_BOX(search_box), locator_db_combo);
@@ -466,13 +495,14 @@ GtkWidget *create_locator_tab() {
     gtk_box_append(GTK_BOX(box), search_box);
 
     // Results
-    GtkListStore *store = gtk_list_store_new(6, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
-                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkListStore *store = gtk_list_store_new(7, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING);
     locator_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
-    const char *titles[] = {"Database", "Path", "Size", "Modified", "Owner", "✓"};
-    for (int i = 0; i < 6; i++) {
+    const char *titles[] = {"Database", "Path", "Size", "Modified", "Owner", "✓", "Checksum"};
+    for (int i = 0; i < 7; i++) {
         GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
