@@ -137,6 +137,29 @@ Compare two scan runs from the same database to see exactly what changed between
   - All differences combined
 - **Detailed View:** Shows old vs new values for each changed attribute
 
+## Command Line Scanner
+
+`file_tracker` scans a directory from the terminal using the same databases as `file_tracker_unified` (`~/db/FileTracker/<last path component>.db`, the same name the Scanner tab derives).
+
+```bash
+file_tracker -s /Volumes/Archive            # record the run, file details untouched
+file_tracker -s /Volumes/Archive -u -n "Weekly check"    # update file details and record the run
+file_tracker -s /Volumes/Archive -u -v      # deep verification (SHA-256)
+```
+
+| Option | Meaning |
+|--------|---------|
+| `-s path` | Directory to scan (required) |
+| `-v` | Verify via SHA-256 checksum; without it, compare size and modification time |
+| `-u` | Update file details in the database; without it the run is still recorded but the files table is not changed |
+| `-n note` | Note stored with the run |
+
+Output is one line: `Total: X - Processed: X - New: X - Changed: X - Unchanged: X - Missing: X - Errors: X`. `make` builds both binaries.
+
+### Missing Files
+
+Both the CLI and the Scanner tab report files that are recorded in the database under the scan path but no longer exist on disk. With updates enabled (`-u` / "Update Database") these rows are marked `status = 'MISSING'` in the `files` table and skipped, not reported again, on later scans. A file that reappears is reported as New and its status is cleared. Older databases gain the `status` column automatically on the next scan. Changed files always have their checksum refreshed in the database when updates are enabled.
+
 ## Database Structure
 
 ### Storage Location

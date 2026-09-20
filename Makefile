@@ -13,13 +13,16 @@ LIBS = -lssl -lcrypto -lsqlite3 -lpthread
 
 .PHONY: all clean install apps
 
-all: file_tracker_unified
+all: file_tracker_unified file_tracker
+
+file_tracker: file_tracker.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o file_tracker file_tracker.c -lssl -lcrypto -lsqlite3
 
 file_tracker_unified: file_tracker_unified.c
 	$(CC) $(CFLAGS) $(LDFLAGS) `pkg-config --cflags --libs gtk4` -o file_tracker_unified file_tracker_unified.c -lssl -lcrypto -lsqlite3
 
 clean:
-	rm -f file_tracker_unified *.o
+	rm -f file_tracker_unified file_tracker *.o
 
 install:
 	@echo "Installing File Tracker Unified to /Applications..."
