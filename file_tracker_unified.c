@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fnmatch.h>
 #include <unistd.h>
 #include <pwd.h>
@@ -1803,6 +1804,66 @@ gboolean scanner_update_current_file(gpointer data) {
 
 gboolean scanner_scan_completed(gpointer data);
 
+// Older databases have no files.status column; add it so files can be marked MISSING
+static void scanner_ensure_status_column(sqlite3 *db) {
+    sqlite3_stmt *stmt;
+    int has_status = 0;
+    if (sqlite3_prepare_v2(db, "PRAGMA table_info(files)", -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *col = (const char *)sqlite3_column_text(stmt, 1);
+            if (col && strcmp(col, "status") == 0) has_status = 1;
+        }
+        sqlite3_finalize(stmt);
+    }
+    if (!has_status) sqlite3_exec(db, "ALTER TABLE files ADD COLUMN status TEXT;", 0, 0, 0);
+}
+
+// Files recorded under the scan path that are gone from disk. In update mode they are marked
+// MISSING in the files table; rows already marked MISSING are skipped so they are reported once.
+static void scanner_find_missing(ScannerContext *ctx) {
+    char prefix[MAX_PATH];
+    size_t len = strlen(ctx->scan_path);
+    snprintf(prefix, sizeof(prefix), "%s%s", ctx->scan_path, (len > 0 && ctx->scan_path[len - 1] == '/') ? "" : "/");
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT id, full_path FROM files WHERE substr(full_path, 1, length(?1)) = ?1 "
+            "AND (status IS NULL OR status != 'MISSING')", -1, &stmt, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, prefix, -1, SQLITE_STATIC);
+
+    // Collect ids first; the files table is modified after the query has finished
+    sqlite3_int64 *ids = NULL;
+    int id_count = 0, id_capacity = 0;
+    while (!ctx->should_stop && sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *path = (const char *)sqlite3_column_text(stmt, 1);
+        struct stat sb;
+        if (!path || stat(path, &sb) == 0 || errno != ENOENT) continue;
+
+        ctx->missing++;
+        scanner_log_message(ctx, "MISSING", path, "", 0, 0);
+        if (id_count >= id_capacity) {
+            id_capacity = id_capacity == 0 ? 64 : id_capacity * 2;
+            ids = realloc(ids, id_capacity * sizeof(sqlite3_int64));
+        }
+        ids[id_count++] = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+
+    if (ctx->update_mode && id_count > 0) {
+        sqlite3_stmt *up;
+        if (sqlite3_prepare_v2(ctx->db, "UPDATE files SET status = 'MISSING' WHERE id = ?", -1, &up, NULL) == SQLITE_OK) {
+            for (int i = 0; i < id_count; i++) {
+                sqlite3_bind_int64(up, 1, ids[i]);
+                sqlite3_step(up);
+                sqlite3_reset(up);
+            }
+            sqlite3_finalize(up);
+        }
+    }
+    free(ids);
+    g_idle_add(scanner_update_progress, ctx);
+}
+
 void scanner_process_ignored_file(ScannerContext *ctx, const char *filepath, const char *filename) {
     struct stat sb;
 
@@ -1857,10 +1918,15 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
     if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) return;
 
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(ctx->db, "SELECT size, last_modified, checksum FROM files WHERE full_path = ?", -1, &stmt, NULL);
+    sqlite3_prepare_v2(ctx->db, "SELECT size, last_modified, checksum, status FROM files WHERE full_path = ?", -1, &stmt, NULL);
     sqlite3_bind_text(stmt, 1, filepath, -1, SQLITE_STATIC);
 
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    int found = (sqlite3_step(stmt) == SQLITE_ROW);
+    const char *db_status = found ? (const char *)sqlite3_column_text(stmt, 3) : NULL;
+    // A file previously marked MISSING that is back on disk is treated as new
+    int reappeared = db_status && strcmp(db_status, "MISSING") == 0;
+
+    if (found && !reappeared) {
         long long db_size = sqlite3_column_int64(stmt, 0);
         long long db_mtime = sqlite3_column_int64(stmt, 1);
         const char *db_checksum = (const char *)sqlite3_column_text(stmt, 2);
@@ -1919,7 +1985,8 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
             scanner_log_message(ctx, log_mesg, filepath, checksum, sb.st_size, sb.st_mtime);
 
             if (ctx->update_mode) {
-                if (!has_checksum && ctx->enable_checksum) {
+                // Always store a checksum that matches the new content
+                if (!has_checksum) {
                     compute_sha256(filepath, checksum);
                 }
                 sqlite3_stmt *up;
@@ -1940,7 +2007,16 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
         char checksum[HASH_SIZE] = "";
         if (ctx->enable_checksum) compute_sha256(filepath, checksum);
         scanner_log_message(ctx, "NEW", filepath, checksum, sb.st_size, sb.st_mtime);
-        if (ctx->update_mode) {
+        if (ctx->update_mode && reappeared) {
+            sqlite3_stmt *up;
+            sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=?, status=NULL WHERE full_path=?", -1, &up, NULL);
+            sqlite3_bind_int64(up, 1, sb.st_size);
+            sqlite3_bind_int64(up, 2, sb.st_mtime);
+            sqlite3_bind_text(up, 3, checksum, -1, SQLITE_STATIC);
+            sqlite3_bind_text(up, 4, filepath, -1, SQLITE_STATIC);
+            sqlite3_step(up);
+            sqlite3_finalize(up);
+        } else if (ctx->update_mode) {
             sqlite3_stmt *ins;
             sqlite3_prepare_v2(ctx->db, "INSERT INTO files (file_name, full_path, size, created, last_modified, owner, checksum) VALUES (?, ?, ?, ?, ?, ?, ?)", -1, &ins, NULL);
             sqlite3_bind_text(ins, 1, filename, -1, SQLITE_STATIC);
@@ -2027,7 +2103,8 @@ gpointer scanner_thread_func(gpointer data) {
         return NULL;
     }
 
-    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT);", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT, status TEXT);", 0, 0, 0);
+    scanner_ensure_status_column(ctx->db);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, size INTEGER, mtime INTEGER, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
 
@@ -2035,6 +2112,7 @@ gpointer scanner_thread_func(gpointer data) {
     ctx->total_files = scanner_count_files(ctx->scan_path);
 
     scanner_scan_directory(ctx, ctx->scan_path);
+    scanner_find_missing(ctx);
 
     // Always create meta record for all scans (both update and read-only)
     char timestamp[64], hostname[256];
