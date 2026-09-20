@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <dirent.h>
+#include <fnmatch.h>
 #include <unistd.h>
 #include <pwd.h>
 #include <locale.h>
@@ -278,6 +279,13 @@ void auto_add_or_update_drive(const char *db_path, const char *source_path) {
     }
 }
 
+// Volumes hidden from all volume lists
+static int is_excluded_volume(const char *name) {
+    return fnmatch("com.apple.TimeMachine*", name, 0) == 0 ||
+           fnmatch("mbp_backup", name, 0) == 0 ||
+           fnmatch("Macintosh HD", name, 0) == 0;
+}
+
 int update_all_mounted_drives() {
     DIR *dir = opendir("/Volumes");
     if (!dir) return 0;
@@ -286,6 +294,7 @@ int update_all_mounted_drives() {
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
+        if (is_excluded_volume(entry->d_name)) continue;
 
         char full_path[MAX_PATH];
         snprintf(full_path, sizeof(full_path), "/Volumes/%s", entry->d_name);
@@ -2117,6 +2126,7 @@ void scanner_refresh_volumes() {
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
+        if (is_excluded_volume(entry->d_name)) continue;
 
         char full_path[MAX_PATH];
         snprintf(full_path, sizeof(full_path), "/Volumes/%s", entry->d_name);
