@@ -32,6 +32,7 @@ make apps
 - **Logs** - Browse detailed per-file change logs
 - **Drives** - Track external drive information
 - **Locator** - Search for files across databases
+- **DupeFinder** - Find duplicate files by name or checksum
 - **Compare** - Compare two scan runs to see what changed
 
 All tools share the same SQLite database format. Scan once, query many ways.
@@ -107,6 +108,7 @@ Track external drive metadata, verification history, and storage location.
 - **Add Drive:** Register new drives with auto-detected capacity
 - **Verify Drive:** Mark drive as verified on current date
 - **Edit Metadata:** Update description, physical location notes
+- **Last Checksum Scan:** Date of the drive's most recent scan run with checksum verification enabled (sortable; "Never" if none, "No database" if the drive has no database file)
 - **Auto-Discovery:** Detects drives when scanning (no manual registration needed); the same excluded volumes as the Scanner list are skipped
 
 ### Locator Tab
@@ -118,6 +120,18 @@ Search for files across all tracked databases by filename. Compare checksums bet
 - **Multi-Database Results:** Shows which databases contain matching files
 - **Checksum Comparison:** Automatic duplicate detection
 - **Path Information:** Full paths and database locations
+
+### DupeFinder Tab
+
+Find every copy of a file, either by name or by checksum, within one drive or across all drives.
+
+**Features:**
+- **Search By:** File Name or File Checksum
+- **Scope:** A single database (drive) or All Databases
+- **File Name Wildcard:** `*` matches any run of characters (e.g. `*File*should*`); other characters, including `?` and `[`, match literally. Matching is case-sensitive
+- **Checksum Search:** Exact SHA-256 match, case-insensitive
+- **Results:** File Name, Drive, Checksum, Full Path, and Last Checksum Calculation (sortable columns)
+- **Notes:** Files marked MISSING are excluded. Checksum dates are not stored per file, so the date shown is the drive's latest scan run with checksum verification enabled
 
 ### Compare Tab
 
@@ -259,10 +273,10 @@ Monthly full checksum verification:
 4. Or use Compare tab to diff two specific runs
 
 ### Find Duplicates
-1. Go to Locator tab
-2. Search for filename
-3. Results show all databases containing that file
-4. Matching checksums indicate duplicates
+1. Go to DupeFinder tab
+2. Choose File Name or File Checksum and enter the value (`*` is a wildcard in names)
+3. Choose a database or All Databases
+4. Results list every copy with its drive, path, and checksum
 
 ## Performance
 

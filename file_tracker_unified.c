@@ -3062,6 +3062,226 @@ GtkWidget *create_compare_tab() {
 }
 
 // ============================================================================
+// TAB: DUPE FINDER
+// ============================================================================
+
+GtkWidget *dupe_mode_combo;   // 0 = File Name, 1 = Checksum
+GtkWidget *dupe_search_entry;
+GtkWidget *dupe_db_combo;
+GtkWidget *dupe_results_tree;
+GtkWidget *dupe_status_label;
+
+// Builds a GLOB pattern from a user file name: '*' stays a wildcard, while GLOB's other
+// metacharacters (? and [) are bracketed so they match literally.
+static void dupe_name_to_glob(const char *name, char *out, size_t out_size) {
+    size_t n = 0;
+    for (const char *c = name; *c && n + 4 < out_size; c++) {
+        if (*c == '?' || *c == '[') {
+            out[n++] = '[';
+            out[n++] = *c;
+            out[n++] = ']';
+        } else {
+            out[n++] = *c;
+        }
+    }
+    out[n] = '\0';
+}
+
+// Adds every present file in one database that matches the name/checksum. Returns rows added.
+static int dupe_search_database(const char *db_file, const char *db_path, const char *value,
+                                int by_checksum, GtkListStore *store) {
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_busy_timeout(db, 1000);
+
+    // Drive name is the database name without ".db"
+    char drive_name[256];
+    snprintf(drive_name, sizeof(drive_name), "%s", db_file);
+    size_t dlen = strlen(drive_name);
+    if (dlen > 3 && strcmp(drive_name + dlen - 3, ".db") == 0) drive_name[dlen - 3] = '\0';
+
+    // File checksums are not stamped individually; report the drive's latest scan run
+    // with checksum verification enabled
+    char scan_date[64] = "Never";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT MAX(last_checksum_verify_date) FROM meta "
+                               "WHERE last_checksum_verify_date IS NOT NULL;", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *val = (const char *)sqlite3_column_text(stmt, 0);
+            if (val && *val) snprintf(scan_date, sizeof(scan_date), "%s", val);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    const char *match = by_checksum ? "lower(checksum) = lower(?1)" : "file_name GLOB ?1";
+    char sql[512];
+    // Skip files no longer on disk; older databases may lack the status column
+    snprintf(sql, sizeof(sql),
+             "SELECT file_name, checksum, full_path FROM files WHERE %s "
+             "AND (status IS NULL OR status != 'MISSING') ORDER BY full_path;", match);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        snprintf(sql, sizeof(sql),
+                 "SELECT file_name, checksum, full_path FROM files WHERE %s ORDER BY full_path;", match);
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+            sqlite3_close(db);
+            return 0;
+        }
+    }
+    char glob[MAX_PATH * 3];
+    if (by_checksum) {
+        snprintf(glob, sizeof(glob), "%s", value);
+    } else {
+        dupe_name_to_glob(value, glob, sizeof(glob));
+    }
+    sqlite3_bind_text(stmt, 1, glob, -1, SQLITE_STATIC);
+
+    int count = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
+        GtkTreeIter iter;
+        gtk_list_store_append(store, &iter);
+        gtk_list_store_set(store, &iter,
+                          0, sqlite3_column_text(stmt, 0),
+                          1, drive_name,
+                          2, checksum ? checksum : "",
+                          3, sqlite3_column_text(stmt, 2),
+                          4, (checksum && *checksum) ? scan_date : "Never",
+                          -1);
+        count++;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return count;
+}
+
+void on_dupe_search_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    int by_checksum = gtk_combo_box_get_active(GTK_COMBO_BOX(dupe_mode_combo)) == 1;
+    char value[MAX_PATH];
+    snprintf(value, sizeof(value), "%s", gtk_editable_get_text(GTK_EDITABLE(dupe_search_entry)));
+    if (by_checksum) g_strstrip(value);
+    if (value[0] == '\0') {
+        gtk_label_set_text(GTK_LABEL(dupe_status_label),
+                           by_checksum ? "Enter a checksum to search" : "Enter a file name to search");
+        return;
+    }
+
+    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(dupe_results_tree)));
+    gtk_list_store_clear(store);
+
+    char *selected_db = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(dupe_db_combo));
+    int count = 0, drives = 0;
+
+    if (selected_db && strcmp(selected_db, "All Databases") == 0) {
+        DIR *dir = opendir(db_dir_path);
+        if (dir) {
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL) {
+                size_t len = strlen(entry->d_name);
+                if (len > 3 && strcmp(entry->d_name + len - 3, ".db") == 0 &&
+                    strcmp(entry->d_name, "drives.db") != 0) {
+                    char db_path[MAX_PATH];
+                    snprintf(db_path, sizeof(db_path), "%s/%s", db_dir_path, entry->d_name);
+                    int n = dupe_search_database(entry->d_name, db_path, value, by_checksum, store);
+                    if (n > 0) drives++;
+                    count += n;
+                }
+            }
+            closedir(dir);
+        }
+    } else if (selected_db) {
+        char db_path[MAX_PATH];
+        snprintf(db_path, sizeof(db_path), "%s/%s", db_dir_path, selected_db);
+        count = dupe_search_database(selected_db, db_path, value, by_checksum, store);
+        if (count > 0) drives = 1;
+    }
+    g_free(selected_db);
+
+    char status[256];
+    if (count == 0) {
+        snprintf(status, sizeof(status), "No matching files found");
+    } else if (count == 1) {
+        snprintf(status, sizeof(status), "Found 1 file - no duplicates");
+    } else {
+        snprintf(status, sizeof(status), "Found %d copies on %d drive%s", count, drives, drives == 1 ? "" : "s");
+    }
+    gtk_label_set_text(GTK_LABEL(dupe_status_label), status);
+}
+
+static void on_dupe_mode_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    gtk_entry_set_placeholder_text(GTK_ENTRY(dupe_search_entry),
+                                   gtk_combo_box_get_active(combo) == 1 ? "Enter SHA-256 checksum..." : "File name (* matches any characters)...");
+}
+
+GtkWidget *create_dupefinder_tab() {
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_start(box, 16);
+    gtk_widget_set_margin_end(box, 16);
+    gtk_widget_set_margin_top(box, 16);
+    gtk_widget_set_margin_bottom(box, 16);
+
+    GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+
+    dupe_mode_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_mode_combo), "File Name");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_mode_combo), "File Checksum");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(dupe_mode_combo), 0);
+    g_signal_connect(dupe_mode_combo, "changed", G_CALLBACK(on_dupe_mode_changed), NULL);
+
+    dupe_search_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(dupe_search_entry, TRUE);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(dupe_search_entry), "File name (* matches any characters)...");
+    g_signal_connect(dupe_search_entry, "activate", G_CALLBACK(on_dupe_search_clicked), NULL);
+
+    dupe_db_combo = gtk_combo_box_text_new();
+    gtk_widget_set_size_request(dupe_db_combo, 200, -1);
+
+    GtkWidget *search_btn = gtk_button_new_with_label("Find Duplicates");
+    gtk_widget_add_css_class(search_btn, "suggested-action");
+    g_signal_connect(search_btn, "clicked", G_CALLBACK(on_dupe_search_clicked), NULL);
+
+    gtk_box_append(GTK_BOX(search_box), gtk_label_new("Search by:"));
+    gtk_box_append(GTK_BOX(search_box), dupe_mode_combo);
+    gtk_box_append(GTK_BOX(search_box), dupe_search_entry);
+    gtk_box_append(GTK_BOX(search_box), gtk_label_new("In:"));
+    gtk_box_append(GTK_BOX(search_box), dupe_db_combo);
+    gtk_box_append(GTK_BOX(search_box), search_btn);
+    gtk_box_append(GTK_BOX(box), search_box);
+
+    GtkListStore *store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING);
+    dupe_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    g_object_unref(store);
+
+    const char *titles[] = {"File Name", "Drive", "Checksum", "Full Path", "Last Checksum Calculation"};
+    for (int i = 0; i < 5; i++) {
+        GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+        GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
+        gtk_tree_view_column_set_resizable(column, TRUE);
+        gtk_tree_view_column_set_sort_column_id(column, i);
+        if (i == 3) gtk_tree_view_column_set_expand(column, TRUE);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(dupe_results_tree), column);
+    }
+
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), dupe_results_tree);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_box_append(GTK_BOX(box), scroll);
+
+    dupe_status_label = gtk_label_new("Ready");
+    gtk_label_set_xalign(GTK_LABEL(dupe_status_label), 0.0);
+    gtk_widget_add_css_class(dupe_status_label, "dim-label");
+    gtk_box_append(GTK_BOX(box), dupe_status_label);
+
+    return box;
+}
+
+// ============================================================================
 // TAB 7: ABOUT
 // ============================================================================
 
@@ -3087,6 +3307,7 @@ GtkWidget *create_about_tab() {
     GtkWidget *desc = gtk_label_new(
         "Unified application combining:\n\n"
         "• File Locator - Search files across databases\n"
+        "• DupeFinder - Find duplicate files by name or checksum\n"
         "• Drives Manager - Track and manage storage drives\n"
         "• Summary Viewer - View scan run statistics\n"
         "• Logs Viewer - View detailed run logs with filters\n"
@@ -3111,6 +3332,10 @@ void refresh_all_database_combos() {
     gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(locator_db_combo));
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_db_combo), "All Databases");
 
+    // Refresh dupe finder combo
+    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(dupe_db_combo));
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_db_combo), "All Databases");
+
     // Refresh summary combo
     gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(summary_db_combo));
 
@@ -3128,6 +3353,7 @@ void refresh_all_database_combos() {
             db_name[len - 3] = '\0';
 
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_db_combo), entry->d_name);
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_db_combo), entry->d_name);
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(summary_db_combo), entry->d_name);
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo), db_name);
             gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo), db_name);
@@ -3136,6 +3362,7 @@ void refresh_all_database_combos() {
     closedir(dir);
 
     gtk_combo_box_set_active(GTK_COMBO_BOX(locator_db_combo), 0);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(dupe_db_combo), 0);
     if (gtk_combo_box_get_active(GTK_COMBO_BOX(summary_db_combo)) < 0) {
         gtk_combo_box_set_active(GTK_COMBO_BOX(summary_db_combo), 0);
     }
@@ -3161,6 +3388,8 @@ void activate(GtkApplication *app, gpointer user_data) {
     // Add tabs
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_locator_tab(),
                             gtk_label_new("File Locator"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_dupefinder_tab(),
+                            gtk_label_new("DupeFinder"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_drives_tab(),
                             gtk_label_new("Drives"));
     gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_summary_tab(),
