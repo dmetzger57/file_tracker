@@ -554,6 +554,36 @@ void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
     g_object_unref(alert);
 }
 
+// Most recent scan with checksum verification enabled, from the drive's own DB
+static void drives_last_checksum_scan(const char *drive_name, char *out, size_t out_size) {
+    snprintf(out, out_size, "Never");
+
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s/%s.db", db_dir_path, drive_name);
+    if (access(path, F_OK) != 0) {
+        snprintf(out, out_size, "No database");
+        return;
+    }
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return;
+    }
+    sqlite3_busy_timeout(db, 1000);
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT MAX(last_checksum_verify_date) FROM meta "
+                               "WHERE last_checksum_verify_date IS NOT NULL;", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *val = (const char *)sqlite3_column_text(stmt, 0);
+            if (val && *val) snprintf(out, out_size, "%s", val);
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+}
+
 void drives_refresh_list() {
     char drives_db[MAX_PATH];
     snprintf(drives_db, sizeof(drives_db), "%s/drives.db", db_dir_path);
@@ -564,7 +594,7 @@ void drives_refresh_list() {
     sqlite3 *db;
     if (sqlite3_open(drives_db, &db) != SQLITE_OK) return;
 
-    const char *sql = "SELECT drive_id, drive_name, storage_container, capacity, space_available, description, last_verified "
+    const char *sql = "SELECT drive_id, drive_name, storage_container, capacity, space_available, description "
                      "FROM drives ORDER BY drive_name;";
     sqlite3_stmt *stmt;
 
@@ -581,6 +611,10 @@ void drives_refresh_list() {
 
             const char *location = (const char *)sqlite3_column_text(stmt, 2);
 
+            const char *drive_name = (const char *)sqlite3_column_text(stmt, 1);
+            char checksum_scan[64];
+            drives_last_checksum_scan(drive_name ? drive_name : "", checksum_scan, sizeof(checksum_scan));
+
             GtkTreeIter iter;
             gtk_list_store_append(store, &iter);
             gtk_list_store_set(store, &iter,
@@ -591,7 +625,7 @@ void drives_refresh_list() {
                               4, used_str,
                               5, avail_str,
                               6, sqlite3_column_text(stmt, 5),
-                              7, sqlite3_column_text(stmt, 6),
+                              7, checksum_scan,
                               -1);
         }
         sqlite3_finalize(stmt);
@@ -839,14 +873,14 @@ GtkWidget *create_drives_tab() {
     drives_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
-    const char *titles[] = {"ID", "Name", "Location", "Capacity", "Used", "Available", "Description", "Last Verified"};
+    const char *titles[] = {"ID", "Name", "Location", "Capacity", "Used", "Available", "Description", "Last Checksum Scan"};
     for (int i = 0; i < 8; i++) {
         GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
         if (i == 6) gtk_tree_view_column_set_expand(column, TRUE);
-        // Enable sorting on Name and Location columns
-        if (i == 1 || i == 2) {
+        // Enable sorting on Name, Location and Last Checksum Scan columns
+        if (i == 1 || i == 2 || i == 7) {
             gtk_tree_view_column_set_sort_column_id(column, i);
         }
         gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), column);
