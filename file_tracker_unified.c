@@ -315,6 +315,7 @@ int update_all_mounted_drives() {
 
 void refresh_all_database_combos();
 void drives_refresh_list();
+void logs_refresh_databases();
 
 // ============================================================================
 // TAB 1: FILE LOCATOR (Simplified - most commonly used)
@@ -807,6 +808,179 @@ void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data
     }
 }
 
+// ---- Rename drive: renames <old>.db to <new>.db and re-keys the drives.db entry ----
+
+static void drives_show_message(const char *msg) {
+    GtkAlertDialog *alert = gtk_alert_dialog_new("%s", msg);
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+}
+
+// Renames a file plus any SQLite sidecar files. Returns 0 on success; on failure nothing is left renamed.
+static int drives_rename_db_files(const char *old_base, const char *new_base) {
+    static const char *suffixes[] = {"", "-wal", "-shm", "-journal"};
+    for (int i = 0; i < 4; i++) {
+        char from[MAX_PATH], to[MAX_PATH];
+        snprintf(from, sizeof(from), "%s%s", old_base, suffixes[i]);
+        snprintf(to, sizeof(to), "%s%s", new_base, suffixes[i]);
+        if (access(from, F_OK) != 0) continue;
+        if (rename(from, to) != 0) {
+            // Undo the ones already moved
+            for (int j = 0; j < i; j++) {
+                char f2[MAX_PATH], t2[MAX_PATH];
+                snprintf(f2, sizeof(f2), "%s%s", old_base, suffixes[j]);
+                snprintf(t2, sizeof(t2), "%s%s", new_base, suffixes[j]);
+                if (access(t2, F_OK) == 0) rename(t2, f2);
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Returns NULL on success or an error message
+static const char *drives_do_rename(sqlite3_int64 drive_id, const char *old_name, const char *new_name) {
+    if (new_name[0] == '\0') return "Enter a new drive name";
+    if (strcmp(old_name, new_name) == 0) return "The new name is the same as the current name";
+    if (strchr(new_name, '/') || new_name[0] == '.' || strlen(new_name) > 200)
+        return "Invalid name: it cannot contain '/', start with '.', or exceed 200 characters";
+    if (strcmp(new_name, "drives") == 0) return "'drives' is reserved";
+
+    char old_base[MAX_PATH], new_base[MAX_PATH], new_db[MAX_PATH], drives_path[MAX_PATH];
+    snprintf(old_base, sizeof(old_base), "%s/%s.db", db_dir_path, old_name);
+    snprintf(new_base, sizeof(new_base), "%s/%s.db", db_dir_path, new_name);
+    snprintf(new_db, sizeof(new_db), "%s", new_base);
+    snprintf(drives_path, sizeof(drives_path), "%s/drives.db", db_dir_path);
+
+    if (access(new_db, F_OK) == 0) return "A database with that name already exists";
+
+    int had_db = access(old_base, F_OK) == 0;
+    if (had_db && drives_rename_db_files(old_base, new_base) != 0)
+        return "Could not rename the database file";
+
+    sqlite3 *db = NULL;
+    const char *err = NULL;
+    if (sqlite3_open(drives_path, &db) != SQLITE_OK) {
+        err = "Could not open the drives database";
+    } else {
+        sqlite3_busy_timeout(db, 2000);
+        char timestamp[64];
+        get_timestamp(timestamp, sizeof(timestamp));
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, "UPDATE drives SET drive_name = ?, last_updated = ? WHERE drive_id = ?;",
+                               -1, &stmt, NULL) != SQLITE_OK) {
+            err = "Could not update the drives database";
+        } else {
+            sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, timestamp, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(stmt, 3, drive_id);
+            if (sqlite3_step(stmt) != SQLITE_DONE) err = "That drive name is already in use";
+            sqlite3_finalize(stmt);
+        }
+    }
+    if (db) sqlite3_close(db);
+
+    if (err && had_db) drives_rename_db_files(new_base, old_base);  // roll back
+    return err;
+}
+
+typedef struct {
+    GtkWidget *window;
+    GtkWidget *entry;
+    sqlite3_int64 drive_id;
+    char old_name[256];
+} RenameDialog;
+
+static void on_rename_cancel(GtkButton *button, gpointer user_data) {
+    (void)button;
+    RenameDialog *rd = user_data;
+    gtk_window_destroy(GTK_WINDOW(rd->window));
+}
+
+static void on_rename_destroy(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    g_free(user_data);
+}
+
+static void on_rename_ok(GtkButton *button, gpointer user_data) {
+    (void)button;
+    RenameDialog *rd = user_data;
+    char new_name[256];
+    snprintf(new_name, sizeof(new_name), "%s", gtk_editable_get_text(GTK_EDITABLE(rd->entry)));
+    g_strstrip(new_name);
+
+    const char *err = drives_do_rename(rd->drive_id, rd->old_name, new_name);
+    if (err) {
+        drives_show_message(err);
+        return;
+    }
+
+    char msg[600];
+    snprintf(msg, sizeof(msg), "Renamed '%s' to '%s'. All scan history was kept.\n\n"
+             "To keep scanning this drive into the same database, set the Scanner's database name to '%s'.",
+             rd->old_name, new_name, new_name);
+    gtk_window_destroy(GTK_WINDOW(rd->window));
+
+    selected_drive_id = -1;
+    drives_refresh_list();
+    refresh_all_database_combos();
+    logs_refresh_databases();
+    drives_show_message(msg);
+}
+
+void on_drives_rename_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    if (selected_drive_id < 0) {
+        drives_show_message("Please select a drive to rename");
+        return;
+    }
+
+    RenameDialog *rd = g_new0(RenameDialog, 1);
+    rd->drive_id = selected_drive_id;
+    snprintf(rd->old_name, sizeof(rd->old_name), "%s", gtk_editable_get_text(GTK_EDITABLE(drives_name_entry)));
+
+    rd->window = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(rd->window), "Rename Drive");
+    gtk_window_set_transient_for(GTK_WINDOW(rd->window), GTK_WINDOW(window));
+    gtk_window_set_modal(GTK_WINDOW(rd->window), TRUE);
+    gtk_window_set_default_size(GTK_WINDOW(rd->window), 400, -1);
+    g_signal_connect(rd->window, "destroy", G_CALLBACK(on_rename_destroy), rd);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_start(vbox, 16);
+    gtk_widget_set_margin_end(vbox, 16);
+    gtk_widget_set_margin_top(vbox, 16);
+    gtk_widget_set_margin_bottom(vbox, 16);
+
+    char prompt[400];
+    snprintf(prompt, sizeof(prompt), "New name for '%s'.\nThe database is renamed and all its history is kept.", rd->old_name);
+    GtkWidget *label = gtk_label_new(prompt);
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+
+    rd->entry = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(rd->entry), rd->old_name);
+    gtk_entry_set_activates_default(GTK_ENTRY(rd->entry), TRUE);
+
+    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(btn_box, GTK_ALIGN_END);
+    GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
+    GtkWidget *ok_btn = gtk_button_new_with_label("Rename");
+    gtk_widget_add_css_class(ok_btn, "suggested-action");
+    g_signal_connect(cancel_btn, "clicked", G_CALLBACK(on_rename_cancel), rd);
+    g_signal_connect(ok_btn, "clicked", G_CALLBACK(on_rename_ok), rd);
+    gtk_box_append(GTK_BOX(btn_box), cancel_btn);
+    gtk_box_append(GTK_BOX(btn_box), ok_btn);
+
+    gtk_box_append(GTK_BOX(vbox), label);
+    gtk_box_append(GTK_BOX(vbox), rd->entry);
+    gtk_box_append(GTK_BOX(vbox), btn_box);
+    gtk_window_set_child(GTK_WINDOW(rd->window), vbox);
+    gtk_window_set_default_widget(GTK_WINDOW(rd->window), ok_btn);
+    gtk_window_present(GTK_WINDOW(rd->window));
+    gtk_editable_select_region(GTK_EDITABLE(rd->entry), 0, -1);
+}
+
 GtkWidget *create_drives_tab() {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(box, 16);
@@ -834,6 +1008,9 @@ GtkWidget *create_drives_tab() {
     GtkWidget *update_btn = gtk_button_new_with_label("Update");
     g_signal_connect(update_btn, "clicked", G_CALLBACK(on_drives_update_clicked), NULL);
 
+    GtkWidget *rename_btn = gtk_button_new_with_label("Rename");
+    g_signal_connect(rename_btn, "clicked", G_CALLBACK(on_drives_rename_clicked), NULL);
+
     GtkWidget *del_btn = gtk_button_new_with_label("Delete");
     gtk_widget_add_css_class(del_btn, "destructive-action");
     g_signal_connect(del_btn, "clicked", G_CALLBACK(on_drives_delete_clicked), NULL);
@@ -850,6 +1027,7 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(add_box), drives_location_entry);
     gtk_box_append(GTK_BOX(add_box), add_btn);
     gtk_box_append(GTK_BOX(add_box), update_btn);
+    gtk_box_append(GTK_BOX(add_box), rename_btn);
     gtk_box_append(GTK_BOX(add_box), del_btn);
     gtk_box_append(GTK_BOX(add_box), refresh_btn);
     gtk_box_append(GTK_BOX(add_box), update_mounted_btn);

@@ -107,6 +107,7 @@ Track external drive metadata, verification history, and storage location.
 - **Drive List:** All tracked drives with capacity, description, location
 - **Add Drive:** Register new drives with auto-detected capacity
 - **Verify Drive:** Mark drive as verified on current date
+- **Rename Drive:** Select a drive and click Rename. The drive's database file is renamed and its entry updated, keeping all scan history. To keep scanning into the same database afterwards, set the Scanner's database name to the new name
 - **Edit Metadata:** Update description, physical location notes
 - **Last Checksum Scan:** Date of the drive's most recent scan run with checksum verification enabled (sortable; "Never" if none, "No database" if the drive has no database file)
 - **Auto-Discovery:** Detects drives when scanning (no manual registration needed); the same excluded volumes as the Scanner list are skipped
