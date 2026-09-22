@@ -1313,25 +1313,47 @@ void logs_format_run_identifier(char *buffer, size_t size, const char *db_name, 
     }
 }
 
-void logs_refresh_databases() {
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(logs_db_combo));
+static gint compare_db_file_names(gconstpointer a, gconstpointer b) {
+    return g_ascii_strcasecmp(*(const char **)a, *(const char **)b);
+}
 
+// Returns the drive database file names (e.g. "MyDrive.db") in db_dir_path,
+// excluding drives.db, sorted alphabetically (case-insensitive).
+// Caller frees with g_ptr_array_unref(). Returns NULL if the directory can't be opened.
+GPtrArray *list_database_files() {
     DIR *dir = opendir(db_dir_path);
-    if (!dir) return;
+    if (!dir) return NULL;
 
+    GPtrArray *files = g_ptr_array_new_with_free_func(g_free);
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
         size_t len = strlen(entry->d_name);
         if (len > 3 && strcmp(entry->d_name + len - 3, ".db") == 0 &&
             strcmp(entry->d_name, "drives.db") != 0) {
-            char db_name[256];
-            strncpy(db_name, entry->d_name, len - 3);
-            db_name[len - 3] = '\0';
-            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(logs_db_combo), db_name);
+            g_ptr_array_add(files, g_strdup(entry->d_name));
         }
     }
     closedir(dir);
+
+    g_ptr_array_sort(files, compare_db_file_names);
+    return files;
+}
+
+void logs_refresh_databases() {
+    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(logs_db_combo));
+
+    GPtrArray *files = list_database_files();
+    if (!files) return;
+
+    for (guint i = 0; i < files->len; i++) {
+        const char *file_name = g_ptr_array_index(files, i);
+        size_t len = strlen(file_name);
+        char db_name[256];
+        snprintf(db_name, sizeof(db_name), "%.*s", (int)(len - 3), file_name);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(logs_db_combo), db_name);
+    }
+    g_ptr_array_unref(files);
 
     gtk_combo_box_set_active(GTK_COMBO_BOX(logs_db_combo), 0);
 }
@@ -3557,8 +3579,8 @@ GtkWidget *create_about_tab() {
 // ============================================================================
 
 void refresh_all_database_combos() {
-    DIR *dir = opendir(db_dir_path);
-    if (!dir) return;
+    GPtrArray *files = list_database_files();
+    if (!files) return;
 
     // Refresh locator combo
     gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(locator_db_combo));
@@ -3575,23 +3597,19 @@ void refresh_all_database_combos() {
     gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo));
     gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo));
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        size_t len = strlen(entry->d_name);
-        if (len > 3 && strcmp(entry->d_name + len - 3, ".db") == 0 &&
-            strcmp(entry->d_name, "drives.db") != 0) {
-            char db_name[256];
-            strncpy(db_name, entry->d_name, len - 3);
-            db_name[len - 3] = '\0';
+    for (guint i = 0; i < files->len; i++) {
+        const char *file_name = g_ptr_array_index(files, i);
+        size_t len = strlen(file_name);
+        char db_name[256];
+        snprintf(db_name, sizeof(db_name), "%.*s", (int)(len - 3), file_name);
 
-            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_db_combo), entry->d_name);
-            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_db_combo), entry->d_name);
-            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(summary_db_combo), entry->d_name);
-            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo), db_name);
-            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo), db_name);
-        }
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_db_combo), file_name);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_db_combo), file_name);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(summary_db_combo), file_name);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo), db_name);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo), db_name);
     }
-    closedir(dir);
+    g_ptr_array_unref(files);
 
     gtk_combo_box_set_active(GTK_COMBO_BOX(locator_db_combo), 0);
     gtk_combo_box_set_active(GTK_COMBO_BOX(dupe_db_combo), 0);
