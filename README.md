@@ -32,7 +32,7 @@ make apps
 - **Logs** - Browse detailed per-file change logs
 - **Drives** - Track external drive information
 - **Locator** - Search for files across databases
-- **DupeFinder** - Find duplicate files by name or checksum
+- **DupeFinder** - Find duplicate files by name or checksum, or list every duplicate group
 - **Compare** - Compare two scan runs to see what changed
 
 All tools share the same SQLite database format. Scan once, query many ways.
@@ -125,11 +125,18 @@ Search for files across all tracked databases by filename. Compare checksums bet
 
 ### DupeFinder Tab
 
-Find every copy of a file, either by name or by checksum, within one drive or across all drives.
+Find every copy of a file, either by name or by checksum, or list every set of duplicates, within one drive, a chosen set of drives, or all drives.
+
+**Modes:**
+- **Search By File Name / Checksum:** Find every copy of one file name or checksum
+- **All Files With Matching Names:** Lists every file whose exact file name (not path) appears more than once. Case-sensitive
+- **All Files With Matching Name + Checksum:** Lists every file whose name and checksum both match another file. Files without a checksum are left out
+
+Results in the two "All Files" modes come out grouped: duplicates sit next to each other, sorted by file name. The status line shows the number of files, groups, and drives.
 
 **Features:**
-- **Search By:** File Name or File Checksum
-- **Scope:** A single database (drive) or All Databases
+- **Search By:** File Name or File Checksum (search mode)
+- **Scope:** Search mode takes a single database (drive) or All Databases. The two "All Files" modes take any set of databases from a checkbox list, or All Databases
 - **File Name Wildcard:** `*` matches any run of characters (e.g. `*File*should*`); other characters, including `?` and `[`, match literally. Matching is case-sensitive
 - **Checksum Search:** Exact SHA-256 match, case-insensitive
 - **Results:** File Name, Drive, Checksum, Full Path, and Last Checksum Calculation (sortable columns)
@@ -276,9 +283,11 @@ Monthly full checksum verification:
 
 ### Find Duplicates
 1. Go to DupeFinder tab
-2. Choose File Name or File Checksum and enter the value (`*` is a wildcard in names)
-3. Choose a database or All Databases
-4. Results list every copy with its drive, path, and checksum
+2. Choose a mode:
+   - **Search By File Name / Checksum:** choose File Name or File Checksum and enter the value (`*` is a wildcard in names)
+   - **All Files With Matching Names** or **All Files With Matching Name + Checksum:** no input needed
+3. Choose a database or All Databases (in the "All Files" modes, tick one or more databases, or All Databases)
+4. Click Find Duplicates. Results list every copy with its drive, path, and checksum
 
 ## Performance
 
