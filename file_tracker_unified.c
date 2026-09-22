@@ -694,31 +694,91 @@ void on_drives_add_clicked(GtkButton *button, gpointer user_data) {
     drives_refresh_list();
 }
 
+static void drives_show_message(const char *msg) {
+    GtkAlertDialog *alert = gtk_alert_dialog_new("%s", msg);
+    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    g_object_unref(alert);
+}
+
+typedef struct {
+    sqlite3_int64 drive_id;
+    char name[256];
+} DriveDeleteRequest;
+
+static void drives_delete_finish(GObject *source, GAsyncResult *result, gpointer user_data) {
+    DriveDeleteRequest *req = user_data;
+    GError *error = NULL;
+    // Buttons: 0 = Cancel, 1 = Remove Drive Only, 2 = Delete Drive and Database
+    int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, &error);
+    if (error) {
+        g_error_free(error);
+        choice = 0;
+    }
+
+    if (choice == 1 || choice == 2) {
+        char drives_db[MAX_PATH];
+        snprintf(drives_db, sizeof(drives_db), "%s/drives.db", db_dir_path);
+
+        sqlite3 *db;
+        if (sqlite3_open(drives_db, &db) == SQLITE_OK) {
+            sqlite3_busy_timeout(db, 2000);
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(db, "DELETE FROM drives WHERE drive_id = ?;", -1, &stmt, 0) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, req->drive_id);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+            sqlite3_close(db);
+        }
+
+        int failed = 0;
+        if (choice == 2 && req->name[0] != '\0') {
+            static const char *suffixes[] = {"", "-wal", "-shm", "-journal"};
+            for (int i = 0; i < 4; i++) {
+                char path[MAX_PATH];
+                snprintf(path, sizeof(path), "%s/%s.db%s", db_dir_path, req->name, suffixes[i]);
+                if (unlink(path) != 0 && errno != ENOENT) failed = 1;
+            }
+        }
+
+        selected_drive_id = -1;
+        drives_refresh_list();
+        refresh_all_database_combos();
+        logs_refresh_databases();
+
+        if (failed) drives_show_message("The drive was removed, but the database file could not be deleted");
+    }
+    g_free(req);
+}
+
 void on_drives_delete_clicked(GtkButton *button, gpointer user_data) {
     (void)button; (void)user_data;
 
     if (selected_drive_id < 0) {
-        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a drive to delete");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
-        g_object_unref(alert);
+        drives_show_message("Please select a drive to delete");
         return;
     }
 
-    char drives_db[MAX_PATH];
-    snprintf(drives_db, sizeof(drives_db), "%s/drives.db", db_dir_path);
+    DriveDeleteRequest *req = g_new0(DriveDeleteRequest, 1);
+    req->drive_id = selected_drive_id;
+    snprintf(req->name, sizeof(req->name), "%s", gtk_editable_get_text(GTK_EDITABLE(drives_name_entry)));
 
-    sqlite3 *db;
-    if (sqlite3_open(drives_db, &db) == SQLITE_OK) {
-        sqlite3_stmt *stmt;
-        sqlite3_prepare_v2(db, "DELETE FROM drives WHERE drive_id = ?;", -1, &stmt, 0);
-        sqlite3_bind_int64(stmt, 1, selected_drive_id);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-        sqlite3_close(db);
-    }
+    char msg[400];
+    snprintf(msg, sizeof(msg), "Delete drive '%s'?", req->name);
+    char detail[600];
+    snprintf(detail, sizeof(detail),
+             "\"Remove Drive Only\" removes it from the Drives list and keeps its database (%s.db) and scan history.\n\n"
+             "\"Delete Drive and Database\" also permanently deletes the database file. This cannot be undone.",
+             req->name);
 
-    selected_drive_id = -1;
-    drives_refresh_list();
+    GtkAlertDialog *alert = gtk_alert_dialog_new("%s", msg);
+    gtk_alert_dialog_set_detail(alert, detail);
+    const char *buttons[] = {"Cancel", "Remove Drive Only", "Delete Drive and Database", NULL};
+    gtk_alert_dialog_set_buttons(alert, buttons);
+    gtk_alert_dialog_set_cancel_button(alert, 0);
+    gtk_alert_dialog_set_default_button(alert, 0);
+    gtk_alert_dialog_choose(alert, GTK_WINDOW(window), NULL, drives_delete_finish, req);
+    g_object_unref(alert);
 }
 
 void on_drives_update_clicked(GtkButton *button, gpointer user_data) {
@@ -809,12 +869,6 @@ void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data
 }
 
 // ---- Rename drive: renames <old>.db to <new>.db and re-keys the drives.db entry ----
-
-static void drives_show_message(const char *msg) {
-    GtkAlertDialog *alert = gtk_alert_dialog_new("%s", msg);
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
-    g_object_unref(alert);
-}
 
 // Renames a file plus any SQLite sidecar files. Returns 0 on success; on failure nothing is left renamed.
 static int drives_rename_db_files(const char *old_base, const char *new_base) {
