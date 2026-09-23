@@ -230,6 +230,5 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 | `file_tracker.c` | Command-line scanner |
 | `Makefile`, `create_app_bundles.sh`, `icon/` | Build and `.app` packaging |
 | `migrate_*.sh`, `migrate_*.sql` | Database migrations for old databases |
-| `file_tracker_lastrun.c` | Legacy utility for the old database format (reads a `metadata` table current databases do not have). Not built |
 | `launcher.c`, `launcher.m` | Legacy `.app` launchers. Not used: the bundle now runs the real binary directly |
 | `CLAUDE.md` | Notes for AI-assisted development |
