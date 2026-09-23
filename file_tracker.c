@@ -170,6 +170,8 @@ static void auto_add_or_update_drive(const char *drive_name, const char *source_
 
     sqlite3 *drives_db = NULL;
     if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
+        fprintf(stderr, "Warning: cannot open %s: %s - drive '%s' was not added or updated\n",
+                drives_db_path, drives_db ? sqlite3_errmsg(drives_db) : "out of memory", drive_name);
         if (drives_db) sqlite3_close(drives_db);
         return;
     }
@@ -201,16 +203,22 @@ static void auto_add_or_update_drive(const char *drive_name, const char *source_
     get_timestamp(timestamp, sizeof(timestamp));
 
     sqlite3_stmt *stmt;
-    int exists = 0;
+    int exists = -1;
     if (sqlite3_prepare_v2(drives_db, "SELECT COUNT(*) FROM drives WHERE drive_name = ?;", -1, &stmt, 0) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
         if (sqlite3_step(stmt) == SQLITE_ROW) exists = sqlite3_column_int(stmt, 0) > 0;
         sqlite3_finalize(stmt);
     }
 
-    if (exists) {
-        if (has_stats &&
-            sqlite3_prepare_v2(drives_db,
+    // Every step below must succeed; a failure (e.g. drives.db still locked by another
+    // process after the busy timeout) is reported instead of being silently dropped
+    int ok = 0;
+    if (exists < 0) {
+        // could not read drives.db; don't guess whether to insert or update
+    } else if (exists && !has_stats) {
+        ok = 1;  // nothing to update
+    } else if (exists) {
+        if (sqlite3_prepare_v2(drives_db,
                 "UPDATE drives SET capacity = ?, space_available = ?, space_used = ?, last_updated = ? WHERE drive_name = ?;",
                 -1, &stmt, 0) == SQLITE_OK) {
             sqlite3_bind_int64(stmt, 1, capacity);
@@ -218,7 +226,7 @@ static void auto_add_or_update_drive(const char *drive_name, const char *source_
             sqlite3_bind_int64(stmt, 3, used);
             sqlite3_bind_text(stmt, 4, timestamp, -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 5, drive_name, -1, SQLITE_STATIC);
-            sqlite3_step(stmt);
+            ok = (sqlite3_step(stmt) == SQLITE_DONE);
             sqlite3_finalize(stmt);
         }
     } else if (has_stats) {
@@ -231,7 +239,7 @@ static void auto_add_or_update_drive(const char *drive_name, const char *source_
             sqlite3_bind_int64(stmt, 4, used);
             sqlite3_bind_text(stmt, 5, "Auto-added by file_tracker", -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 6, timestamp, -1, SQLITE_STATIC);
-            sqlite3_step(stmt);
+            ok = (sqlite3_step(stmt) == SQLITE_DONE);
             sqlite3_finalize(stmt);
         }
     } else {
@@ -241,11 +249,15 @@ static void auto_add_or_update_drive(const char *drive_name, const char *source_
             sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 2, "Auto-added by file_tracker", -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 3, timestamp, -1, SQLITE_STATIC);
-            sqlite3_step(stmt);
+            ok = (sqlite3_step(stmt) == SQLITE_DONE);
             sqlite3_finalize(stmt);
         }
     }
 
+    if (!ok) {
+        fprintf(stderr, "Warning: drive '%s' was not %s in %s: %s\n", drive_name,
+                exists > 0 ? "updated" : "added", drives_db_path, sqlite3_errmsg(drives_db));
+    }
     sqlite3_close(drives_db);
 }
 

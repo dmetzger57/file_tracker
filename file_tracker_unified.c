@@ -168,47 +168,21 @@ int get_drive_stats(const char *path, long long *capacity, long long *available,
     return 1;
 }
 
-int drive_exists_in_tracker(const char *drive_name) {
+// Opens drives.db. It is shared by every running copy of the app and by the CLI, so wait up to
+// 30 seconds (as the CLI does) when another process is writing to it instead of failing
+static int open_drives_db(sqlite3 **db, char *err, size_t err_size) {
     const char *home = getenv("HOME");
-    if (!home) return 0;
-
     char drives_db_path[MAX_PATH];
-    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home);
+    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home ? home : "");
 
-    sqlite3 *drives_db = NULL;
-    if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
-        if (drives_db) sqlite3_close(drives_db);
+    *db = NULL;
+    if (!home || sqlite3_open(drives_db_path, db) != SQLITE_OK) {
+        snprintf(err, err_size, "cannot open %s: %s", drives_db_path, *db ? sqlite3_errmsg(*db) : "HOME not set");
+        if (*db) sqlite3_close(*db);
+        *db = NULL;
         return 0;
     }
-
-    const char *sql = "SELECT COUNT(*) FROM drives WHERE drive_name = ?;";
-    sqlite3_stmt *stmt;
-    int exists = 0;
-
-    if (sqlite3_prepare_v2(drives_db, sql, -1, &stmt, 0) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            exists = sqlite3_column_int(stmt, 0) > 0;
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    sqlite3_close(drives_db);
-    return exists;
-}
-
-void add_drive_to_tracker(const char *drive_name, const char *source_path) {
-    const char *home = getenv("HOME");
-    if (!home) return;
-
-    char drives_db_path[MAX_PATH];
-    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home);
-
-    sqlite3 *drives_db = NULL;
-    if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
-        if (drives_db) sqlite3_close(drives_db);
-        return;
-    }
+    sqlite3_busy_timeout(*db, 30000);
 
     // Initialize drives schema if needed
     const char *create_table =
@@ -223,8 +197,32 @@ void add_drive_to_tracker(const char *drive_name, const char *source_path) {
         "last_verified TEXT,"
         "storage_container TEXT"
         ");";
+    sqlite3_exec(*db, create_table, 0, 0, 0);
+    return 1;
+}
 
-    sqlite3_exec(drives_db, create_table, 0, 0, 0);
+// 1 if the drive is in drives.db, 0 if not, -1 on error (message in err)
+int drive_exists_in_tracker(const char *drive_name, char *err, size_t err_size) {
+    sqlite3 *drives_db;
+    if (!open_drives_db(&drives_db, err, err_size)) return -1;
+
+    sqlite3_stmt *stmt;
+    int exists = -1;
+    if (sqlite3_prepare_v2(drives_db, "SELECT COUNT(*) FROM drives WHERE drive_name = ?;", -1, &stmt, 0) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) exists = sqlite3_column_int(stmt, 0) > 0;
+        sqlite3_finalize(stmt);
+    }
+    if (exists < 0) snprintf(err, err_size, "cannot read drives.db: %s", sqlite3_errmsg(drives_db));
+
+    sqlite3_close(drives_db);
+    return exists;
+}
+
+// Returns 1 on success, 0 on failure (message in err)
+int add_drive_to_tracker(const char *drive_name, const char *source_path, char *err, size_t err_size) {
+    sqlite3 *drives_db;
+    if (!open_drives_db(&drives_db, err, err_size)) return 0;
 
     // Try to get drive stats
     long long capacity = 0, available = 0, used = 0;
@@ -238,6 +236,7 @@ void add_drive_to_tracker(const char *drive_name, const char *source_path) {
         "VALUES (?, ?, ?, ?, ?, ?);" :
         "INSERT INTO drives (drive_name, description, last_updated) VALUES (?, ?, ?);";
 
+    int ok = 0;
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(drives_db, insert_sql, -1, &stmt, 0) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
@@ -253,34 +252,24 @@ void add_drive_to_tracker(const char *drive_name, const char *source_path) {
             sqlite3_bind_text(stmt, 3, timestamp, -1, SQLITE_STATIC);
         }
 
-        sqlite3_step(stmt);
+        ok = (sqlite3_step(stmt) == SQLITE_DONE);
         sqlite3_finalize(stmt);
     }
+    if (!ok) snprintf(err, err_size, "cannot add drive '%s' to drives.db: %s", drive_name, sqlite3_errmsg(drives_db));
 
     sqlite3_close(drives_db);
+    return ok;
 }
 
-void update_drive_stats(const char *drive_name, const char *source_path) {
-    const char *home = getenv("HOME");
-    if (!home) return;
-
-    char drives_db_path[MAX_PATH];
-    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home);
-
-    sqlite3 *drives_db = NULL;
-    if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
-        if (drives_db) sqlite3_close(drives_db);
-        return;
-    }
-
+// Returns 1 on success (including when the drive's space cannot be read, so there is nothing
+// to update), 0 on failure (message in err)
+int update_drive_stats(const char *drive_name, const char *source_path, char *err, size_t err_size) {
     // Get drive stats
     long long capacity = 0, available = 0, used = 0;
-    int has_stats = get_drive_stats(source_path, &capacity, &available, &used);
+    if (!get_drive_stats(source_path, &capacity, &available, &used)) return 1;
 
-    if (!has_stats) {
-        sqlite3_close(drives_db);
-        return;
-    }
+    sqlite3 *drives_db;
+    if (!open_drives_db(&drives_db, err, err_size)) return 0;
 
     char timestamp[64];
     get_timestamp(timestamp, sizeof(timestamp));
@@ -289,6 +278,7 @@ void update_drive_stats(const char *drive_name, const char *source_path) {
         "UPDATE drives SET capacity = ?, space_available = ?, space_used = ?, last_updated = ? "
         "WHERE drive_name = ?;";
 
+    int ok = 0;
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(drives_db, update_sql, -1, &stmt, 0) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, capacity);
@@ -296,18 +286,22 @@ void update_drive_stats(const char *drive_name, const char *source_path) {
         sqlite3_bind_int64(stmt, 3, used);
         sqlite3_bind_text(stmt, 4, timestamp, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 5, drive_name, -1, SQLITE_STATIC);
-        sqlite3_step(stmt);
+        ok = (sqlite3_step(stmt) == SQLITE_DONE);
         sqlite3_finalize(stmt);
     }
+    if (!ok) snprintf(err, err_size, "cannot update drive '%s' in drives.db: %s", drive_name, sqlite3_errmsg(drives_db));
 
     sqlite3_close(drives_db);
+    return ok;
 }
 
-void auto_add_or_update_drive(const char *db_path, const char *source_path) {
+// Registers the scanned drive, or refreshes its space figures. Returns 1 on success,
+// 0 on failure (message in err)
+int auto_add_or_update_drive(const char *db_path, const char *source_path, char *err, size_t err_size) {
     // Extract drive name from db_path
     // db_path format: ~/db/FileTracker/DriveName.db
     char *last_slash = strrchr(db_path, '/');
-    if (!last_slash) return;
+    if (!last_slash) return 1;
 
     char drive_name[256];
     strncpy(drive_name, last_slash + 1, sizeof(drive_name) - 1);
@@ -320,11 +314,10 @@ void auto_add_or_update_drive(const char *db_path, const char *source_path) {
     }
 
     // Check if drive already exists - if so, update; if not, add
-    if (drive_exists_in_tracker(drive_name)) {
-        update_drive_stats(drive_name, source_path);
-    } else {
-        add_drive_to_tracker(drive_name, source_path);
-    }
+    int exists = drive_exists_in_tracker(drive_name, err, err_size);
+    if (exists < 0) return 0;
+    return exists ? update_drive_stats(drive_name, source_path, err, err_size)
+                  : add_drive_to_tracker(drive_name, source_path, err, err_size);
 }
 
 // Volumes hidden from all volume lists
@@ -334,7 +327,10 @@ static int is_excluded_volume(const char *name) {
            fnmatch("Macintosh HD", name, 0) == 0;
 }
 
-int update_all_mounted_drives() {
+// Refreshes space figures for every tracked drive that is mounted. Returns the number updated;
+// *failed counts drives whose update failed, and err holds the last error message
+int update_all_mounted_drives(int *failed, char *err, size_t err_size) {
+    *failed = 0;
     DIR *dir = opendir("/Volumes");
     if (!dir) return 0;
 
@@ -350,8 +346,11 @@ int update_all_mounted_drives() {
         struct stat sb;
         if (stat(full_path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
             // Check if this drive is in the database
-            if (drive_exists_in_tracker(entry->d_name)) {
-                update_drive_stats(entry->d_name, full_path);
+            int exists = drive_exists_in_tracker(entry->d_name, err, err_size);
+            if (exists < 0 ||
+                (exists && !update_drive_stats(entry->d_name, full_path, err, err_size))) {
+                (*failed)++;
+            } else if (exists) {
                 updated_count++;
             }
         }
@@ -593,11 +592,17 @@ sqlite3_int64 selected_drive_id = -1;
 void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
     (void)button; (void)user_data;
 
-    int count = update_all_mounted_drives();
+    int failed;
+    char err[512] = "";
+    int count = update_all_mounted_drives(&failed, err, sizeof(err));
     drives_refresh_list();
 
-    char message[256];
-    if (count > 0) {
+    char message[1024];
+    if (failed > 0) {
+        snprintf(message, sizeof(message),
+                "Updated %d mounted drive%s; %d could not be updated.\n\n%s",
+                count, count == 1 ? "" : "s", failed, err);
+    } else if (count > 0) {
         snprintf(message, sizeof(message),
                 "Updated capacity and available space for %d mounted drive%s",
                 count, count == 1 ? "" : "s");
@@ -2168,6 +2173,7 @@ typedef struct {
     int num_workers;
     GThreadPool *pool;
     GMutex lock;  // guards db, counters and log_buffer while workers are running
+    char drive_error[512];  // set when the drive's drives.db entry could not be added or updated
 } ScannerContext;
 
 // Most files queued for the workers before the directory walk pauses
@@ -2616,7 +2622,9 @@ gpointer scanner_thread_func(gpointer data) {
 
     // Auto-add or update drive in drive tracker (only in update mode)
     if (ctx->update_mode) {
-        auto_add_or_update_drive(ctx->db_path, ctx->scan_path);
+        if (!auto_add_or_update_drive(ctx->db_path, ctx->scan_path, ctx->drive_error, sizeof(ctx->drive_error))) {
+            g_printerr("file_tracker_unified: %s\n", ctx->drive_error);
+        }
     }
 
     g_idle_add(scanner_scan_completed, ctx);
@@ -2633,8 +2641,8 @@ gboolean scanner_scan_completed(gpointer data) {
     gtk_widget_set_sensitive(scanner_workers_spin, TRUE);
     gtk_progress_bar_set_fraction(scanner_progress_bar, 1.0);
 
-    char results[2048];
-    snprintf(results, sizeof(results),
+    char results[3072];
+    int len = snprintf(results, sizeof(results),
              "Scan Complete!\n\nPath: %s\nDatabase: %s\nMode: %s\nChecksum: %s\nWorkers: %d\n\n"
              "Unchanged: %'d\nChanged: %'d\nNew: %'d\nMissing: %'d\nIgnored: %'d\nErrors: %'d\n\n"
              "Total: %'d files",
@@ -2644,6 +2652,12 @@ gboolean scanner_scan_completed(gpointer data) {
              ctx->num_workers,
              ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->ignored, ctx->errors,
              ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors);
+    if (ctx->drive_error[0] && len >= 0 && (size_t)len < sizeof(results)) {
+        snprintf(results + len, sizeof(results) - len,
+                 "\n\nWarning: the scan results were saved, but the drive's entry in the Drives tab "
+                 "was not updated (%s). Click \"Update Mounted Drives\" on the Drives tab to retry.",
+                 ctx->drive_error);
+    }
 
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_results_text));
     gtk_text_buffer_set_text(buffer, results, -1);
