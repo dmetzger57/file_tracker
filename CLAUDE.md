@@ -36,7 +36,6 @@ file_tracker_unified → SQLite DB (~/db/FileTracker/*.db)
 ### Storage Locations
 - Databases: `~/db/FileTracker/*.db`
 - Drive tracking: `~/db/FileTracker/drives.db`
-- Log files: `~/logs/FileTracker/`
 - Ignore list: `~/.rsync-ignore`
 
 ## Build System
@@ -51,7 +50,7 @@ file_tracker_unified → SQLite DB (~/db/FileTracker/*.db)
 make              # Build file_tracker_unified
 make apps         # Build and create .app bundle
 make clean        # Remove binaries
-make install      # Move binary to ~/bin
+make install      # Copy File Tracker Unified.app to /Applications
 ```
 
 ### Manual Compilation
@@ -76,7 +75,6 @@ gcc -Wall -Wextra -O2 \
   - Compare tab: Compare two scan runs to see changes
 
 ### Scripts
-- `install_apps.sh`: Install .app bundle to /Applications
 - `create_app_bundles.sh`: Create macOS app bundle from binary
 - `migrate_add_*.sh`: Database schema migration scripts (idempotent)
 
@@ -163,7 +161,7 @@ gcc -Wall -Wextra -O2 \
 
 ## GUI Application Bundle
 
-Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
+Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via `make install`:
 - **File Tracker Unified.app:** All-in-one tabbed interface with Scanner, Summary, Logs, Drives, Locator, and Compare tabs
 
 ## Development Notes
@@ -212,11 +210,7 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 
 ## Documentation Files
 
-- `README.md`: Comprehensive user guide
-- `README-GUI-APPS.md`: GUI application overview
-- Feature docs: `*_FEATURE.md` (note storage, error logging, log storage)
-- GUI guides: `*_GUI_GUIDE.md` (implementation details)
-- Change logs: `CHANGELOG_*.md`
+- `README.md`: The single user guide for the whole repository (application, CLI, ignore patterns, schema, build). Keep it current when behavior changes
 
 ## Common Issues
 
@@ -237,7 +231,7 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 
 ## Token Optimization Tips
 
-### Instead of reading README.md (25KB), reference this file for:
+### Instead of reading README.md (~14KB), reference this file for:
 - Tool purposes and relationships
 - Database schema
 - Build commands
