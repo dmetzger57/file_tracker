@@ -42,7 +42,7 @@ file_tracker_unified → SQLite DB (~/db/FileTracker/*.db)
 ## Build System
 
 ### Dependencies
-- **Required:** GCC, OpenSSL 3 (`libssl`, `libcrypto`), SQLite3, GTK4, pthreads
+- **Required:** GCC, OpenSSL 3 (`libssl`, `libcrypto`), SQLite3, GTK4 (GLib threads)
 - **macOS:** Homebrew paths auto-detected in Makefile
 - **Install:** `brew install openssl@3 sqlite gtk4` (macOS)
 
@@ -68,7 +68,7 @@ gcc -Wall -Wextra -O2 \
 
 ### Application
 - `file_tracker_unified.c` (~120KB): All-in-one GTK4 application with tabbed interface
-  - Scanner tab: Multi-threaded scanner with SHA-256, mtime comparison
+  - Scanner tab: SHA-256 / mtime scanner with an adjustable worker pool (Workers setting)
   - Summary tab: Run history and statistics viewer
   - Logs tab: Per-run detailed log viewer with filters
   - Drives tab: Drive metadata tracking with auto-capacity detection
@@ -83,9 +83,12 @@ gcc -Wall -Wextra -O2 \
 ## Code Conventions
 
 ### Multi-threading
-- Scanner tab spawns one thread per path argument
-- Uses pthreads with mutex locks for database writes
-- Pattern: `pthread_create()` → worker function → `pthread_join()`
+- Scanner tab scans a single path. "Start Scan" starts one `GThread` (`scanner_thread_func`) that walks the directory tree
+- Regular files are queued to a `GThreadPool` of N workers (`scanner_worker_func` → `scanner_process_file`); N comes from the "Workers" spin button (default 1, max 2× CPU cores)
+- `ScannerContext.lock` (`GMutex`) guards the shared SQLite connection, counters and `log_buffer`; SHA-256 hashing runs outside the lock so workers hash in parallel
+- The walker handles ignored files itself (under the lock) and pauses when more than `SCANNER_MAX_QUEUED` files are waiting
+- `g_thread_pool_free(pool, FALSE, TRUE)` waits for the workers before `scanner_find_missing()` and the run summary/log writes
+- Guidance: keep Workers at 1 for spinning HDDs (parallel reads cause head seeking); raise it for checksum scans on SSD/NVMe
 
 ### Database Operations
 - Always check `sqlite3_open()` return value
@@ -169,7 +172,7 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 - Update `file_tracker_unified.c` Scanner tab code
 - Test with "Update Database" enabled and disabled (read-only)
 - Test with "Enable Checksum Verification" on and off (mtime-only)
-- Verify thread safety for database writes
+- Verify thread safety: any access to `ctx->db`, counters or `scanner_log_message()` from worker code must hold `ctx->lock`
 
 ### When Adding Database Fields
 1. Update schema in source file `CREATE TABLE` statements
@@ -189,7 +192,7 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 - [ ] Scanner tab: Read-only mode (Update Database disabled)
 - [ ] Scanner tab: Update mode (Update Database enabled)
 - [ ] Scanner tab: With and without checksum verification
-- [ ] Scanner tab: Multi-threaded (multiple paths, comma-separated)
+- [ ] Scanner tab: Workers = 1 and Workers > 1 give identical counts
 - [ ] Scanner tab: Missing/changed/new file detection
 - [ ] Summary tab: Run history and tabbed file lists
 - [ ] Logs tab: Filtering by status
@@ -202,7 +205,7 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 ## Performance Characteristics
 
 - **Bottlenecks:** I/O (reading files), SHA-256 computation
-- **Optimization:** Multi-threading (one thread per path)
+- **Optimization:** Worker pool hashes files in parallel (Workers setting; helps SSD/NVMe, not HDDs)
 - **Fast mode:** mtime-only comparison (default)
 - **Slow mode:** Full checksum verification (`-c`)
 - **Typical Speed:** ~500MB/s on SSD (checksum mode), ~10GB/s (mtime mode)
@@ -248,7 +251,7 @@ Created by `create_app_bundles.sh`, installed via `install_apps.sh`:
 ### For debugging:
 - Status values and their meanings are documented above
 - Error patterns (logged to run_logs with status='ERROR')
-- Multi-threading uses standard pthread pattern
+- Multi-threading uses a GLib `GThreadPool` + `GMutex` (see Code Conventions)
 
 ## Quick Reference
 

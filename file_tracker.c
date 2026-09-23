@@ -6,6 +6,7 @@
 #include <openssl/evp.h>
 #include <errno.h>
 #include <dirent.h>
+#include <fnmatch.h>
 #include <limits.h>
 #include <pwd.h>
 #include <signal.h>
@@ -36,6 +37,8 @@ typedef struct {
 } Ctx;
 
 static char *ignore_list[MAX_IGNORES];
+static int ignore_dir_only[MAX_IGNORES];  // pattern had a trailing '/': matches directories only
+static int ignore_anchored[MAX_IGNORES];  // pattern contains a '/': matched against the path below the scan root
 static int ignore_count = 0;
 static volatile sig_atomic_t should_stop = 0;
 
@@ -59,19 +62,66 @@ static void load_ignore_list(void) {
     FILE *f = fopen(ignore_path, "r");
     if (!f) return;
 
+    // rsync-style: blank lines and '#' comments are skipped, wildcards are allowed, a
+    // trailing '/' limits the pattern to directories and a pattern containing '/' (e.g. a
+    // leading one) is anchored to the scan root
     char line[256];
     while (fgets(line, sizeof(line), f) && ignore_count < MAX_IGNORES) {
-        line[strcspn(line, "\r\n")] = 0;
-        if (strlen(line) > 0) ignore_list[ignore_count++] = strdup(line);
+        size_t len = strcspn(line, "\r\n");
+        while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t')) len--;
+        line[len] = 0;
+        if (len == 0 || line[0] == '#') continue;
+
+        int dir_only = 0;
+        if (line[len - 1] == '/') {
+            line[--len] = 0;
+            dir_only = 1;
+            if (len == 0) continue;
+        }
+        const char *pattern = line;
+        int anchored = (strchr(pattern, '/') != NULL);
+        while (*pattern == '/') pattern++;
+        if (*pattern == 0) continue;
+
+        ignore_dir_only[ignore_count] = dir_only;
+        ignore_anchored[ignore_count] = anchored;
+        ignore_list[ignore_count++] = strdup(pattern);
     }
     fclose(f);
 }
 
-static int is_ignored(const char *name) {
+// Path of path below root, without a leading '/'
+static const char *path_below_root(const char *root, const char *path) {
+    size_t root_len = strlen(root);
+    const char *rel = strncmp(path, root, root_len) == 0 ? path + root_len : path;
+    while (*rel == '/') rel++;
+    return rel;
+}
+
+// rel_path is the entry's path below the scan root
+static int is_ignored(const char *rel_path, int is_dir) {
+    const char *slash = strrchr(rel_path, '/');
+    const char *name = slash ? slash + 1 : rel_path;
     for (int i = 0; i < ignore_count; i++) {
-        if (strcmp(name, ignore_list[i]) == 0) return 1;
+        if (ignore_dir_only[i] && !is_dir) continue;
+        if (ignore_anchored[i] ? fnmatch(ignore_list[i], rel_path, FNM_PATHNAME) == 0
+                               : fnmatch(ignore_list[i], name, 0) == 0) return 1;
     }
     return 0;
+}
+
+// True if path, or any directory it is inside (below root), is ignored
+static int path_is_ignored(const char *root, const char *path) {
+    char rel[MAX_PATH];
+    snprintf(rel, sizeof(rel), "%s", path_below_root(root, path));
+    for (char *p = rel; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        int ignored = is_ignored(rel, 1);
+        *p = '/';
+        if (ignored) return 1;
+    }
+    return is_ignored(rel, 0);
 }
 
 static int compute_sha256(const char *path, char *output_buffer) {
@@ -350,7 +400,7 @@ static int join_path(char *out, size_t size, const char *dir, const char *name) 
     return n > 0 && (size_t)n < size;
 }
 
-static long count_files(const char *dirpath) {
+static long count_files(const char *root, const char *dirpath) {
     long count = 0;
     DIR *dir = opendir(dirpath);
     if (!dir) return 0;
@@ -358,13 +408,13 @@ static long count_files(const char *dirpath) {
     struct dirent *entry;
     while (!should_stop && (entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-        if (is_ignored(entry->d_name)) continue;
 
         char filepath[MAX_PATH];
         struct stat sb;
         if (!join_path(filepath, sizeof(filepath), dirpath, entry->d_name)) continue;
         if (stat(filepath, &sb) != 0) continue;
-        if (S_ISDIR(sb.st_mode)) count += count_files(filepath);
+        if (is_ignored(path_below_root(root, filepath), S_ISDIR(sb.st_mode))) continue;
+        if (S_ISDIR(sb.st_mode)) count += count_files(root, filepath);
         else if (S_ISREG(sb.st_mode)) count++;
     }
     closedir(dir);
@@ -388,15 +438,18 @@ static void scan_directory(Ctx *c, const char *dirpath) {
             continue;
         }
 
-        if (is_ignored(entry->d_name)) {
+        struct stat sb;
+        int stat_ok = (stat(filepath, &sb) == 0);
+        int stat_errno = errno;
+
+        if (is_ignored(path_below_root(c->scan_path, filepath), stat_ok && S_ISDIR(sb.st_mode))) {
             process_ignored(c, filepath, entry->d_name);
             continue;
         }
 
-        struct stat sb;
-        if (stat(filepath, &sb) != 0) {
+        if (!stat_ok) {
             // Dangling symlinks are skipped; anything else (e.g. permissions) is an error
-            if (errno != ENOENT) process_error(c, filepath);
+            if (stat_errno != ENOENT) process_error(c, filepath);
             continue;
         }
 
@@ -431,6 +484,8 @@ static void find_missing(Ctx *c) {
         const char *path = (const char *)sqlite3_column_text(stmt, 1);
         struct stat sb;
         if (!path || stat(path, &sb) == 0 || errno != ENOENT) continue;
+        // Entries recorded before an ignore pattern matched them are not reported as missing
+        if (path_is_ignored(c->scan_path, path)) continue;
 
         c->missing++;
         log_entry(c, "MISSING", path, "", 0, 0);
@@ -600,7 +655,7 @@ int main(int argc, char *argv[]) {
         sqlite3_prepare_v2(ctx.db, "INSERT INTO run_logs (run_id, status, full_path, checksum, size, mtime) VALUES (?, ?, ?, ?, ?, ?)", -1, &ctx.log_stmt, 0);
     }
 
-    ctx.total = count_files(ctx.scan_path);
+    ctx.total = count_files(ctx.scan_path, ctx.scan_path);
     scan_directory(&ctx, ctx.scan_path);
     find_missing(&ctx);
 

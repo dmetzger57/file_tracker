@@ -28,6 +28,8 @@ char db_dir_path[MAX_PATH];
 
 // Ignore list for scanner
 char *ignore_list[MAX_IGNORES];
+int ignore_dir_only[MAX_IGNORES];  // pattern had a trailing '/': matches directories only
+int ignore_anchored[MAX_IGNORES];  // pattern contains a '/': matched against the path below the scan root
 int ignore_count = 0;
 
 // ============================================================================
@@ -60,21 +62,66 @@ void load_ignore_list() {
     FILE *f = fopen(ignore_path, "r");
     if (!f) return;
 
+    // rsync-style: blank lines and '#' comments are skipped, wildcards are allowed, a
+    // trailing '/' limits the pattern to directories and a pattern containing '/' (e.g. a
+    // leading one) is anchored to the scan root
     char line[256];
     while (fgets(line, sizeof(line), f) && ignore_count < MAX_IGNORES) {
-        line[strcspn(line, "\r\n")] = 0;
-        if (strlen(line) > 0) {
-            ignore_list[ignore_count++] = strdup(line);
+        size_t len = strcspn(line, "\r\n");
+        while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t')) len--;
+        line[len] = 0;
+        if (len == 0 || line[0] == '#') continue;
+
+        int dir_only = 0;
+        if (line[len - 1] == '/') {
+            line[--len] = 0;
+            dir_only = 1;
+            if (len == 0) continue;
         }
+        const char *pattern = line;
+        int anchored = (strchr(pattern, '/') != NULL);
+        while (*pattern == '/') pattern++;
+        if (*pattern == 0) continue;
+
+        ignore_dir_only[ignore_count] = dir_only;
+        ignore_anchored[ignore_count] = anchored;
+        ignore_list[ignore_count++] = strdup(pattern);
     }
     fclose(f);
 }
 
-int is_ignored(const char *name) {
+// Path of path below root, without a leading '/'
+static const char *path_below_root(const char *root, const char *path) {
+    size_t root_len = strlen(root);
+    const char *rel = strncmp(path, root, root_len) == 0 ? path + root_len : path;
+    while (*rel == '/') rel++;
+    return rel;
+}
+
+// rel_path is the entry's path below the scan root
+int is_ignored(const char *rel_path, int is_dir) {
+    const char *slash = strrchr(rel_path, '/');
+    const char *name = slash ? slash + 1 : rel_path;
     for (int i = 0; i < ignore_count; i++) {
-        if (strcmp(name, ignore_list[i]) == 0) return 1;
+        if (ignore_dir_only[i] && !is_dir) continue;
+        if (ignore_anchored[i] ? fnmatch(ignore_list[i], rel_path, FNM_PATHNAME) == 0
+                               : fnmatch(ignore_list[i], name, 0) == 0) return 1;
     }
     return 0;
+}
+
+// True if path, or any directory it is inside (below root), is ignored
+static int path_is_ignored(const char *root, const char *path) {
+    char rel[MAX_PATH];
+    snprintf(rel, sizeof(rel), "%s", path_below_root(root, path));
+    for (char *p = rel; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        int ignored = is_ignored(rel, 1);
+        *p = '/';
+        if (ignored) return 1;
+    }
+    return is_ignored(rel, 0);
 }
 
 int compute_sha256(const char *path, char *output_buffer) {
@@ -316,6 +363,10 @@ int update_all_mounted_drives() {
 void refresh_all_database_combos();
 void drives_refresh_list();
 void logs_refresh_databases();
+void locator_refresh_databases();
+void dupe_refresh_databases();
+void summary_refresh_databases();
+void compare_refresh_databases();
 
 // ============================================================================
 // TAB 1: FILE LOCATOR (Simplified - most commonly used)
@@ -491,8 +542,13 @@ GtkWidget *create_locator_tab() {
     gtk_box_append(GTK_BOX(search_box), locator_mode_combo);
     gtk_box_append(GTK_BOX(search_box), locator_search_entry);
     gtk_box_append(GTK_BOX(search_box), locator_partial_check);
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list");
+    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)locator_refresh_databases), NULL);
+
     gtk_box_append(GTK_BOX(search_box), locator_db_combo);
     gtk_box_append(GTK_BOX(search_box), search_btn);
+    gtk_box_append(GTK_BOX(search_box), refresh_btn);
     gtk_box_append(GTK_BOX(box), search_box);
 
     // Results
@@ -555,9 +611,11 @@ void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
     g_object_unref(alert);
 }
 
-// Most recent scan with checksum verification enabled, from the drive's own DB
-static void drives_last_checksum_scan(const char *drive_name, char *out, size_t out_size) {
+// Most recent scan with checksum verification enabled, and the number of files in the
+// most recent run (-1 if unknown), from the drive's own DB
+static void drives_db_stats(const char *drive_name, char *out, size_t out_size, long long *file_count) {
     snprintf(out, out_size, "Never");
+    *file_count = -1;
 
     char path[MAX_PATH];
     snprintf(path, sizeof(path), "%s/%s.db", db_dir_path, drive_name);
@@ -582,7 +640,24 @@ static void drives_last_checksum_scan(const char *drive_name, char *out, size_t 
         }
         sqlite3_finalize(stmt);
     }
+    // Same total as the Summary tab: ignored files are not counted
+    if (sqlite3_prepare_v2(db, "SELECT COALESCE(num_unchanged,0) + COALESCE(num_changed,0) + COALESCE(num_new,0) + "
+                               "COALESCE(num_missing,0) + COALESCE(num_errors,0) FROM meta ORDER BY id DESC LIMIT 1;",
+                           -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) *file_count = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
     sqlite3_close(db);
+}
+
+static void drives_files_cell_data(GtkTreeViewColumn *column, GtkCellRenderer *renderer,
+                                   GtkTreeModel *model, GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    gint64 count;
+    gtk_tree_model_get(model, iter, 6, &count, -1);
+    char text[32] = "";
+    if (count >= 0) snprintf(text, sizeof(text), "%'lld", (long long)count);
+    g_object_set(renderer, "text", text, NULL);
 }
 
 void drives_refresh_list() {
@@ -595,26 +670,22 @@ void drives_refresh_list() {
     sqlite3 *db;
     if (sqlite3_open(drives_db, &db) != SQLITE_OK) return;
 
-    const char *sql = "SELECT drive_id, drive_name, storage_container, capacity, space_available, description "
+    const char *sql = "SELECT drive_id, drive_name, storage_container, space_available, description "
                      "FROM drives ORDER BY drive_name;";
     sqlite3_stmt *stmt;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            long long capacity = sqlite3_column_int64(stmt, 3);
-            long long available = sqlite3_column_int64(stmt, 4);
-            long long used = capacity - available;
-
-            char cap_str[64], used_str[64], avail_str[64];
-            format_size(capacity, cap_str, sizeof(cap_str));
-            format_size(used, used_str, sizeof(used_str));
+            long long available = sqlite3_column_int64(stmt, 3);
+            char avail_str[64];
             format_size(available, avail_str, sizeof(avail_str));
 
             const char *location = (const char *)sqlite3_column_text(stmt, 2);
 
             const char *drive_name = (const char *)sqlite3_column_text(stmt, 1);
             char checksum_scan[64];
-            drives_last_checksum_scan(drive_name ? drive_name : "", checksum_scan, sizeof(checksum_scan));
+            long long file_count;
+            drives_db_stats(drive_name ? drive_name : "", checksum_scan, sizeof(checksum_scan), &file_count);
 
             GtkTreeIter iter;
             gtk_list_store_append(store, &iter);
@@ -622,11 +693,10 @@ void drives_refresh_list() {
                               0, sqlite3_column_int64(stmt, 0),
                               1, sqlite3_column_text(stmt, 1),
                               2, location ? location : "",
-                              3, cap_str,
-                              4, used_str,
-                              5, avail_str,
-                              6, sqlite3_column_text(stmt, 5),
-                              7, checksum_scan,
+                              3, avail_str,
+                              4, sqlite3_column_text(stmt, 4),
+                              5, checksum_scan,
+                              6, (gint64)file_count,
                               -1);
         }
         sqlite3_finalize(stmt);
@@ -841,7 +911,7 @@ void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data
                           0, &selected_drive_id,
                           1, &name,
                           2, &location,
-                          6, &description,
+                          4, &description,
                           -1);
 
         // Populate fields with selected drive's data
@@ -1100,23 +1170,34 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(box), desc_box);
 
     // Drives list
-    GtkListStore *store = gtk_list_store_new(8, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
-                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    GtkListStore *store = gtk_list_store_new(7, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT64);
     drives_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
-    const char *titles[] = {"ID", "Name", "Location", "Capacity", "Used", "Available", "Description", "Last Checksum Scan"};
-    for (int i = 0; i < 8; i++) {
+    const char *titles[] = {"ID", "Name", "Location", "Available", "Description", "Last Checksum Scan"};
+    for (int i = 0; i < 6; i++) {
         GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
-        if (i == 6) gtk_tree_view_column_set_expand(column, TRUE);
+        if (i == 4) gtk_tree_view_column_set_expand(column, TRUE);
         // Enable sorting on Name, Location and Last Checksum Scan columns
-        if (i == 1 || i == 2 || i == 7) {
+        if (i == 1 || i == 2 || i == 5) {
             gtk_tree_view_column_set_sort_column_id(column, i);
         }
         gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), column);
     }
+
+    // Files in the last run; stored as a number so it sorts numerically
+    GtkCellRenderer *files_renderer = gtk_cell_renderer_text_new();
+    g_object_set(files_renderer, "xalign", 1.0, NULL);
+    GtkTreeViewColumn *files_column = gtk_tree_view_column_new();
+    gtk_tree_view_column_set_title(files_column, "Files (Last Run)");
+    gtk_tree_view_column_pack_start(files_column, files_renderer, TRUE);
+    gtk_tree_view_column_set_cell_data_func(files_column, files_renderer, drives_files_cell_data, NULL, NULL);
+    gtk_tree_view_column_set_resizable(files_column, TRUE);
+    gtk_tree_view_column_set_sort_column_id(files_column, 6);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), files_column);
 
     GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(drives_tree));
     g_signal_connect(selection, "changed", G_CALLBACK(on_drives_selection_changed), NULL);
@@ -1226,8 +1307,12 @@ GtkWidget *create_summary_tab() {
     summary_db_combo = gtk_combo_box_text_new();
     gtk_widget_set_hexpand(summary_db_combo, TRUE);
     g_signal_connect(summary_db_combo, "changed", G_CALLBACK((GCallback)summary_load_runs), NULL);
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list and scan runs");
+    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)summary_refresh_databases), NULL);
     gtk_box_append(GTK_BOX(db_box), db_label);
     gtk_box_append(GTK_BOX(db_box), summary_db_combo);
+    gtk_box_append(GTK_BOX(db_box), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), db_box);
 
     GtkListStore *store = gtk_list_store_new(8, G_TYPE_INT, G_TYPE_STRING, G_TYPE_INT,
@@ -1340,22 +1425,35 @@ GPtrArray *list_database_files() {
     return files;
 }
 
-void logs_refresh_databases() {
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(logs_db_combo));
+// Refills a database combo from files (".db" names, or plain names when strip_ext is set),
+// after an optional first_item such as "All Databases". The previous selection is kept when
+// it still exists, otherwise the first entry is selected. Selecting emits "changed", so tabs
+// that load runs on that signal reload them.
+static void refill_database_combo(GtkWidget *combo, GPtrArray *files, const char *first_item, gboolean strip_ext) {
+    char *previous = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
+    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(combo));
 
+    int index = 0, active = 0;
+    if (first_item) {
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), first_item);
+        index++;
+    }
+    for (guint i = 0; i < files->len; i++, index++) {
+        const char *file_name = g_ptr_array_index(files, i);
+        char name[256];
+        snprintf(name, sizeof(name), "%.*s", (int)(strlen(file_name) - (strip_ext ? 3 : 0)), file_name);
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), name);
+        if (previous && strcmp(previous, name) == 0) active = index;
+    }
+    if (index > 0) gtk_combo_box_set_active(GTK_COMBO_BOX(combo), active);
+    g_free(previous);
+}
+
+void logs_refresh_databases() {
     GPtrArray *files = list_database_files();
     if (!files) return;
-
-    for (guint i = 0; i < files->len; i++) {
-        const char *file_name = g_ptr_array_index(files, i);
-        size_t len = strlen(file_name);
-        char db_name[256];
-        snprintf(db_name, sizeof(db_name), "%.*s", (int)(len - 3), file_name);
-        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(logs_db_combo), db_name);
-    }
+    refill_database_combo(logs_db_combo, files, NULL, TRUE);
     g_ptr_array_unref(files);
-
-    gtk_combo_box_set_active(GTK_COMBO_BOX(logs_db_combo), 0);
 }
 
 void logs_load_runs(const char *db_name) {
@@ -1911,8 +2009,12 @@ GtkWidget *create_logs_tab() {
     logs_db_combo = gtk_combo_box_text_new();
     g_signal_connect(logs_db_combo, "changed", G_CALLBACK(on_logs_db_changed), NULL);
     gtk_widget_set_hexpand(logs_db_combo, TRUE);
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list and scan runs");
+    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)logs_refresh_databases), NULL);
     gtk_box_append(GTK_BOX(db_box), db_label);
     gtk_box_append(GTK_BOX(db_box), logs_db_combo);
+    gtk_box_append(GTK_BOX(db_box), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), db_box);
 
     GtkWidget *runs_label = gtk_label_new("Scan Runs:");
@@ -2063,13 +2165,20 @@ typedef struct {
     int log_count;
     int log_capacity;
     GThread *scan_thread;
+    int num_workers;
+    GThreadPool *pool;
+    GMutex lock;  // guards db, counters and log_buffer while workers are running
 } ScannerContext;
+
+// Most files queued for the workers before the directory walk pauses
+#define SCANNER_MAX_QUEUED 1000
 
 GtkWidget *scanner_volumes_list;
 GtkWidget *scanner_path_entry;
 GtkWidget *scanner_db_entry;
 GtkWidget *scanner_checksum_check;
 GtkWidget *scanner_update_check;
+GtkWidget *scanner_workers_spin;
 GtkWidget *scanner_note_text;
 GtkWidget *scanner_start_button;
 GtkWidget *scanner_stop_button;
@@ -2156,6 +2265,8 @@ static void scanner_find_missing(ScannerContext *ctx) {
         const char *path = (const char *)sqlite3_column_text(stmt, 1);
         struct stat sb;
         if (!path || stat(path, &sb) == 0 || errno != ENOENT) continue;
+        // Entries recorded before an ignore pattern matched them are not reported as missing
+        if (path_is_ignored(ctx->scan_path, path)) continue;
 
         ctx->missing++;
         scanner_log_message(ctx, "MISSING", path, "", 0, 0);
@@ -2225,6 +2336,19 @@ void scanner_process_ignored_file(ScannerContext *ctx, const char *filepath, con
     g_idle_add(scanner_update_progress, ctx);
 }
 
+static void scanner_update_file_row(ScannerContext *ctx, const char *filepath, const struct stat *sb, const char *checksum) {
+    sqlite3_stmt *up;
+    sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
+    sqlite3_bind_int64(up, 1, sb->st_size);
+    sqlite3_bind_int64(up, 2, sb->st_mtime);
+    sqlite3_bind_text(up, 3, checksum, -1, SQLITE_STATIC);
+    sqlite3_bind_text(up, 4, filepath, -1, SQLITE_STATIC);
+    sqlite3_step(up);
+    sqlite3_finalize(up);
+}
+
+// Runs on a worker thread. The database, counters and run log are shared, so they are only
+// touched while holding ctx->lock; checksums are computed outside it so workers hash in parallel.
 void scanner_process_file(ScannerContext *ctx, const char *filepath, const char *filename) {
     if (ctx->should_stop) return;
 
@@ -2235,29 +2359,35 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
     struct stat sb;
     if (stat(filepath, &sb) != 0 || !S_ISREG(sb.st_mode)) return;
 
+    long long db_size = 0, db_mtime = 0;
+    char db_checksum[HASH_SIZE] = "";
+    int found, reappeared = 0;
+
+    g_mutex_lock(&ctx->lock);
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(ctx->db, "SELECT size, last_modified, checksum, status FROM files WHERE full_path = ?", -1, &stmt, NULL);
     sqlite3_bind_text(stmt, 1, filepath, -1, SQLITE_STATIC);
-
-    int found = (sqlite3_step(stmt) == SQLITE_ROW);
-    const char *db_status = found ? (const char *)sqlite3_column_text(stmt, 3) : NULL;
-    // A file previously marked MISSING that is back on disk is treated as new
-    int reappeared = db_status && strcmp(db_status, "MISSING") == 0;
+    found = (sqlite3_step(stmt) == SQLITE_ROW);
+    if (found) {
+        const char *db_status = (const char *)sqlite3_column_text(stmt, 3);
+        // A file previously marked MISSING that is back on disk is treated as new
+        reappeared = db_status && strcmp(db_status, "MISSING") == 0;
+        db_size = sqlite3_column_int64(stmt, 0);
+        db_mtime = sqlite3_column_int64(stmt, 1);
+        const char *c = (const char *)sqlite3_column_text(stmt, 2);
+        if (c) g_strlcpy(db_checksum, c, sizeof(db_checksum));
+    }
+    sqlite3_finalize(stmt);
+    g_mutex_unlock(&ctx->lock);
 
     if (found && !reappeared) {
-        long long db_size = sqlite3_column_int64(stmt, 0);
-        long long db_mtime = sqlite3_column_int64(stmt, 1);
-        const char *db_checksum = (const char *)sqlite3_column_text(stmt, 2);
-
         char checksum[HASH_SIZE] = "";
         int has_checksum = 0;
         if (ctx->enable_checksum) {
             has_checksum = compute_sha256(filepath, checksum);
         }
 
-        if (ctx->enable_checksum && has_checksum && db_checksum && strlen(db_checksum) > 0 && strcmp(db_checksum, checksum) != 0) {
-            ctx->changed++;
-
+        if (ctx->enable_checksum && has_checksum && strlen(db_checksum) > 0 && strcmp(db_checksum, checksum) != 0) {
             if ((db_size != sb.st_size) && (db_mtime != sb.st_mtime)) {
 	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, Date-Time, File-Size");
             }
@@ -2271,22 +2401,13 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
 	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
             }
 
+            g_mutex_lock(&ctx->lock);
+            ctx->changed++;
             scanner_log_message(ctx, log_mesg, filepath, checksum, sb.st_size, sb.st_mtime);
-
-            if (ctx->update_mode) {
-                sqlite3_stmt *up;
-                sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
-                sqlite3_bind_int64(up, 1, sb.st_size);
-                sqlite3_bind_int64(up, 2, sb.st_mtime);
-                sqlite3_bind_text(up, 3, checksum, -1, SQLITE_STATIC);
-                sqlite3_bind_text(up, 4, filepath, -1, SQLITE_STATIC);
-                sqlite3_step(up);
-                sqlite3_finalize(up);
-            }
+            if (ctx->update_mode) scanner_update_file_row(ctx, filepath, &sb, checksum);
+            g_mutex_unlock(&ctx->lock);
 
         } else if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
-            ctx->changed++;
-
             if ((db_size != sb.st_size) && (db_mtime != sb.st_mtime)) {
 	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: Date-Time, File-Size");
             }
@@ -2300,30 +2421,30 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
 	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
             }
 
-            scanner_log_message(ctx, log_mesg, filepath, checksum, sb.st_size, sb.st_mtime);
-
-            if (ctx->update_mode) {
-                // Always store a checksum that matches the new content
-                if (!has_checksum) {
-                    compute_sha256(filepath, checksum);
-                }
-                sqlite3_stmt *up;
-                sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
-                sqlite3_bind_int64(up, 1, sb.st_size);
-                sqlite3_bind_int64(up, 2, sb.st_mtime);
-                sqlite3_bind_text(up, 3, checksum, -1, SQLITE_STATIC);
-                sqlite3_bind_text(up, 4, filepath, -1, SQLITE_STATIC);
-                sqlite3_step(up);
-                sqlite3_finalize(up);
+            // Always store a checksum that matches the new content
+            char new_checksum[HASH_SIZE];
+            g_strlcpy(new_checksum, checksum, sizeof(new_checksum));
+            if (ctx->update_mode && !has_checksum) {
+                compute_sha256(filepath, new_checksum);
             }
+
+            g_mutex_lock(&ctx->lock);
+            ctx->changed++;
+            scanner_log_message(ctx, log_mesg, filepath, checksum, sb.st_size, sb.st_mtime);
+            if (ctx->update_mode) scanner_update_file_row(ctx, filepath, &sb, new_checksum);
+            g_mutex_unlock(&ctx->lock);
         } else {
+            g_mutex_lock(&ctx->lock);
             ctx->unchanged++;
-            scanner_log_message(ctx, "UNCHANGED", filepath, db_checksum ? db_checksum : "", sb.st_size, sb.st_mtime);
+            scanner_log_message(ctx, "UNCHANGED", filepath, db_checksum, sb.st_size, sb.st_mtime);
+            g_mutex_unlock(&ctx->lock);
         }
     } else {
-        ctx->new_files++;
         char checksum[HASH_SIZE] = "";
         if (ctx->enable_checksum) compute_sha256(filepath, checksum);
+
+        g_mutex_lock(&ctx->lock);
+        ctx->new_files++;
         scanner_log_message(ctx, "NEW", filepath, checksum, sb.st_size, sb.st_mtime);
         if (ctx->update_mode && reappeared) {
             sqlite3_stmt *up;
@@ -2348,10 +2469,17 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
             sqlite3_step(ins);
             sqlite3_finalize(ins);
         }
+        g_mutex_unlock(&ctx->lock);
     }
 
-    sqlite3_finalize(stmt);
     g_idle_add(scanner_update_progress, ctx);
+}
+
+static void scanner_worker_func(gpointer data, gpointer user_data) {
+    char *filepath = (char *)data;
+    const char *slash = strrchr(filepath, '/');
+    scanner_process_file((ScannerContext *)user_data, filepath, slash ? slash + 1 : filepath);
+    g_free(filepath);
 }
 
 void scanner_scan_directory(ScannerContext *ctx, const char *dirpath) {
@@ -2368,32 +2496,39 @@ void scanner_scan_directory(ScannerContext *ctx, const char *dirpath) {
         char filepath[MAX_PATH];
         snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
 
-        if (is_ignored(entry->d_name)) {
+        struct stat sb;
+        int stat_ok = (stat(filepath, &sb) == 0);
+
+        if (is_ignored(path_below_root(ctx->scan_path, filepath), stat_ok && S_ISDIR(sb.st_mode))) {
             // Process ignored files to record them in database
-            struct stat sb;
-            if (stat(filepath, &sb) == 0 && S_ISREG(sb.st_mode)) {
+            g_mutex_lock(&ctx->lock);
+            if (stat_ok && S_ISREG(sb.st_mode)) {
                 scanner_process_ignored_file(ctx, filepath, entry->d_name);
             } else {
                 // Log non-regular ignored files (directories, symlinks, etc.)
                 scanner_log_message(ctx, "IGNORED", filepath, "", 0, 0);
                 ctx->ignored++;
             }
+            g_mutex_unlock(&ctx->lock);
             continue;
         }
 
-        struct stat sb;
-        if (stat(filepath, &sb) == 0) {
+        if (stat_ok) {
             if (S_ISDIR(sb.st_mode)) {
                 scanner_scan_directory(ctx, filepath);
             } else if (S_ISREG(sb.st_mode)) {
-                scanner_process_file(ctx, filepath, entry->d_name);
+                // Keep the queue bounded so the walk doesn't buffer the whole drive in memory
+                while (g_thread_pool_unprocessed(ctx->pool) > SCANNER_MAX_QUEUED && !ctx->should_stop) {
+                    g_usleep(1000);
+                }
+                g_thread_pool_push(ctx->pool, g_strdup(filepath), NULL);
             }
         }
     }
     closedir(dir);
 }
 
-int scanner_count_files(const char *dirpath) {
+int scanner_count_files(const char *root, const char *dirpath) {
     int count = 0;
     DIR *dir = opendir(dirpath);
     if (!dir) return 0;
@@ -2405,7 +2540,8 @@ int scanner_count_files(const char *dirpath) {
         snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
         struct stat sb;
         if (stat(filepath, &sb) == 0) {
-            if (S_ISDIR(sb.st_mode)) count += scanner_count_files(filepath);
+            if (is_ignored(path_below_root(root, filepath), S_ISDIR(sb.st_mode))) continue;
+            if (S_ISDIR(sb.st_mode)) count += scanner_count_files(root, filepath);
             else if (S_ISREG(sb.st_mode)) count++;
         }
     }
@@ -2427,9 +2563,14 @@ gpointer scanner_thread_func(gpointer data) {
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, size INTEGER, mtime INTEGER, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
 
     g_idle_add(scanner_update_current_file, g_strdup("Counting files..."));
-    ctx->total_files = scanner_count_files(ctx->scan_path);
+    ctx->total_files = scanner_count_files(ctx->scan_path, ctx->scan_path);
 
+    // This thread walks the tree; the pool's workers stat, hash and record each file
+    ctx->pool = g_thread_pool_new(scanner_worker_func, ctx, ctx->num_workers, TRUE, NULL);
     scanner_scan_directory(ctx, ctx->scan_path);
+    g_thread_pool_free(ctx->pool, FALSE, TRUE);  // waits for queued files to finish
+    ctx->pool = NULL;
+
     scanner_find_missing(ctx);
 
     // Always create meta record for all scans (both update and read-only)
@@ -2489,16 +2630,18 @@ gboolean scanner_scan_completed(gpointer data) {
     gtk_widget_set_sensitive(scanner_stop_button, FALSE);
     gtk_widget_set_sensitive(scanner_path_entry, TRUE);
     gtk_widget_set_sensitive(scanner_db_entry, TRUE);
+    gtk_widget_set_sensitive(scanner_workers_spin, TRUE);
     gtk_progress_bar_set_fraction(scanner_progress_bar, 1.0);
 
     char results[2048];
     snprintf(results, sizeof(results),
-             "Scan Complete!\n\nPath: %s\nDatabase: %s\nMode: %s\nChecksum: %s\n\n"
+             "Scan Complete!\n\nPath: %s\nDatabase: %s\nMode: %s\nChecksum: %s\nWorkers: %d\n\n"
              "Unchanged: %'d\nChanged: %'d\nNew: %'d\nMissing: %'d\nIgnored: %'d\nErrors: %'d\n\n"
              "Total: %'d files",
              ctx->scan_path, ctx->db_name,
              ctx->update_mode ? "Update" : "Read-only",
              ctx->enable_checksum ? "Enabled" : "Disabled",
+             ctx->num_workers,
              ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->ignored, ctx->errors,
              ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors);
 
@@ -2602,6 +2745,8 @@ void on_scanner_start_clicked(GtkButton *button, gpointer user_data) {
 
     current_scanner_scan->enable_checksum = gtk_check_button_get_active(GTK_CHECK_BUTTON(scanner_checksum_check));
     current_scanner_scan->update_mode = gtk_check_button_get_active(GTK_CHECK_BUTTON(scanner_update_check));
+    current_scanner_scan->num_workers = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(scanner_workers_spin));
+    g_mutex_init(&current_scanner_scan->lock);
 
     GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_note_text));
     GtkTextIter start, end;
@@ -2614,8 +2759,13 @@ void on_scanner_start_clicked(GtkButton *button, gpointer user_data) {
     gtk_widget_set_sensitive(scanner_stop_button, TRUE);
     gtk_widget_set_sensitive(scanner_path_entry, FALSE);
     gtk_widget_set_sensitive(scanner_db_entry, FALSE);
+    gtk_widget_set_sensitive(scanner_workers_spin, FALSE);
     gtk_progress_bar_set_fraction(scanner_progress_bar, 0.0);
     gtk_label_set_text(GTK_LABEL(scanner_status_label), "Initializing...");
+
+    // Clear results from any previous run
+    gtk_label_set_text(GTK_LABEL(scanner_current_file_label), "");
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_results_text)), "", -1);
 
     current_scanner_scan->scan_thread = g_thread_new("scanner", scanner_thread_func, current_scanner_scan);
 }
@@ -2693,6 +2843,16 @@ GtkWidget *create_scanner_tab() {
     gtk_check_button_set_active(GTK_CHECK_BUTTON(scanner_update_check), TRUE);
     gtk_box_append(GTK_BOX(opts_box), scanner_checksum_check);
     gtk_box_append(GTK_BOX(opts_box), scanner_update_check);
+    GtkWidget *workers_label = gtk_label_new("Workers:");
+    scanner_workers_spin = gtk_spin_button_new_with_range(1, MAX(2 * (int)g_get_num_processors(), 2), 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(scanner_workers_spin), 1);
+    gtk_widget_set_tooltip_text(scanner_workers_spin,
+        "Number of files processed in parallel. Keep at 1 for spinning hard drives; "
+        "higher values speed up checksum scans on SSD/NVMe drives.");
+    GtkWidget *workers_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(workers_box), workers_label);
+    gtk_box_append(GTK_BOX(workers_box), scanner_workers_spin);
+    gtk_box_append(GTK_BOX(opts_box), workers_box);
     gtk_box_append(GTK_BOX(right_box), opts_box);
 
     // Note
@@ -3167,10 +3327,17 @@ GtkWidget *create_compare_tab() {
     gtk_widget_set_margin_bottom(left_box, 8);
 
     // Run 1 selection
+    GtkWidget *run1_header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *run1_label = gtk_label_new("Run 1");
     gtk_widget_add_css_class(run1_label, "heading");
     gtk_label_set_xalign(GTK_LABEL(run1_label), 0.0);
-    gtk_box_append(GTK_BOX(left_box), run1_label);
+    gtk_widget_set_hexpand(run1_label, TRUE);
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the drive and run lists");
+    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)compare_refresh_databases), NULL);
+    gtk_box_append(GTK_BOX(run1_header), run1_label);
+    gtk_box_append(GTK_BOX(run1_header), refresh_btn);
+    gtk_box_append(GTK_BOX(left_box), run1_header);
 
     GtkWidget *run1_drive_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *run1_drive_label = gtk_label_new("Drive:");
@@ -3808,8 +3975,13 @@ GtkWidget *create_dupefinder_tab() {
     gtk_box_append(GTK_BOX(search_box), dupe_search_filler);
     gtk_box_append(GTK_BOX(search_box), gtk_label_new("In:"));
     gtk_box_append(GTK_BOX(search_box), dupe_db_combo);
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list");
+    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)dupe_refresh_databases), NULL);
+
     gtk_box_append(GTK_BOX(search_box), dupe_db_multi_button);
     gtk_box_append(GTK_BOX(search_box), search_btn);
+    gtk_box_append(GTK_BOX(search_box), refresh_btn);
     gtk_box_append(GTK_BOX(box), search_box);
 
     GtkListStore *store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
@@ -3883,51 +4055,49 @@ GtkWidget *create_about_tab() {
 // MAIN WINDOW SETUP
 // ============================================================================
 
-void refresh_all_database_combos() {
+void locator_refresh_databases() {
     GPtrArray *files = list_database_files();
     if (!files) return;
+    refill_database_combo(locator_db_combo, files, "All Databases", FALSE);
+    g_ptr_array_unref(files);
+}
 
-    // Refresh locator combo
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(locator_db_combo));
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_db_combo), "All Databases");
-
-    // Refresh dupe finder combo
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(dupe_db_combo));
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_db_combo), "All Databases");
-
-    // Refresh summary combo
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(summary_db_combo));
-
-    // Refresh compare combos
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo));
-    gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo));
-
-    for (guint i = 0; i < files->len; i++) {
-        const char *file_name = g_ptr_array_index(files, i);
-        size_t len = strlen(file_name);
-        char db_name[256];
-        snprintf(db_name, sizeof(db_name), "%.*s", (int)(len - 3), file_name);
-
-        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_db_combo), file_name);
-        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_db_combo), file_name);
-        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(summary_db_combo), file_name);
-        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run1_drive_combo), db_name);
-        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(compare_run2_drive_combo), db_name);
-    }
+void dupe_refresh_databases() {
+    GPtrArray *files = list_database_files();
+    if (!files) return;
+    refill_database_combo(dupe_db_combo, files, "All Databases", FALSE);
     dupe_refresh_db_checks(files);
     g_ptr_array_unref(files);
+}
 
-    gtk_combo_box_set_active(GTK_COMBO_BOX(locator_db_combo), 0);
-    gtk_combo_box_set_active(GTK_COMBO_BOX(dupe_db_combo), 0);
-    if (gtk_combo_box_get_active(GTK_COMBO_BOX(summary_db_combo)) < 0) {
-        gtk_combo_box_set_active(GTK_COMBO_BOX(summary_db_combo), 0);
-    }
-    if (gtk_combo_box_get_active(GTK_COMBO_BOX(compare_run1_drive_combo)) < 0) {
-        gtk_combo_box_set_active(GTK_COMBO_BOX(compare_run1_drive_combo), 0);
-    }
-    if (gtk_combo_box_get_active(GTK_COMBO_BOX(compare_run2_drive_combo)) < 0) {
-        gtk_combo_box_set_active(GTK_COMBO_BOX(compare_run2_drive_combo), 0);
-    }
+void summary_refresh_databases() {
+    GPtrArray *files = list_database_files();
+    if (!files) return;
+    refill_database_combo(summary_db_combo, files, NULL, FALSE);
+    g_ptr_array_unref(files);
+}
+
+// Refilling a drive combo reloads its run list, so the selected run is restored afterwards
+static void compare_refill_side(GtkWidget *drive_combo, GtkWidget *run_combo, GPtrArray *files) {
+    char *run_id = g_strdup(gtk_combo_box_get_active_id(GTK_COMBO_BOX(run_combo)));
+    refill_database_combo(drive_combo, files, NULL, TRUE);
+    if (run_id) gtk_combo_box_set_active_id(GTK_COMBO_BOX(run_combo), run_id);
+    g_free(run_id);
+}
+
+void compare_refresh_databases() {
+    GPtrArray *files = list_database_files();
+    if (!files) return;
+    compare_refill_side(compare_run1_drive_combo, compare_run1_run_combo, files);
+    compare_refill_side(compare_run2_drive_combo, compare_run2_run_combo, files);
+    g_ptr_array_unref(files);
+}
+
+void refresh_all_database_combos() {
+    locator_refresh_databases();
+    dupe_refresh_databases();
+    summary_refresh_databases();
+    compare_refresh_databases();
 }
 
 void activate(GtkApplication *app, gpointer user_data) {
