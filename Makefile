@@ -28,7 +28,8 @@ install:
 	@echo "Installing File Tracker Unified to /Applications..."
 	@if [ -d "File Tracker Unified.app" ]; then \
 		echo "Installing File Tracker Unified.app..."; \
-		cp -r "File Tracker Unified.app" /Applications/; \
+		rm -rf "/Applications/File Tracker Unified.app"; \
+		cp -R "File Tracker Unified.app" /Applications/; \
 		echo ""; \
 		echo "Installation complete!"; \
 		echo "File Tracker Unified is now available in your Applications folder."; \

@@ -2174,6 +2174,7 @@ typedef struct {
     GThreadPool *pool;
     GMutex lock;  // guards db, counters and log_buffer while workers are running
     char drive_error[512];  // set when the drive's drives.db entry could not be added or updated
+    char open_error[512];   // set when the scan path itself could not be opened
 } ScannerContext;
 
 // Most files queued for the workers before the directory walk pauses
@@ -2492,7 +2493,20 @@ void scanner_scan_directory(ScannerContext *ctx, const char *dirpath) {
     if (ctx->should_stop) return;
 
     DIR *dir = opendir(dirpath);
-    if (!dir) return;
+    if (!dir) {
+        // Record unreadable directories (e.g. macOS denied access to the volume) as errors
+        // rather than silently scanning nothing
+        int err = errno;
+        g_mutex_lock(&ctx->lock);
+        ctx->errors++;
+        scanner_log_message(ctx, "ERROR", dirpath, "", 0, 0);
+        if (strcmp(dirpath, ctx->scan_path) == 0) {
+            snprintf(ctx->open_error, sizeof(ctx->open_error), "%s", strerror(err));
+        }
+        g_mutex_unlock(&ctx->lock);
+        g_idle_add(scanner_update_progress, ctx);
+        return;
+    }
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
@@ -2652,6 +2666,15 @@ gboolean scanner_scan_completed(gpointer data) {
              ctx->num_workers,
              ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->ignored, ctx->errors,
              ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors);
+    if (ctx->open_error[0] && len >= 0 && (size_t)len < sizeof(results)) {
+        len += snprintf(results + len, sizeof(results) - len,
+                 "\n\nError: could not read %s (%s). No files were scanned.%s",
+                 ctx->scan_path, ctx->open_error,
+                 strncmp(ctx->scan_path, "/Volumes/", 9) == 0
+                     ? "\nmacOS may have denied access: allow File Tracker Unified under System Settings > "
+                       "Privacy & Security > Files and Folders > Removable Volumes, then scan again."
+                     : "");
+    }
     if (ctx->drive_error[0] && len >= 0 && (size_t)len < sizeof(results)) {
         snprintf(results + len, sizeof(results) - len,
                  "\n\nWarning: the scan results were saved, but the drive's entry in the Drives tab "

@@ -8,6 +8,9 @@ create_app_bundle() {
 
     echo "Creating ${APP_NAME}.app..."
 
+    # Start from an empty bundle so files from earlier builds don't linger
+    rm -rf "${APP_NAME}.app"
+
     # Create bundle structure
     mkdir -p "${APP_NAME}.app/Contents/MacOS"
     mkdir -p "${APP_NAME}.app/Contents/Resources"
