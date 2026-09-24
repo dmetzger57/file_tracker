@@ -42,6 +42,20 @@ void get_timestamp(char *buffer, size_t size) {
     strftime(buffer, size, "%Y-%m-%d %H:%M:%S", t);
 }
 
+// Formats n with ',' thousands separators (e.g. 1,234,567) regardless of the process locale
+static const char *format_count(long long n, char *buffer, size_t buf_size) {
+    char digits[32];
+    int len = snprintf(digits, sizeof(digits), "%lld", n < 0 ? -n : n);
+    size_t pos = 0;
+    if (n < 0 && pos + 1 < buf_size) buffer[pos++] = '-';
+    for (int i = 0; i < len && pos + 1 < buf_size; i++) {
+        if (i > 0 && (len - i) % 3 == 0 && pos + 1 < buf_size) buffer[pos++] = ',';
+        if (pos + 1 < buf_size) buffer[pos++] = digits[i];
+    }
+    buffer[pos] = '\0';
+    return buffer;
+}
+
 void format_size(long long size, char *buffer, size_t buf_size) {
     if (size < 1024) {
         snprintf(buffer, buf_size, "%lld B", size);
@@ -2220,11 +2234,13 @@ gboolean scanner_update_progress(gpointer data) {
         gtk_progress_bar_set_fraction(scanner_progress_bar, (double)processed / ctx->total_files);
     }
 
-    char status[512];
+    char status[512], n[8][32];
     snprintf(status, sizeof(status),
-             "Processed: %d/%d | Unch: %d | Chg: %d | New: %d | Miss: %d | Ign: %d | Err: %d",
-             processed, ctx->total_files, ctx->unchanged, ctx->changed,
-             ctx->new_files, ctx->missing, ctx->ignored, ctx->errors);
+             "Processed: %s/%s | Unch: %s | Chg: %s | New: %s | Miss: %s | Ign: %s | Err: %s",
+             format_count(processed, n[0], sizeof(n[0])), format_count(ctx->total_files, n[1], sizeof(n[1])),
+             format_count(ctx->unchanged, n[2], sizeof(n[2])), format_count(ctx->changed, n[3], sizeof(n[3])),
+             format_count(ctx->new_files, n[4], sizeof(n[4])), format_count(ctx->missing, n[5], sizeof(n[5])),
+             format_count(ctx->ignored, n[6], sizeof(n[6])), format_count(ctx->errors, n[7], sizeof(n[7])));
     gtk_label_set_text(GTK_LABEL(scanner_status_label), status);
     return G_SOURCE_REMOVE;
 }
@@ -2655,17 +2671,20 @@ gboolean scanner_scan_completed(gpointer data) {
     gtk_widget_set_sensitive(scanner_workers_spin, TRUE);
     gtk_progress_bar_set_fraction(scanner_progress_bar, 1.0);
 
-    char results[3072];
+    char results[3072], n[7][32];
     int len = snprintf(results, sizeof(results),
              "Scan Complete!\n\nPath: %s\nDatabase: %s\nMode: %s\nChecksum: %s\nWorkers: %d\n\n"
-             "Unchanged: %'d\nChanged: %'d\nNew: %'d\nMissing: %'d\nIgnored: %'d\nErrors: %'d\n\n"
-             "Total: %'d files",
+             "Unchanged: %s\nChanged: %s\nNew: %s\nMissing: %s\nIgnored: %s\nErrors: %s\n\n"
+             "Total: %s files",
              ctx->scan_path, ctx->db_name,
              ctx->update_mode ? "Update" : "Read-only",
              ctx->enable_checksum ? "Enabled" : "Disabled",
              ctx->num_workers,
-             ctx->unchanged, ctx->changed, ctx->new_files, ctx->missing, ctx->ignored, ctx->errors,
-             ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors);
+             format_count(ctx->unchanged, n[0], sizeof(n[0])), format_count(ctx->changed, n[1], sizeof(n[1])),
+             format_count(ctx->new_files, n[2], sizeof(n[2])), format_count(ctx->missing, n[3], sizeof(n[3])),
+             format_count(ctx->ignored, n[4], sizeof(n[4])), format_count(ctx->errors, n[5], sizeof(n[5])),
+             format_count((long long)ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors,
+                          n[6], sizeof(n[6])));
     if (ctx->open_error[0] && len >= 0 && (size_t)len < sizeof(results)) {
         len += snprintf(results + len, sizeof(results) - len,
                  "\n\nError: could not read %s (%s). No files were scanned.%s",
