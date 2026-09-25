@@ -593,6 +593,16 @@ GtkWidget *create_locator_tab() {
     return box;
 }
 
+// Writes s as a quoted CSV field, doubling any embedded quotes
+static void csv_field(FILE *fp, const char *s) {
+    fputc('"', fp);
+    for (; s && *s; s++) {
+        if (*s == '"') fputc('"', fp);
+        fputc(*s, fp);
+    }
+    fputc('"', fp);
+}
+
 // ============================================================================
 // TAB 2: DRIVES MANAGER
 // ============================================================================
@@ -716,6 +726,7 @@ void drives_refresh_list() {
                               4, sqlite3_column_text(stmt, 4),
                               5, checksum_scan,
                               6, (gint64)file_count,
+                              7, (gint64)available,
                               -1);
         }
         sqlite3_finalize(stmt);
@@ -1124,6 +1135,82 @@ void on_drives_rename_clicked(GtkButton *button, gpointer user_data) {
     gtk_editable_select_region(GTK_EDITABLE(rd->entry), 0, -1);
 }
 
+// ---- Export: saves the drives table, in its current sort order, as CSV ----
+
+static void on_drives_export_response(GObject *source, GAsyncResult *result, gpointer user_data) {
+    (void)user_data;
+
+    GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, NULL);
+    if (!file) return;
+
+    char *path = g_file_get_path(file);
+    g_object_unref(file);
+    if (!path) return;
+
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        char msg[MAX_PATH + 64];
+        snprintf(msg, sizeof(msg), "Could not create %s: %s", path, strerror(errno));
+        drives_show_message(msg);
+        g_free(path);
+        return;
+    }
+
+    fprintf(fp, "ID,Name,Location,Available,Available (bytes),Description,Last Checksum Scan,Files (Last Run)\n");
+
+    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(drives_tree));
+    GtkTreeIter iter;
+    long count = 0;
+    for (gboolean valid = gtk_tree_model_get_iter_first(model, &iter); valid;
+         valid = gtk_tree_model_iter_next(model, &iter)) {
+        gint64 id, file_count, available;
+        char *name, *location, *avail_str, *desc, *checksum_scan;
+        gtk_tree_model_get(model, &iter,
+                           0, &id, 1, &name, 2, &location, 3, &avail_str,
+                           4, &desc, 5, &checksum_scan, 6, &file_count, 7, &available, -1);
+
+        fprintf(fp, "%lld,", (long long)id);
+        csv_field(fp, name);
+        fputc(',', fp);
+        csv_field(fp, location);
+        fputc(',', fp);
+        csv_field(fp, avail_str);
+        fprintf(fp, ",%lld,", (long long)available);
+        csv_field(fp, desc);
+        fputc(',', fp);
+        csv_field(fp, checksum_scan);
+        fputc(',', fp);
+        if (file_count >= 0) fprintf(fp, "%lld", (long long)file_count);
+        fputc('\n', fp);
+        count++;
+
+        g_free(name);
+        g_free(location);
+        g_free(avail_str);
+        g_free(desc);
+        g_free(checksum_scan);
+    }
+
+    int write_failed = ferror(fp);
+    if (fclose(fp) != 0) write_failed = 1;
+
+    char msg[MAX_PATH + 64];
+    if (write_failed) snprintf(msg, sizeof(msg), "Error writing %s", path);
+    else snprintf(msg, sizeof(msg), "Exported %ld drive%s to %s", count, count == 1 ? "" : "s", path);
+    drives_show_message(msg);
+    g_free(path);
+}
+
+void on_drives_export_clicked(GtkButton *button, gpointer user_data) {
+    (void)button; (void)user_data;
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Export Drives to CSV");
+    gtk_file_dialog_set_initial_name(dialog, "drives.csv");
+    gtk_file_dialog_save(dialog, GTK_WINDOW(window), NULL, on_drives_export_response, NULL);
+    g_object_unref(dialog);
+}
+
 GtkWidget *create_drives_tab() {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(box, 16);
@@ -1164,6 +1251,9 @@ GtkWidget *create_drives_tab() {
     GtkWidget *update_mounted_btn = gtk_button_new_with_label("Update Mounted Drives");
     g_signal_connect(update_mounted_btn, "clicked", G_CALLBACK(on_drives_update_mounted_clicked), NULL);
 
+    GtkWidget *export_btn = gtk_button_new_with_label("Export to CSV");
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_drives_export_clicked), NULL);
+
     gtk_box_append(GTK_BOX(add_box), name_label);
     gtk_box_append(GTK_BOX(add_box), drives_name_entry);
     gtk_box_append(GTK_BOX(add_box), location_label);
@@ -1174,6 +1264,7 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(add_box), del_btn);
     gtk_box_append(GTK_BOX(add_box), refresh_btn);
     gtk_box_append(GTK_BOX(add_box), update_mounted_btn);
+    gtk_box_append(GTK_BOX(add_box), export_btn);
     gtk_box_append(GTK_BOX(box), add_box);
 
     // Description
@@ -1189,8 +1280,10 @@ GtkWidget *create_drives_tab() {
     gtk_box_append(GTK_BOX(box), desc_box);
 
     // Drives list
-    GtkListStore *store = gtk_list_store_new(7, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
-                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT64);
+    // Column 7 (not displayed) holds the available bytes so the Available column sorts numerically
+    GtkListStore *store = gtk_list_store_new(8, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
+                                             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT64,
+                                             G_TYPE_INT64);
     drives_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
@@ -1200,10 +1293,7 @@ GtkWidget *create_drives_tab() {
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
         if (i == 4) gtk_tree_view_column_set_expand(column, TRUE);
-        // Enable sorting on Name, Location and Last Checksum Scan columns
-        if (i == 1 || i == 2 || i == 5) {
-            gtk_tree_view_column_set_sort_column_id(column, i);
-        }
+        gtk_tree_view_column_set_sort_column_id(column, i == 3 ? 7 : i);
         gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), column);
     }
 
@@ -1713,15 +1803,6 @@ static void logs_alert(const char *msg) {
     g_object_unref(alert);
 }
 
-static void logs_csv_field(FILE *fp, const char *s) {
-    fputc('"', fp);
-    for (; s && *s; s++) {
-        if (*s == '"') fputc('"', fp);
-        fputc(*s, fp);
-    }
-    fputc('"', fp);
-}
-
 static void on_logs_export_response(GObject *source, GAsyncResult *result, gpointer user_data) {
     (void)user_data;
 
@@ -1772,9 +1853,9 @@ static void on_logs_export_response(GObject *source, GAsyncResult *result, gpoin
     fprintf(fp, "Status,Full Path\n");
     long count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        logs_csv_field(fp, (const char *)sqlite3_column_text(stmt, 0));
+        csv_field(fp, (const char *)sqlite3_column_text(stmt, 0));
         fputc(',', fp);
-        logs_csv_field(fp, (const char *)sqlite3_column_text(stmt, 1));
+        csv_field(fp, (const char *)sqlite3_column_text(stmt, 1));
         fputc('\n', fp);
         count++;
     }

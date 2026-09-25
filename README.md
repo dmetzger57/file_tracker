@@ -98,13 +98,14 @@ Tracks the drives you have databases for, in `~/db/FileTracker/drives.db`.
 | Last Checksum Scan | Date of the most recent run with checksum verification ("Never" if none, "No database" if the drive has no database file) |
 | Files (Last Run) | Files in the most recent run: unchanged + changed + new + missing + errors, the same total the Summary tab shows (ignored files are not counted) |
 
-Name, Location, Last Checksum Scan and Files (Last Run) are sortable.
+All columns are sortable; Available and Files (Last Run) sort numerically.
 
 - **Add / Update:** register a drive, or save changes to the selected drive's location and description.
 - **Rename:** rename the drive and its database file, keeping all scan history. Afterwards, scan with the new database name.
 - **Delete:** remove only the drive entry (keeping its database), or also permanently delete its database file.
 - **Refresh:** reload the list.
 - **Update Mounted Drives:** refresh capacity and free space for every tracked drive that is currently mounted.
+- **Export to CSV:** save the table, in its current sort order, to a file you choose: `ID,Name,Location,Available,Available (bytes),Description,Last Checksum Scan,Files (Last Run)`. Files (Last Run) is written without thousands separators and is empty when unknown.
 
 ### File Locator
 
