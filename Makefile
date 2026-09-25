@@ -6,6 +6,9 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S), Darwin)
     CFLAGS += -I/opt/homebrew/opt/openssl@3/include -I/opt/homebrew/opt/sqlite/include
     LDFLAGS += -L/opt/homebrew/opt/openssl@3/lib -L/opt/homebrew/opt/sqlite/lib
+    # Dock menu ("New Window") for the unified app
+    UNIFIED_MACOS_SRC = macos_dock_menu.m
+    UNIFIED_MACOS_LIBS = -framework Cocoa
 endif
 
 # Common Libraries
@@ -18,8 +21,8 @@ all: file_tracker_unified file_tracker
 file_tracker: file_tracker.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o file_tracker file_tracker.c -lssl -lcrypto -lsqlite3
 
-file_tracker_unified: file_tracker_unified.c
-	$(CC) $(CFLAGS) $(LDFLAGS) `pkg-config --cflags --libs gtk4` -o file_tracker_unified file_tracker_unified.c -lssl -lcrypto -lsqlite3
+file_tracker_unified: file_tracker_unified.c $(UNIFIED_MACOS_SRC)
+	$(CC) $(CFLAGS) $(LDFLAGS) `pkg-config --cflags --libs gtk4` -o file_tracker_unified file_tracker_unified.c $(UNIFIED_MACOS_SRC) -lssl -lcrypto -lsqlite3 $(UNIFIED_MACOS_LIBS)
 
 clean:
 	rm -f file_tracker_unified file_tracker *.o

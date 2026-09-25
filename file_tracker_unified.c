@@ -13,6 +13,12 @@
 #include <unistd.h>
 #include <pwd.h>
 #include <locale.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+
+// macos_dock_menu.m
+void macos_install_dock_menu(const char *title, void (*callback)(void));
+#endif
 
 #define HASH_SIZE 65
 #define MAX_PATH 4096
@@ -4237,6 +4243,84 @@ void refresh_all_database_combos() {
     compare_refresh_databases();
 }
 
+// ============================================================================
+// NEW WINDOW
+// ============================================================================
+
+// Each window is its own instance of the application (separate process), so
+// windows have fully independent tab state and can run scans side by side
+static void launch_new_instance(void) {
+    char exe[MAX_PATH] = "";
+#ifdef __APPLE__
+    char raw[MAX_PATH];
+    uint32_t size = sizeof(raw);
+    if (_NSGetExecutablePath(raw, &size) != 0 || !realpath(raw, exe)) exe[0] = '\0';
+#else
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    exe[n > 0 ? n : 0] = '\0';
+#endif
+
+    GError *error = NULL;
+    gboolean ok = FALSE;
+    if (exe[0]) {
+        // Inside an app bundle, ask Launch Services for a new instance of the
+        // bundle so it is activated and brought to the front
+        char *bundle_end = strstr(exe, ".app/Contents/MacOS/");
+        if (bundle_end) {
+            bundle_end[4] = '\0';
+            char *argv[] = { "/usr/bin/open", "-n", exe, NULL };
+            ok = g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, &error);
+        } else {
+            char *argv[] = { exe, NULL };
+            ok = g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, &error);
+        }
+    }
+
+    if (!ok) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Could not open a new window");
+        gtk_alert_dialog_set_detail(alert, error ? error->message : "Could not find the application executable");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        g_object_unref(alert);
+    }
+    g_clear_error(&error);
+}
+
+static void on_new_window_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter; (void)user_data;
+    launch_new_instance();
+}
+
+static void on_quit_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter;
+    g_application_quit(G_APPLICATION(user_data));
+}
+
+void startup(GtkApplication *app, gpointer user_data) {
+    (void)user_data;
+
+    static const GActionEntry app_actions[] = {
+        { .name = "new-window", .activate = on_new_window_action },
+        { .name = "quit",       .activate = on_quit_action },
+    };
+    g_action_map_add_action_entries(G_ACTION_MAP(app), app_actions, G_N_ELEMENTS(app_actions), app);
+    gtk_application_set_accels_for_action(app, "app.new-window", (const char *[]){ "<Primary>n", NULL });
+    gtk_application_set_accels_for_action(app, "app.quit", (const char *[]){ "<Primary>q", NULL });
+
+    // File menu (in the macOS menu bar; inside the window elsewhere)
+    GMenu *file_menu = g_menu_new();
+    g_menu_append(file_menu, "New Window", "app.new-window");
+    GMenu *menubar = g_menu_new();
+    g_menu_append_submenu(menubar, "File", G_MENU_MODEL(file_menu));
+    gtk_application_set_menubar(app, G_MENU_MODEL(menubar));
+    g_object_unref(file_menu);
+    g_object_unref(menubar);
+
+#ifdef __APPLE__
+    // Right-click the Dock icon → New Window
+    macos_install_dock_menu("New Window", launch_new_instance);
+#endif
+}
+
 void activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
 
@@ -4296,7 +4380,10 @@ int main(int argc, char *argv[]) {
 
     load_ignore_list();
 
-    GtkApplication *app = gtk_application_new("com.filetracker.unified", G_APPLICATION_DEFAULT_FLAGS);
+    // NON_UNIQUE: every launch runs its own window rather than handing off
+    // to an already-running instance
+    GtkApplication *app = gtk_application_new("com.filetracker.unified", G_APPLICATION_NON_UNIQUE);
+    g_signal_connect(app, "startup", G_CALLBACK(startup), NULL);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
 
     int status = g_application_run(G_APPLICATION(app), argc, argv);

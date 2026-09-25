@@ -73,6 +73,8 @@ gcc -Wall -Wextra -O2 \
   - Drives tab: Drive metadata tracking with auto-capacity detection
   - Locator tab: Search by filename across databases, checksum comparison
   - Compare tab: Compare two scan runs to see changes
+  - New Window (File menu ⌘N, Dock menu): launches another instance as a separate process (`launch_new_instance()`; `open -n` inside the .app bundle). UI state lives in globals, so one window per process; the app uses `G_APPLICATION_NON_UNIQUE`
+- `macos_dock_menu.m`: Adds `applicationDockMenu:` to GTK's NSApp delegate at runtime (macOS only; linked with `-framework Cocoa`)
 
 ### Scripts
 - `create_app_bundles.sh`: Create macOS app bundle from binary

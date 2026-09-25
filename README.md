@@ -51,6 +51,12 @@ With *Update Database* on (`-u` on the command line), changed files have their s
 
 The tabs appear in this order: File Locator, DupeFinder, Drives, Summary, Logs, Compare, File Scanner, About.
 
+### Multiple Windows
+
+Open another window with **File → New Window** (⌘N) or by right-clicking the Dock icon and choosing **New Window**. Each window is a separate copy of the application with its own tabs, so you can, for example, scan one drive while browsing logs or scanning another drive in a second window. Each copy has its own Dock icon. ⌘Q or closing the window quits only that copy.
+
+Avoid scanning the same database from two windows at once: the second scan waits on the first's database lock and the results would interleave.
+
 ### File Scanner
 
 Scans one directory tree and saves the results as a run.
@@ -229,6 +235,7 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 |------|----------|
 | `file_tracker_unified.c` | Desktop application |
 | `file_tracker.c` | Command-line scanner |
+| `macos_dock_menu.m` | macOS Dock menu ("New Window") for the desktop application |
 | `Makefile`, `create_app_bundles.sh`, `icon/` | Build and `.app` packaging |
 | `migrate_*.sh`, `migrate_*.sql` | Database migrations for old databases |
 | `launcher.c`, `launcher.m` | Legacy `.app` launchers. Not used: the bundle now runs the real binary directly |
