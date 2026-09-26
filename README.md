@@ -53,7 +53,13 @@ The tabs appear in this order: File Locator, DupeFinder, Drives, Summary, Logs, 
 
 ### Multiple Windows
 
-Open another window with **File → New Window** (⌘N) or by right-clicking the Dock icon and choosing **New Window**. Each window is a separate copy of the application with its own tabs, so you can, for example, scan one drive while browsing logs or scanning another drive in a second window. Each copy has its own Dock icon. ⌘Q or closing the window quits only that copy.
+Open another window with **File → New Window** (⌘N) or by right-clicking the Dock icon and choosing **New Window**. All windows belong to one running application with a single Dock icon, like Terminal. Each window has its own tabs and selections, so you can, for example, scan one drive while browsing logs or scanning another drive in a second window.
+
+- Windows after the first are numbered (*File Tracker Unified 2*, *3*, ...), and a window that is scanning shows the drive in its title (*File Tracker Unified 2 — Scanning MyDrive*).
+- Right-clicking the Dock icon lists the open windows; choose one to bring it to the front.
+- **File → Close Window** (⌘W) closes one window. If it is scanning, you are asked first: *Stop Scan and Close* stops the scan, saves the files checked so far as a run, and then closes the window.
+- ⌘Q closes every window (asking about any running scans) and quits.
+- Deleting or renaming a drive on the Drives tab updates the database lists in every window.
 
 Avoid scanning the same database from two windows at once: the second scan waits on the first's database lock and the results would interleave.
 

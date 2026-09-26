@@ -73,7 +73,7 @@ gcc -Wall -Wextra -O2 \
   - Drives tab: Drive metadata tracking with auto-capacity detection
   - Locator tab: Search by filename across databases, checksum comparison
   - Compare tab: Compare two scan runs to see changes
-  - New Window (File menu ⌘N, Dock menu): launches another instance as a separate process (`launch_new_instance()`; `open -n` inside the .app bundle). UI state lives in globals, so one window per process; the app uses `G_APPLICATION_NON_UNIQUE`
+  - Multiple windows in one process (File > New Window ⌘N, Dock menu). All per-window widgets and state live in `AppWindow` (`w->...`); open windows are in `app_windows`. Callbacks receive the `AppWindow *` as `user_data` (or via a request struct such as `DriveDeleteRequest`/`RenameDialog`; `ScannerContext.win` for scanner idle callbacks)
 - `macos_dock_menu.m`: Adds `applicationDockMenu:` to GTK's NSApp delegate at runtime (macOS only; linked with `-framework Cocoa`)
 
 ### Scripts
@@ -81,6 +81,12 @@ gcc -Wall -Wextra -O2 \
 - `migrate_add_*.sh`: Database schema migration scripts (idempotent)
 
 ## Code Conventions
+
+### Windows
+- Never add file-scope globals for UI or tab state: put them in `AppWindow` and pass `w` as `user_data` when connecting signals or starting async dialogs
+- Functions that need the window take `AppWindow *w` as their first parameter
+- A window with a running scan is not closed until the scan stops (`close-request` → prompt → `close_after_scan`); `app_window_detach()` disconnects the window's handlers before it is destroyed
+- `refresh_database_lists_everywhere()` refreshes every window after a database is deleted or renamed
 
 ### Multi-threading
 - Scanner tab scans a single path. "Start Scan" starts one `GThread` (`scanner_thread_func`) that walks the directory tree
@@ -193,6 +199,7 @@ Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via
 - [ ] Scanner tab: Update mode (Update Database enabled)
 - [ ] Scanner tab: With and without checksum verification
 - [ ] Scanner tab: Workers = 1 and Workers > 1 give identical counts
+- [ ] Multiple windows: New Window (menu + Dock), scans in two windows at once, Close Window during a scan, ⌘Q
 - [ ] Scanner tab: Missing/changed/new file detection
 - [ ] Summary tab: Run history and tabbed file lists
 - [ ] Logs tab: Filtering by status

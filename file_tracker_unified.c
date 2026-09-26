@@ -14,8 +14,6 @@
 #include <pwd.h>
 #include <locale.h>
 #ifdef __APPLE__
-#include <mach-o/dyld.h>
-
 // macos_dock_menu.m
 void macos_install_dock_menu(const char *title, void (*callback)(void));
 #endif
@@ -28,9 +26,118 @@ void macos_install_dock_menu(const char *title, void (*callback)(void));
 // GLOBAL UI AND STATE
 // ============================================================================
 
-GtkWidget *window;
-GtkWidget *main_notebook;
 char db_dir_path[MAX_PATH];
+
+typedef struct ScannerContext ScannerContext;
+
+// One main window. Every window has its own tabs and state, so several can be open at once
+// (File > New Window) - e.g. one scanning a drive while another browses logs.
+typedef struct {
+    GtkWidget *window;
+    GtkWidget *main_notebook;
+    int number;                   // 1 for the first window opened, 2 for the next, ...
+    gboolean close_prompt_open;   // "A scan is running" prompt is showing
+    gboolean close_after_scan;    // close was confirmed while a scan was running
+
+    // File Locator
+    GtkWidget *locator_search_entry;
+    GtkWidget *locator_db_combo;
+    GtkWidget *locator_partial_check;
+    GtkWidget *locator_mode_combo;   // 0 = File Name, 1 = Checksum
+    GtkWidget *locator_results_tree;
+    GtkWidget *locator_status_label;
+
+    // Drives
+    GtkWidget *drives_tree;
+    GtkWidget *drives_name_entry;
+    GtkWidget *drives_location_entry;
+    GtkWidget *drives_desc_text;
+    sqlite3_int64 selected_drive_id;
+
+    // Summary
+    GtkWidget *summary_db_combo;
+    GtkWidget *summary_tree;
+    GtkWidget *summary_details_text;
+
+    // Logs
+    GtkWidget *logs_db_combo;
+    GtkWidget *logs_runs_list;
+    GtkWidget *logs_run_info_text;
+    GtkWidget *logs_note_text;
+    GtkWidget *logs_text;
+    GtkWidget *logs_filter_new_check;
+    GtkWidget *logs_filter_changed_check;
+    GtkWidget *logs_filter_missing_check;
+    GtkWidget *logs_filter_unchanged_check;
+    GtkWidget *logs_filter_ignored_check;
+    GtkWidget *logs_filter_errors_check;
+    GtkWidget *logs_filter_all_check;
+    char logs_current_db_path[MAX_PATH];
+    sqlite3_int64 logs_selected_run_id;
+
+    // File Scanner
+    GtkWidget *scanner_volumes_list;
+    GtkWidget *scanner_path_entry;
+    GtkWidget *scanner_db_entry;
+    GtkWidget *scanner_checksum_check;
+    GtkWidget *scanner_update_check;
+    GtkWidget *scanner_workers_spin;
+    GtkWidget *scanner_note_text;
+    GtkWidget *scanner_start_button;
+    GtkWidget *scanner_stop_button;
+    GtkProgressBar *scanner_progress_bar;
+    GtkWidget *scanner_status_label;
+    GtkWidget *scanner_current_file_label;
+    GtkWidget *scanner_results_text;
+    ScannerContext *current_scanner_scan;  // NULL when no scan is running
+
+    // Compare
+    GtkWidget *compare_run1_drive_combo;
+    GtkWidget *compare_run1_run_combo;
+    GtkWidget *compare_run2_drive_combo;
+    GtkWidget *compare_run2_run_combo;
+    GtkWidget *compare_results_tree;
+    GtkWidget *compare_filter_only_run1;
+    GtkWidget *compare_filter_only_run2;
+    GtkWidget *compare_filter_different;
+    GtkWidget *compare_filter_missing_run1;
+    GtkWidget *compare_filter_missing_run2;
+    GtkWidget *compare_filter_all_run1;
+    GtkWidget *compare_filter_all_run2;
+    GtkWidget *compare_filter_all_diffs;
+    GtkWidget *compare_filter_mtime_diff;
+    GtkWidget *compare_filter_size_diff;
+    char compare_run1_db_path[MAX_PATH];
+    char compare_run2_db_path[MAX_PATH];
+    sqlite3_int64 compare_run1_id;
+    sqlite3_int64 compare_run2_id;
+
+    // DupeFinder
+    GtkWidget *dupe_mode_combo;       // DUPE_MODE_*
+    GtkWidget *dupe_search_by_label;
+    GtkWidget *dupe_search_by_combo;  // 0 = File Name, 1 = Checksum
+    GtkWidget *dupe_search_entry;
+    GtkWidget *dupe_search_filler;    // Takes the entry's space when the entry is hidden
+    GtkWidget *dupe_db_combo;         // Single database or All (search mode)
+    GtkWidget *dupe_db_multi_button;  // Popover of database checkboxes (duplicate-group modes)
+    GtkWidget *dupe_db_all_check;
+    GtkWidget *dupe_db_check_box;     // Holds one check button per database
+    GtkWidget *dupe_results_tree;
+    GtkWidget *dupe_status_label;
+} AppWindow;
+
+// Open main windows, oldest first
+static GList *app_windows = NULL;
+
+// Window titles are numbered after the first window so they can be told apart in the Dock
+// menu; activity (e.g. "Scanning MyDrive") is appended when not NULL
+static void app_window_set_title(AppWindow *w, const char *activity) {
+    char title[512];
+    int len = w->number > 1 ? snprintf(title, sizeof(title), "File Tracker Unified %d", w->number)
+                            : snprintf(title, sizeof(title), "File Tracker Unified");
+    if (activity) snprintf(title + len, sizeof(title) - len, " \u2014 %s", activity);
+    gtk_window_set_title(GTK_WINDOW(w->window), title);
+}
 
 // Ignore list for scanner
 char *ignore_list[MAX_IGNORES];
@@ -379,24 +486,20 @@ int update_all_mounted_drives(int *failed, char *err, size_t err_size) {
     return updated_count;
 }
 
-void refresh_all_database_combos();
-void drives_refresh_list();
-void logs_refresh_databases();
-void locator_refresh_databases();
-void dupe_refresh_databases();
-void summary_refresh_databases();
-void compare_refresh_databases();
+void refresh_all_database_combos(AppWindow *w);
+void drives_refresh_list(AppWindow *w);
+void logs_refresh_databases(AppWindow *w);
+void locator_refresh_databases(AppWindow *w);
+void dupe_refresh_databases(AppWindow *w);
+void summary_refresh_databases(AppWindow *w);
+void compare_refresh_databases(AppWindow *w);
+void refresh_database_lists_everywhere(void);
+static void app_window_detach(AppWindow *w);
 
 // ============================================================================
 // TAB 1: FILE LOCATOR (Simplified - most commonly used)
 // ============================================================================
 
-GtkWidget *locator_search_entry;
-GtkWidget *locator_db_combo;
-GtkWidget *locator_partial_check;
-GtkWidget *locator_mode_combo;   // 0 = File Name, 1 = Checksum
-GtkWidget *locator_results_tree;
-GtkWidget *locator_status_label;
 
 void locator_search_database(const char *dbname, const char *db_path, const char *filename,
                               int by_checksum, int partial, GtkListStore *store, char *first_checksum, int *count) {
@@ -468,28 +571,29 @@ void locator_search_database(const char *dbname, const char *db_path, const char
 }
 
 void on_locator_search_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    int by_checksum = gtk_combo_box_get_active(GTK_COMBO_BOX(locator_mode_combo)) == 1;
+    int by_checksum = gtk_combo_box_get_active(GTK_COMBO_BOX(w->locator_mode_combo)) == 1;
     char search_text[MAX_PATH];
     snprintf(search_text, sizeof(search_text), "%s",
-             gtk_editable_get_text(GTK_EDITABLE(locator_search_entry)));
+             gtk_editable_get_text(GTK_EDITABLE(w->locator_search_entry)));
     if (by_checksum) g_strstrip(search_text);
     if (strlen(search_text) == 0) {
-        gtk_label_set_text(GTK_LABEL(locator_status_label),
+        gtk_label_set_text(GTK_LABEL(w->locator_status_label),
                            by_checksum ? "Enter a checksum to search" : "Enter a filename to search");
         return;
     }
 
-    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(locator_results_tree)));
+    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->locator_results_tree)));
     gtk_list_store_clear(store);
 
     char first_checksum[HASH_SIZE] = "";
     int count = 0;
-    int partial = gtk_check_button_get_active(GTK_CHECK_BUTTON(locator_partial_check));
-    char *selected_db = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(locator_db_combo));
+    int partial = gtk_check_button_get_active(GTK_CHECK_BUTTON(w->locator_partial_check));
+    char *selected_db = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->locator_db_combo));
 
-    gtk_label_set_text(GTK_LABEL(locator_status_label), "Searching...");
+    gtk_label_set_text(GTK_LABEL(w->locator_status_label), "Searching...");
 
     if (selected_db && strcmp(selected_db, "All Databases") == 0) {
         DIR *dir = opendir(db_dir_path);
@@ -515,17 +619,17 @@ void on_locator_search_clicked(GtkButton *button, gpointer user_data) {
 
     char status[256];
     snprintf(status, sizeof(status), "Found %d file%s", count, count == 1 ? "" : "s");
-    gtk_label_set_text(GTK_LABEL(locator_status_label), status);
+    gtk_label_set_text(GTK_LABEL(w->locator_status_label), status);
 }
 
 static void on_locator_mode_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
     int by_checksum = gtk_combo_box_get_active(combo) == 1;
-    gtk_entry_set_placeholder_text(GTK_ENTRY(locator_search_entry),
+    gtk_entry_set_placeholder_text(GTK_ENTRY(w->locator_search_entry),
                                    by_checksum ? "Enter SHA-256 checksum..." : "Enter filename...");
 }
 
-GtkWidget *create_locator_tab() {
+GtkWidget *create_locator_tab(AppWindow *w) {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(box, 16);
     gtk_widget_set_margin_end(box, 16);
@@ -538,34 +642,34 @@ GtkWidget *create_locator_tab() {
     GtkWidget *label = gtk_label_new("Search by:");
     gtk_widget_set_size_request(label, 70, -1);
 
-    locator_mode_combo = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_mode_combo), "File Name");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(locator_mode_combo), "Checksum");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(locator_mode_combo), 0);
-    g_signal_connect(locator_mode_combo, "changed", G_CALLBACK(on_locator_mode_changed), NULL);
+    w->locator_mode_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->locator_mode_combo), "File Name");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->locator_mode_combo), "Checksum");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(w->locator_mode_combo), 0);
+    g_signal_connect(w->locator_mode_combo, "changed", G_CALLBACK(on_locator_mode_changed), w);
 
-    locator_search_entry = gtk_entry_new();
-    gtk_widget_set_hexpand(locator_search_entry, TRUE);
-    gtk_entry_set_placeholder_text(GTK_ENTRY(locator_search_entry), "Enter filename...");
+    w->locator_search_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(w->locator_search_entry, TRUE);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(w->locator_search_entry), "Enter filename...");
 
-    locator_partial_check = gtk_check_button_new_with_label("Partial");
+    w->locator_partial_check = gtk_check_button_new_with_label("Partial");
 
-    locator_db_combo = gtk_combo_box_text_new();
-    gtk_widget_set_size_request(locator_db_combo, 200, -1);
+    w->locator_db_combo = gtk_combo_box_text_new();
+    gtk_widget_set_size_request(w->locator_db_combo, 200, -1);
 
     GtkWidget *search_btn = gtk_button_new_with_label("Search");
     gtk_widget_add_css_class(search_btn, "suggested-action");
-    g_signal_connect(search_btn, "clicked", G_CALLBACK(on_locator_search_clicked), NULL);
+    g_signal_connect(search_btn, "clicked", G_CALLBACK(on_locator_search_clicked), w);
 
     gtk_box_append(GTK_BOX(search_box), label);
-    gtk_box_append(GTK_BOX(search_box), locator_mode_combo);
-    gtk_box_append(GTK_BOX(search_box), locator_search_entry);
-    gtk_box_append(GTK_BOX(search_box), locator_partial_check);
+    gtk_box_append(GTK_BOX(search_box), w->locator_mode_combo);
+    gtk_box_append(GTK_BOX(search_box), w->locator_search_entry);
+    gtk_box_append(GTK_BOX(search_box), w->locator_partial_check);
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
     gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list");
-    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)locator_refresh_databases), NULL);
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(locator_refresh_databases), w);
 
-    gtk_box_append(GTK_BOX(search_box), locator_db_combo);
+    gtk_box_append(GTK_BOX(search_box), w->locator_db_combo);
     gtk_box_append(GTK_BOX(search_box), search_btn);
     gtk_box_append(GTK_BOX(search_box), refresh_btn);
     gtk_box_append(GTK_BOX(box), search_box);
@@ -574,7 +678,7 @@ GtkWidget *create_locator_tab() {
     GtkListStore *store = gtk_list_store_new(7, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
                                              G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
                                              G_TYPE_STRING);
-    locator_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    w->locator_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
     const char *titles[] = {"Database", "Path", "Size", "Modified", "Owner", "✓", "Checksum"};
@@ -583,18 +687,18 @@ GtkWidget *create_locator_tab() {
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
         if (i == 1) gtk_tree_view_column_set_expand(column, TRUE);
-        gtk_tree_view_append_column(GTK_TREE_VIEW(locator_results_tree), column);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(w->locator_results_tree), column);
     }
 
     GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), locator_results_tree);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->locator_results_tree);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_box_append(GTK_BOX(box), scroll);
 
-    locator_status_label = gtk_label_new("Ready");
-    gtk_label_set_xalign(GTK_LABEL(locator_status_label), 0.0);
-    gtk_widget_add_css_class(locator_status_label, "dim-label");
-    gtk_box_append(GTK_BOX(box), locator_status_label);
+    w->locator_status_label = gtk_label_new("Ready");
+    gtk_label_set_xalign(GTK_LABEL(w->locator_status_label), 0.0);
+    gtk_widget_add_css_class(w->locator_status_label, "dim-label");
+    gtk_box_append(GTK_BOX(box), w->locator_status_label);
 
     return box;
 }
@@ -613,19 +717,15 @@ static void csv_field(FILE *fp, const char *s) {
 // TAB 2: DRIVES MANAGER
 // ============================================================================
 
-GtkWidget *drives_tree;
-GtkWidget *drives_name_entry;
-GtkWidget *drives_location_entry;
-GtkWidget *drives_desc_text;
-sqlite3_int64 selected_drive_id = -1;
 
 void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
     int failed;
     char err[512] = "";
     int count = update_all_mounted_drives(&failed, err, sizeof(err));
-    drives_refresh_list();
+    drives_refresh_list(w);
 
     char message[1024];
     if (failed > 0) {
@@ -642,7 +742,7 @@ void on_drives_update_mounted_clicked(GtkButton *button, gpointer user_data) {
     }
 
     GtkAlertDialog *alert = gtk_alert_dialog_new("%s", message);
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
     g_object_unref(alert);
 }
 
@@ -695,11 +795,11 @@ static void drives_files_cell_data(GtkTreeViewColumn *column, GtkCellRenderer *r
     g_object_set(renderer, "text", text, NULL);
 }
 
-void drives_refresh_list() {
+void drives_refresh_list(AppWindow *w) {
     char drives_db[MAX_PATH];
     snprintf(drives_db, sizeof(drives_db), "%s/drives.db", db_dir_path);
 
-    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(drives_tree)));
+    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->drives_tree)));
     gtk_list_store_clear(store);
 
     sqlite3 *db;
@@ -741,19 +841,20 @@ void drives_refresh_list() {
 }
 
 void on_drives_add_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    const char *name = gtk_editable_get_text(GTK_EDITABLE(drives_name_entry));
+    const char *name = gtk_editable_get_text(GTK_EDITABLE(w->drives_name_entry));
     if (strlen(name) == 0) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Please enter a drive name");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
 
-    const char *location = gtk_editable_get_text(GTK_EDITABLE(drives_location_entry));
+    const char *location = gtk_editable_get_text(GTK_EDITABLE(w->drives_location_entry));
 
-    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->drives_desc_text));
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(buffer, &start, &end);
     char *desc = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
@@ -792,27 +893,29 @@ void on_drives_add_clicked(GtkButton *button, gpointer user_data) {
     }
 
     g_free(desc);
-    gtk_editable_set_text(GTK_EDITABLE(drives_name_entry), "");
-    gtk_editable_set_text(GTK_EDITABLE(drives_location_entry), "");
+    gtk_editable_set_text(GTK_EDITABLE(w->drives_name_entry), "");
+    gtk_editable_set_text(GTK_EDITABLE(w->drives_location_entry), "");
     gtk_text_buffer_set_text(buffer, "", -1);
-    gtk_editable_set_editable(GTK_EDITABLE(drives_name_entry), TRUE);
-    selected_drive_id = -1;
-    drives_refresh_list();
+    gtk_editable_set_editable(GTK_EDITABLE(w->drives_name_entry), TRUE);
+    w->selected_drive_id = -1;
+    drives_refresh_list(w);
 }
 
-static void drives_show_message(const char *msg) {
+static void drives_show_message(AppWindow *w, const char *msg) {
     GtkAlertDialog *alert = gtk_alert_dialog_new("%s", msg);
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
     g_object_unref(alert);
 }
 
 typedef struct {
+    AppWindow *w;
     sqlite3_int64 drive_id;
     char name[256];
 } DriveDeleteRequest;
 
 static void drives_delete_finish(GObject *source, GAsyncResult *result, gpointer user_data) {
     DriveDeleteRequest *req = user_data;
+    AppWindow *w = req->w;
     GError *error = NULL;
     // Buttons: 0 = Cancel, 1 = Remove Drive Only, 2 = Delete Drive and Database
     int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, &error);
@@ -847,27 +950,27 @@ static void drives_delete_finish(GObject *source, GAsyncResult *result, gpointer
             }
         }
 
-        selected_drive_id = -1;
-        drives_refresh_list();
-        refresh_all_database_combos();
-        logs_refresh_databases();
+        w->selected_drive_id = -1;
+        refresh_database_lists_everywhere();
 
-        if (failed) drives_show_message("The drive was removed, but the database file could not be deleted");
+        if (failed) drives_show_message(w, "The drive was removed, but the database file could not be deleted");
     }
     g_free(req);
 }
 
 void on_drives_delete_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    if (selected_drive_id < 0) {
-        drives_show_message("Please select a drive to delete");
+    if (w->selected_drive_id < 0) {
+        drives_show_message(w, "Please select a drive to delete");
         return;
     }
 
     DriveDeleteRequest *req = g_new0(DriveDeleteRequest, 1);
-    req->drive_id = selected_drive_id;
-    snprintf(req->name, sizeof(req->name), "%s", gtk_editable_get_text(GTK_EDITABLE(drives_name_entry)));
+    req->w = w;
+    req->drive_id = w->selected_drive_id;
+    snprintf(req->name, sizeof(req->name), "%s", gtk_editable_get_text(GTK_EDITABLE(w->drives_name_entry)));
 
     char msg[400];
     snprintf(msg, sizeof(msg), "Delete drive '%s'?", req->name);
@@ -883,23 +986,24 @@ void on_drives_delete_clicked(GtkButton *button, gpointer user_data) {
     gtk_alert_dialog_set_buttons(alert, buttons);
     gtk_alert_dialog_set_cancel_button(alert, 0);
     gtk_alert_dialog_set_default_button(alert, 0);
-    gtk_alert_dialog_choose(alert, GTK_WINDOW(window), NULL, drives_delete_finish, req);
+    gtk_alert_dialog_choose(alert, GTK_WINDOW(w->window), NULL, drives_delete_finish, req);
     g_object_unref(alert);
 }
 
 void on_drives_update_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    if (selected_drive_id < 0) {
+    if (w->selected_drive_id < 0) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a drive to update");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
 
-    const char *location = gtk_editable_get_text(GTK_EDITABLE(drives_location_entry));
+    const char *location = gtk_editable_get_text(GTK_EDITABLE(w->drives_location_entry));
 
-    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->drives_desc_text));
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(buffer, &start, &end);
     char *desc = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
@@ -918,7 +1022,7 @@ void on_drives_update_clicked(GtkButton *button, gpointer user_data) {
             sqlite3_bind_text(stmt, 1, location, -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 2, desc, -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 3, timestamp, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(stmt, 4, selected_drive_id);
+            sqlite3_bind_int64(stmt, 4, w->selected_drive_id);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
@@ -928,14 +1032,14 @@ void on_drives_update_clicked(GtkButton *button, gpointer user_data) {
     g_free(desc);
 
     GtkAlertDialog *alert = gtk_alert_dialog_new("Drive information updated");
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
     g_object_unref(alert);
 
-    drives_refresh_list();
+    drives_refresh_list(w);
 }
 
 void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
 
     GtkTreeModel *model;
     GtkTreeIter iter;
@@ -944,33 +1048,33 @@ void on_drives_selection_changed(GtkTreeSelection *selection, gpointer user_data
         char *name, *location, *description;
 
         gtk_tree_model_get(model, &iter,
-                          0, &selected_drive_id,
+                          0, &w->selected_drive_id,
                           1, &name,
                           2, &location,
                           4, &description,
                           -1);
 
         // Populate fields with selected drive's data
-        gtk_editable_set_text(GTK_EDITABLE(drives_name_entry), name ? name : "");
-        gtk_editable_set_text(GTK_EDITABLE(drives_location_entry), location ? location : "");
+        gtk_editable_set_text(GTK_EDITABLE(w->drives_name_entry), name ? name : "");
+        gtk_editable_set_text(GTK_EDITABLE(w->drives_location_entry), location ? location : "");
 
-        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
+        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->drives_desc_text));
         gtk_text_buffer_set_text(buffer, description ? description : "", -1);
 
         // Make name field read-only when editing existing drive
-        gtk_editable_set_editable(GTK_EDITABLE(drives_name_entry), FALSE);
+        gtk_editable_set_editable(GTK_EDITABLE(w->drives_name_entry), FALSE);
 
         g_free(name);
         g_free(location);
         g_free(description);
     } else {
-        selected_drive_id = -1;
+        w->selected_drive_id = -1;
         // Clear fields and make name editable again for adding new drives
-        gtk_editable_set_text(GTK_EDITABLE(drives_name_entry), "");
-        gtk_editable_set_text(GTK_EDITABLE(drives_location_entry), "");
-        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(drives_desc_text));
+        gtk_editable_set_text(GTK_EDITABLE(w->drives_name_entry), "");
+        gtk_editable_set_text(GTK_EDITABLE(w->drives_location_entry), "");
+        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->drives_desc_text));
         gtk_text_buffer_set_text(buffer, "", -1);
-        gtk_editable_set_editable(GTK_EDITABLE(drives_name_entry), TRUE);
+        gtk_editable_set_editable(GTK_EDITABLE(w->drives_name_entry), TRUE);
     }
 }
 
@@ -1045,6 +1149,7 @@ static const char *drives_do_rename(sqlite3_int64 drive_id, const char *old_name
 }
 
 typedef struct {
+    AppWindow *w;
     GtkWidget *window;
     GtkWidget *entry;
     sqlite3_int64 drive_id;
@@ -1065,13 +1170,14 @@ static void on_rename_destroy(GtkWidget *widget, gpointer user_data) {
 static void on_rename_ok(GtkButton *button, gpointer user_data) {
     (void)button;
     RenameDialog *rd = user_data;
+    AppWindow *w = rd->w;
     char new_name[256];
     snprintf(new_name, sizeof(new_name), "%s", gtk_editable_get_text(GTK_EDITABLE(rd->entry)));
     g_strstrip(new_name);
 
     const char *err = drives_do_rename(rd->drive_id, rd->old_name, new_name);
     if (err) {
-        drives_show_message(err);
+        drives_show_message(w, err);
         return;
     }
 
@@ -1081,28 +1187,29 @@ static void on_rename_ok(GtkButton *button, gpointer user_data) {
              rd->old_name, new_name, new_name);
     gtk_window_destroy(GTK_WINDOW(rd->window));
 
-    selected_drive_id = -1;
-    drives_refresh_list();
-    refresh_all_database_combos();
-    logs_refresh_databases();
-    drives_show_message(msg);
+    w->selected_drive_id = -1;
+    refresh_database_lists_everywhere();
+    drives_show_message(w, msg);
 }
 
 void on_drives_rename_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    if (selected_drive_id < 0) {
-        drives_show_message("Please select a drive to rename");
+    if (w->selected_drive_id < 0) {
+        drives_show_message(w, "Please select a drive to rename");
         return;
     }
 
     RenameDialog *rd = g_new0(RenameDialog, 1);
-    rd->drive_id = selected_drive_id;
-    snprintf(rd->old_name, sizeof(rd->old_name), "%s", gtk_editable_get_text(GTK_EDITABLE(drives_name_entry)));
+    rd->w = w;
+    rd->drive_id = w->selected_drive_id;
+    snprintf(rd->old_name, sizeof(rd->old_name), "%s", gtk_editable_get_text(GTK_EDITABLE(w->drives_name_entry)));
 
     rd->window = gtk_window_new();
     gtk_window_set_title(GTK_WINDOW(rd->window), "Rename Drive");
-    gtk_window_set_transient_for(GTK_WINDOW(rd->window), GTK_WINDOW(window));
+    gtk_window_set_transient_for(GTK_WINDOW(rd->window), GTK_WINDOW(w->window));
+    gtk_window_set_destroy_with_parent(GTK_WINDOW(rd->window), TRUE);
     gtk_window_set_modal(GTK_WINDOW(rd->window), TRUE);
     gtk_window_set_default_size(GTK_WINDOW(rd->window), 400, -1);
     g_signal_connect(rd->window, "destroy", G_CALLBACK(on_rename_destroy), rd);
@@ -1144,7 +1251,7 @@ void on_drives_rename_clicked(GtkButton *button, gpointer user_data) {
 // ---- Export: saves the drives table, in its current sort order, as CSV ----
 
 static void on_drives_export_response(GObject *source, GAsyncResult *result, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
 
     GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, NULL);
     if (!file) return;
@@ -1157,14 +1264,14 @@ static void on_drives_export_response(GObject *source, GAsyncResult *result, gpo
     if (!fp) {
         char msg[MAX_PATH + 64];
         snprintf(msg, sizeof(msg), "Could not create %s: %s", path, strerror(errno));
-        drives_show_message(msg);
+        drives_show_message(w, msg);
         g_free(path);
         return;
     }
 
     fprintf(fp, "ID,Name,Location,Available,Available (bytes),Description,Last Checksum Scan,Files (Last Run)\n");
 
-    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(drives_tree));
+    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->drives_tree));
     GtkTreeIter iter;
     long count = 0;
     for (gboolean valid = gtk_tree_model_get_iter_first(model, &iter); valid;
@@ -1203,21 +1310,22 @@ static void on_drives_export_response(GObject *source, GAsyncResult *result, gpo
     char msg[MAX_PATH + 64];
     if (write_failed) snprintf(msg, sizeof(msg), "Error writing %s", path);
     else snprintf(msg, sizeof(msg), "Exported %ld drive%s to %s", count, count == 1 ? "" : "s", path);
-    drives_show_message(msg);
+    drives_show_message(w, msg);
     g_free(path);
 }
 
 void on_drives_export_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
     GtkFileDialog *dialog = gtk_file_dialog_new();
     gtk_file_dialog_set_title(dialog, "Export Drives to CSV");
     gtk_file_dialog_set_initial_name(dialog, "drives.csv");
-    gtk_file_dialog_save(dialog, GTK_WINDOW(window), NULL, on_drives_export_response, NULL);
+    gtk_file_dialog_save(dialog, GTK_WINDOW(w->window), NULL, on_drives_export_response, w);
     g_object_unref(dialog);
 }
 
-GtkWidget *create_drives_tab() {
+GtkWidget *create_drives_tab(AppWindow *w) {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(box, 16);
     gtk_widget_set_margin_end(box, 16);
@@ -1230,40 +1338,40 @@ GtkWidget *create_drives_tab() {
     GtkWidget *name_label = gtk_label_new("Drive:");
     gtk_widget_set_size_request(name_label, 50, -1);
 
-    drives_name_entry = gtk_entry_new();
-    gtk_widget_set_hexpand(drives_name_entry, TRUE);
+    w->drives_name_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(w->drives_name_entry, TRUE);
 
     GtkWidget *location_label = gtk_label_new("Location:");
-    drives_location_entry = gtk_entry_new();
-    gtk_widget_set_hexpand(drives_location_entry, TRUE);
+    w->drives_location_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(w->drives_location_entry, TRUE);
 
     GtkWidget *add_btn = gtk_button_new_with_label("Add");
     gtk_widget_add_css_class(add_btn, "suggested-action");
-    g_signal_connect(add_btn, "clicked", G_CALLBACK(on_drives_add_clicked), NULL);
+    g_signal_connect(add_btn, "clicked", G_CALLBACK(on_drives_add_clicked), w);
 
     GtkWidget *update_btn = gtk_button_new_with_label("Update");
-    g_signal_connect(update_btn, "clicked", G_CALLBACK(on_drives_update_clicked), NULL);
+    g_signal_connect(update_btn, "clicked", G_CALLBACK(on_drives_update_clicked), w);
 
     GtkWidget *rename_btn = gtk_button_new_with_label("Rename");
-    g_signal_connect(rename_btn, "clicked", G_CALLBACK(on_drives_rename_clicked), NULL);
+    g_signal_connect(rename_btn, "clicked", G_CALLBACK(on_drives_rename_clicked), w);
 
     GtkWidget *del_btn = gtk_button_new_with_label("Delete");
     gtk_widget_add_css_class(del_btn, "destructive-action");
-    g_signal_connect(del_btn, "clicked", G_CALLBACK(on_drives_delete_clicked), NULL);
+    g_signal_connect(del_btn, "clicked", G_CALLBACK(on_drives_delete_clicked), w);
 
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
-    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)drives_refresh_list), NULL);
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(drives_refresh_list), w);
 
     GtkWidget *update_mounted_btn = gtk_button_new_with_label("Update Mounted Drives");
-    g_signal_connect(update_mounted_btn, "clicked", G_CALLBACK(on_drives_update_mounted_clicked), NULL);
+    g_signal_connect(update_mounted_btn, "clicked", G_CALLBACK(on_drives_update_mounted_clicked), w);
 
     GtkWidget *export_btn = gtk_button_new_with_label("Export to CSV");
-    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_drives_export_clicked), NULL);
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_drives_export_clicked), w);
 
     gtk_box_append(GTK_BOX(add_box), name_label);
-    gtk_box_append(GTK_BOX(add_box), drives_name_entry);
+    gtk_box_append(GTK_BOX(add_box), w->drives_name_entry);
     gtk_box_append(GTK_BOX(add_box), location_label);
-    gtk_box_append(GTK_BOX(add_box), drives_location_entry);
+    gtk_box_append(GTK_BOX(add_box), w->drives_location_entry);
     gtk_box_append(GTK_BOX(add_box), add_btn);
     gtk_box_append(GTK_BOX(add_box), update_btn);
     gtk_box_append(GTK_BOX(add_box), rename_btn);
@@ -1277,10 +1385,10 @@ GtkWidget *create_drives_tab() {
     GtkWidget *desc_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     GtkWidget *desc_label = gtk_label_new("Description:");
     gtk_label_set_xalign(GTK_LABEL(desc_label), 0.0);
-    drives_desc_text = gtk_text_view_new();
-    gtk_widget_set_size_request(drives_desc_text, -1, 60);
+    w->drives_desc_text = gtk_text_view_new();
+    gtk_widget_set_size_request(w->drives_desc_text, -1, 60);
     GtkWidget *desc_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(desc_scroll), drives_desc_text);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(desc_scroll), w->drives_desc_text);
     gtk_box_append(GTK_BOX(desc_box), desc_label);
     gtk_box_append(GTK_BOX(desc_box), desc_scroll);
     gtk_box_append(GTK_BOX(box), desc_box);
@@ -1290,7 +1398,7 @@ GtkWidget *create_drives_tab() {
     GtkListStore *store = gtk_list_store_new(8, G_TYPE_INT64, G_TYPE_STRING, G_TYPE_STRING,
                                              G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT64,
                                              G_TYPE_INT64);
-    drives_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    w->drives_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
     const char *titles[] = {"ID", "Name", "Location", "Available", "Description", "Last Checksum Scan"};
@@ -1300,7 +1408,7 @@ GtkWidget *create_drives_tab() {
         gtk_tree_view_column_set_resizable(column, TRUE);
         if (i == 4) gtk_tree_view_column_set_expand(column, TRUE);
         gtk_tree_view_column_set_sort_column_id(column, i == 3 ? 7 : i);
-        gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), column);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(w->drives_tree), column);
     }
 
     // Files in the last run; stored as a number so it sorts numerically
@@ -1312,13 +1420,13 @@ GtkWidget *create_drives_tab() {
     gtk_tree_view_column_set_cell_data_func(files_column, files_renderer, drives_files_cell_data, NULL, NULL);
     gtk_tree_view_column_set_resizable(files_column, TRUE);
     gtk_tree_view_column_set_sort_column_id(files_column, 6);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(drives_tree), files_column);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(w->drives_tree), files_column);
 
-    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(drives_tree));
-    g_signal_connect(selection, "changed", G_CALLBACK(on_drives_selection_changed), NULL);
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(w->drives_tree));
+    g_signal_connect(selection, "changed", G_CALLBACK(on_drives_selection_changed), w);
 
     GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), drives_tree);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->drives_tree);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_box_append(GTK_BOX(box), scroll);
 
@@ -1329,18 +1437,15 @@ GtkWidget *create_drives_tab() {
 // TAB 3: SUMMARY VIEWER (Simplified)
 // ============================================================================
 
-GtkWidget *summary_db_combo;
-GtkWidget *summary_tree;
-GtkWidget *summary_details_text;
 
-void summary_load_runs() {
-    char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(summary_db_combo));
+void summary_load_runs(AppWindow *w) {
+    char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->summary_db_combo));
     if (!db_name || strlen(db_name) == 0) return;
 
     char db_path[MAX_PATH];
     snprintf(db_path, sizeof(db_path), "%s/%s", db_dir_path, db_name);
 
-    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(summary_tree)));
+    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->summary_tree)));
     gtk_list_store_clear(store);
 
     sqlite3 *db;
@@ -1376,7 +1481,7 @@ void summary_load_runs() {
 }
 
 void on_summary_run_selected(GtkTreeSelection *selection, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
 
     GtkTreeModel *model;
     GtkTreeIter iter;
@@ -1401,12 +1506,12 @@ void on_summary_run_selected(GtkTreeSelection *selection, gpointer user_data) {
              run_id, date, unch, chg, new, miss, ign, err,
              unch + chg + new + miss + err);
 
-    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(summary_details_text));
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->summary_details_text));
     gtk_text_buffer_set_text(buffer, details, -1);
     g_free(date);
 }
 
-GtkWidget *create_summary_tab() {
+GtkWidget *create_summary_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     // Left: Run list
@@ -1419,20 +1524,20 @@ GtkWidget *create_summary_tab() {
 
     GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *db_label = gtk_label_new("Database:");
-    summary_db_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(summary_db_combo, TRUE);
-    g_signal_connect(summary_db_combo, "changed", G_CALLBACK((GCallback)summary_load_runs), NULL);
+    w->summary_db_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(w->summary_db_combo, TRUE);
+    g_signal_connect_swapped(w->summary_db_combo, "changed", G_CALLBACK(summary_load_runs), w);
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
     gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list and scan runs");
-    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)summary_refresh_databases), NULL);
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(summary_refresh_databases), w);
     gtk_box_append(GTK_BOX(db_box), db_label);
-    gtk_box_append(GTK_BOX(db_box), summary_db_combo);
+    gtk_box_append(GTK_BOX(db_box), w->summary_db_combo);
     gtk_box_append(GTK_BOX(db_box), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), db_box);
 
     GtkListStore *store = gtk_list_store_new(8, G_TYPE_INT, G_TYPE_STRING, G_TYPE_INT,
                                              G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT);
-    summary_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    w->summary_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
     const char *titles[] = {"ID", "Date", "Unch", "Chg", "New", "Miss", "Ign", "Err"};
@@ -1440,14 +1545,14 @@ GtkWidget *create_summary_tab() {
         GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
-        gtk_tree_view_append_column(GTK_TREE_VIEW(summary_tree), column);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(w->summary_tree), column);
     }
 
-    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(summary_tree));
-    g_signal_connect(selection, "changed", G_CALLBACK(on_summary_run_selected), NULL);
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(w->summary_tree));
+    g_signal_connect(selection, "changed", G_CALLBACK(on_summary_run_selected), w);
 
     GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), summary_tree);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->summary_tree);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_box_append(GTK_BOX(left_box), scroll);
 
@@ -1465,12 +1570,12 @@ GtkWidget *create_summary_tab() {
     gtk_label_set_xalign(GTK_LABEL(details_label), 0.0);
     gtk_box_append(GTK_BOX(right_box), details_label);
 
-    summary_details_text = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(summary_details_text), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(summary_details_text), TRUE);
+    w->summary_details_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(w->summary_details_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->summary_details_text), TRUE);
 
     GtkWidget *details_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(details_scroll), summary_details_text);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(details_scroll), w->summary_details_text);
     gtk_widget_set_vexpand(details_scroll, TRUE);
     gtk_box_append(GTK_BOX(right_box), details_scroll);
 
@@ -1483,21 +1588,7 @@ GtkWidget *create_summary_tab() {
 // TAB 4: LOGS VIEWER
 // ============================================================================
 
-GtkWidget *logs_db_combo;
-GtkWidget *logs_runs_list;
-GtkWidget *logs_run_info_text;
-GtkWidget *logs_note_text;
-GtkWidget *logs_text;
-GtkWidget *logs_filter_new_check;
-GtkWidget *logs_filter_changed_check;
-GtkWidget *logs_filter_missing_check;
-GtkWidget *logs_filter_unchanged_check;
-GtkWidget *logs_filter_ignored_check;
-GtkWidget *logs_filter_errors_check;
-GtkWidget *logs_filter_all_check;
 
-char logs_current_db_path[MAX_PATH] = "";
-sqlite3_int64 logs_selected_run_id = 0;
 
 void logs_format_run_identifier(char *buffer, size_t size, const char *db_name, const char *run_date, sqlite3_int64 id) {
     if (run_date) {
@@ -1564,35 +1655,35 @@ static void refill_database_combo(GtkWidget *combo, GPtrArray *files, const char
     g_free(previous);
 }
 
-void logs_refresh_databases() {
+void logs_refresh_databases(AppWindow *w) {
     GPtrArray *files = list_database_files();
     if (!files) return;
-    refill_database_combo(logs_db_combo, files, NULL, TRUE);
+    refill_database_combo(w->logs_db_combo, files, NULL, TRUE);
     g_ptr_array_unref(files);
 }
 
-void logs_load_runs(const char *db_name) {
+void logs_load_runs(AppWindow *w, const char *db_name) {
     if (!db_name || strlen(db_name) == 0) return;
 
-    snprintf(logs_current_db_path, sizeof(logs_current_db_path), "%s/%s.db", db_dir_path, db_name);
+    snprintf(w->logs_current_db_path, sizeof(w->logs_current_db_path), "%s/%s.db", db_dir_path, db_name);
 
-    GtkListBox *list = GTK_LIST_BOX(logs_runs_list);
+    GtkListBox *list = GTK_LIST_BOX(w->logs_runs_list);
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(GTK_WIDGET(list))) != NULL) {
         gtk_list_box_remove(list, child);
     }
 
-    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_run_info_text));
+    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text));
     gtk_text_buffer_set_text(info_buffer, "", -1);
-    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text));
     gtk_text_buffer_set_text(note_buffer, "", -1);
-    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_text));
     gtk_text_buffer_set_text(logs_buffer, "", -1);
 
-    if (access(logs_current_db_path, F_OK) != 0) return;
+    if (access(w->logs_current_db_path, F_OK) != 0) return;
 
     sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
+    if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) return;
 
     const char *query =
         "SELECT id, COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
@@ -1648,11 +1739,11 @@ void logs_load_runs(const char *db_name) {
     sqlite3_close(db);
 }
 
-void logs_load_details() {
-    if (logs_selected_run_id == 0) return;
+void logs_load_details(AppWindow *w) {
+    if (w->logs_selected_run_id == 0) return;
 
     sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
+    if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) return;
 
     const char *query =
         "SELECT COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
@@ -1665,7 +1756,7 @@ void logs_load_details() {
         return;
     }
 
-    sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+    sqlite3_bind_int64(stmt, 1, w->logs_selected_run_id);
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *run_date = (const char *)sqlite3_column_text(stmt, 0);
@@ -1699,10 +1790,10 @@ void logs_load_details() {
                 checksum_date ? "Verified" : "Not Verified",
                 unchanged, changed, new, missing, ignored, errors);
 
-        GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_run_info_text));
+        GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text));
         gtk_text_buffer_set_text(info_buffer, info, -1);
 
-        GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+        GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text));
         gtk_text_buffer_set_text(note_buffer, note ? note : "", -1);
     }
 
@@ -1711,45 +1802,45 @@ void logs_load_details() {
 }
 
 // Builds SQL WHERE fragment from the Logs filter checkboxes. Returns 0 if none selected.
-static int logs_build_status_filter(char *status_filter) {
+static int logs_build_status_filter(AppWindow *w, char *status_filter) {
     int any_filter = 0;
 
 
-    if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_all_check))) {
+    if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_all_check))) {
         strcpy(status_filter, "1=1");
         any_filter = 1;
     } else {
         int first = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_new_check))) {
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_new_check))) {
             strcat(status_filter, "status = 'NEW'");
             first = 0;
             any_filter = 1;
         }
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_changed_check))) {
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_changed_check))) {
             if (!first) strcat(status_filter, " OR ");
             strcat(status_filter, "status LIKE 'CHANGED%'");
             first = 0;
             any_filter = 1;
         }
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_missing_check))) {
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_missing_check))) {
             if (!first) strcat(status_filter, " OR ");
             strcat(status_filter, "status = 'MISSING'");
             first = 0;
             any_filter = 1;
         }
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_unchanged_check))) {
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_unchanged_check))) {
             if (!first) strcat(status_filter, " OR ");
             strcat(status_filter, "status = 'UNCHANGED'");
             first = 0;
             any_filter = 1;
         }
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_ignored_check))) {
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_ignored_check))) {
             if (!first) strcat(status_filter, " OR ");
             strcat(status_filter, "status = 'IGNORED'");
             first = 0;
             any_filter = 1;
         }
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_errors_check))) {
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_errors_check))) {
             if (!first) strcat(status_filter, " OR ");
             strcat(status_filter, "status = 'ERROR'");
             any_filter = 1;
@@ -1759,17 +1850,17 @@ static int logs_build_status_filter(char *status_filter) {
     return any_filter;
 }
 
-void logs_load_logs() {
-    if (logs_selected_run_id == 0) return;
+void logs_load_logs(AppWindow *w) {
+    if (w->logs_selected_run_id == 0) return;
 
     sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) return;
+    if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) return;
 
     char status_filter[512] = "";
-    int any_filter = logs_build_status_filter(status_filter);
+    int any_filter = logs_build_status_filter(w, status_filter);
 
     if (!any_filter) {
-        GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+        GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_text));
         gtk_text_buffer_set_text(logs_buffer, "No filters selected. Select at least one filter or 'All'.", -1);
         sqlite3_close(db);
         return;
@@ -1786,7 +1877,7 @@ void logs_load_logs() {
         return;
     }
 
-    sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+    sqlite3_bind_int64(stmt, 1, w->logs_selected_run_id);
 
     GString *text = g_string_new("");
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -1795,7 +1886,7 @@ void logs_load_logs() {
         g_string_append_printf(text, "[%-18s] %s\n", status, path);
     }
 
-    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_text));
     gtk_text_buffer_set_text(logs_buffer, text->str, -1);
     g_string_free(text, TRUE);
 
@@ -1803,14 +1894,14 @@ void logs_load_logs() {
     sqlite3_close(db);
 }
 
-static void logs_alert(const char *msg) {
+static void logs_alert(AppWindow *w, const char *msg) {
     GtkAlertDialog *alert = gtk_alert_dialog_new("%s", msg);
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
     g_object_unref(alert);
 }
 
 static void on_logs_export_response(GObject *source, GAsyncResult *result, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
 
     GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, NULL);
     if (!file) return;
@@ -1820,15 +1911,15 @@ static void on_logs_export_response(GObject *source, GAsyncResult *result, gpoin
     if (!path) return;
 
     char status_filter[512] = "";
-    if (!logs_build_status_filter(status_filter)) {
-        logs_alert("No filters selected. Select at least one filter or 'All'.");
+    if (!logs_build_status_filter(w, status_filter)) {
+        logs_alert(w, "No filters selected. Select at least one filter or 'All'.");
         g_free(path);
         return;
     }
 
     sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
-        logs_alert("Failed to open database");
+    if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) {
+        logs_alert(w, "Failed to open database");
         g_free(path);
         return;
     }
@@ -1840,16 +1931,16 @@ static void on_logs_export_response(GObject *source, GAsyncResult *result, gpoin
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) != SQLITE_OK) {
-        logs_alert("Failed to query logs");
+        logs_alert(w, "Failed to query logs");
         sqlite3_close(db);
         g_free(path);
         return;
     }
-    sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+    sqlite3_bind_int64(stmt, 1, w->logs_selected_run_id);
 
     FILE *fp = fopen(path, "w");
     if (!fp) {
-        logs_alert("Failed to create export file");
+        logs_alert(w, "Failed to create export file");
         sqlite3_finalize(stmt);
         sqlite3_close(db);
         g_free(path);
@@ -1871,88 +1962,91 @@ static void on_logs_export_response(GObject *source, GAsyncResult *result, gpoin
 
     char msg[MAX_PATH + 64];
     snprintf(msg, sizeof(msg), "Exported %ld log records to %s", count, path);
-    logs_alert(msg);
+    logs_alert(w, msg);
     g_free(path);
 }
 
 void on_logs_export_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    if (logs_selected_run_id == 0) {
-        logs_alert("Please select a run to export");
+    if (w->logs_selected_run_id == 0) {
+        logs_alert(w, "Please select a run to export");
         return;
     }
 
     char name[64];
-    snprintf(name, sizeof(name), "run_%lld_logs.csv", (long long)logs_selected_run_id);
+    snprintf(name, sizeof(name), "run_%lld_logs.csv", (long long)w->logs_selected_run_id);
 
     GtkFileDialog *dialog = gtk_file_dialog_new();
     gtk_file_dialog_set_title(dialog, "Export Logs to CSV");
     gtk_file_dialog_set_initial_name(dialog, name);
-    gtk_file_dialog_save(dialog, GTK_WINDOW(window), NULL, on_logs_export_response, NULL);
+    gtk_file_dialog_save(dialog, GTK_WINDOW(w->window), NULL, on_logs_export_response, w);
     g_object_unref(dialog);
 }
 
 void on_logs_db_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
     char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
     if (db_name) {
-        logs_load_runs(db_name);
+        logs_load_runs(w, db_name);
         g_free(db_name);
     }
 }
 
 void on_logs_run_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
-    (void)box; (void)user_data;
+    AppWindow *w = user_data;
+    (void)box;
     if (!row) return;
 
     GtkWidget *row_widget = gtk_list_box_row_get_child(GTK_LIST_BOX_ROW(row));
-    logs_selected_run_id = (sqlite3_int64)GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row_widget), "run_id"));
+    w->logs_selected_run_id = (sqlite3_int64)GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row_widget), "run_id"));
 
-    logs_load_details();
-    logs_load_logs();
+    logs_load_details(w);
+    logs_load_logs(w);
 }
 
 void on_logs_filter_toggled(GtkCheckButton *button, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
 
-    if (button == GTK_CHECK_BUTTON(logs_filter_all_check) &&
-        gtk_check_button_get_active(GTK_CHECK_BUTTON(logs_filter_all_check))) {
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_new_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_changed_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_missing_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_unchanged_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_ignored_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_errors_check), FALSE);
-    } else if (button != GTK_CHECK_BUTTON(logs_filter_all_check) &&
+    if (button == GTK_CHECK_BUTTON(w->logs_filter_all_check) &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_all_check))) {
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_new_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_changed_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_missing_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_unchanged_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_ignored_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_errors_check), FALSE);
+    } else if (button != GTK_CHECK_BUTTON(w->logs_filter_all_check) &&
                gtk_check_button_get_active(button)) {
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_all_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_all_check), FALSE);
     }
 
-    logs_load_logs();
+    logs_load_logs(w);
 }
 
 void on_logs_save_note_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    if (logs_selected_run_id == 0) {
+    if (w->logs_selected_run_id == 0) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a run to update");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
 
     // Get note text
-    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text));
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(buffer, &start, &end);
     char *note = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
 
     // Open database
     sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
+    if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to open database");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         g_free(note);
         return;
@@ -1963,7 +2057,7 @@ void on_logs_save_note_clicked(GtkButton *button, gpointer user_data) {
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, 0) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, note, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(stmt, 2, logs_selected_run_id);
+        sqlite3_bind_int64(stmt, 2, w->logs_selected_run_id);
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
     }
@@ -1972,27 +2066,28 @@ void on_logs_save_note_clicked(GtkButton *button, gpointer user_data) {
     g_free(note);
 
     GtkAlertDialog *alert = gtk_alert_dialog_new("Note saved successfully");
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
     g_object_unref(alert);
 }
 
 void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer user_data);
 
 void on_logs_delete_run_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    if (logs_selected_run_id == 0) {
+    if (w->logs_selected_run_id == 0) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a run to delete");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
 
     // Open database
     sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
+    if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to open database");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
@@ -2002,11 +2097,11 @@ void on_logs_delete_run_clicked(GtkButton *button, gpointer user_data) {
     const char *query = "SELECT last_date_verify FROM meta WHERE id = ?";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, query, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(stmt, 1, logs_selected_run_id);
+        sqlite3_bind_int64(stmt, 1, w->logs_selected_run_id);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *date = (const char *)sqlite3_column_text(stmt, 0);
             if (date) {
-                snprintf(run_info, sizeof(run_info), "Run #%lld from %s", logs_selected_run_id, date);
+                snprintf(run_info, sizeof(run_info), "Run #%lld from %s", w->logs_selected_run_id, date);
             }
         }
         sqlite3_finalize(stmt);
@@ -2029,13 +2124,13 @@ void on_logs_delete_run_clicked(GtkButton *button, gpointer user_data) {
     gtk_alert_dialog_set_default_button(confirm, 0);
 
     // Use async API to get response
-    g_object_set_data(G_OBJECT(confirm), "run_id", GINT_TO_POINTER((int)logs_selected_run_id));
-    gtk_alert_dialog_choose(confirm, GTK_WINDOW(window), NULL,
-                           (GAsyncReadyCallback)on_logs_delete_confirmed, NULL);
+    g_object_set_data(G_OBJECT(confirm), "run_id", GINT_TO_POINTER((int)w->logs_selected_run_id));
+    gtk_alert_dialog_choose(confirm, GTK_WINDOW(w->window), NULL,
+                           (GAsyncReadyCallback)on_logs_delete_confirmed, w);
 }
 
 void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
 
     GtkAlertDialog *dialog = GTK_ALERT_DIALOG(source);
     int response = gtk_alert_dialog_choose_finish(dialog, result, NULL);
@@ -2050,9 +2145,9 @@ void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer us
 
     // Open database
     sqlite3 *db;
-    if (sqlite3_open(logs_current_db_path, &db) != SQLITE_OK) {
+    if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to open database");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
@@ -2077,29 +2172,29 @@ void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer us
     sqlite3_close(db);
 
     // Clear selection and refresh
-    logs_selected_run_id = 0;
+    w->logs_selected_run_id = 0;
 
     // Clear text buffers
-    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_run_info_text));
+    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text));
     gtk_text_buffer_set_text(info_buffer, "", -1);
-    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_note_text));
+    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text));
     gtk_text_buffer_set_text(note_buffer, "", -1);
-    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(logs_text));
+    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_text));
     gtk_text_buffer_set_text(logs_buffer, "", -1);
 
     // Reload runs list
-    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(logs_db_combo));
+    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->logs_db_combo));
     if (db_name) {
-        logs_load_runs(db_name);
+        logs_load_runs(w, db_name);
         g_free((void *)db_name);
     }
 
     GtkAlertDialog *alert = gtk_alert_dialog_new("Run deleted successfully");
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
     g_object_unref(alert);
 }
 
-GtkWidget *create_logs_tab() {
+GtkWidget *create_logs_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     // Left: Database and runs list
@@ -2112,14 +2207,14 @@ GtkWidget *create_logs_tab() {
 
     GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *db_label = gtk_label_new("Database:");
-    logs_db_combo = gtk_combo_box_text_new();
-    g_signal_connect(logs_db_combo, "changed", G_CALLBACK(on_logs_db_changed), NULL);
-    gtk_widget_set_hexpand(logs_db_combo, TRUE);
+    w->logs_db_combo = gtk_combo_box_text_new();
+    g_signal_connect(w->logs_db_combo, "changed", G_CALLBACK(on_logs_db_changed), w);
+    gtk_widget_set_hexpand(w->logs_db_combo, TRUE);
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
     gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list and scan runs");
-    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)logs_refresh_databases), NULL);
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(logs_refresh_databases), w);
     gtk_box_append(GTK_BOX(db_box), db_label);
-    gtk_box_append(GTK_BOX(db_box), logs_db_combo);
+    gtk_box_append(GTK_BOX(db_box), w->logs_db_combo);
     gtk_box_append(GTK_BOX(db_box), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), db_box);
 
@@ -2127,16 +2222,16 @@ GtkWidget *create_logs_tab() {
     gtk_label_set_xalign(GTK_LABEL(runs_label), 0.0);
     gtk_box_append(GTK_BOX(left_box), runs_label);
 
-    logs_runs_list = gtk_list_box_new();
-    g_signal_connect(logs_runs_list, "row-activated", G_CALLBACK(on_logs_run_selected), NULL);
+    w->logs_runs_list = gtk_list_box_new();
+    g_signal_connect(w->logs_runs_list, "row-activated", G_CALLBACK(on_logs_run_selected), w);
     GtkWidget *runs_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(runs_scroll), logs_runs_list);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(runs_scroll), w->logs_runs_list);
     gtk_widget_set_vexpand(runs_scroll, TRUE);
     gtk_box_append(GTK_BOX(left_box), runs_scroll);
 
     GtkWidget *delete_btn = gtk_button_new_with_label("Delete Selected Run");
     gtk_widget_add_css_class(delete_btn, "destructive-action");
-    g_signal_connect(delete_btn, "clicked", G_CALLBACK(on_logs_delete_run_clicked), NULL);
+    g_signal_connect(delete_btn, "clicked", G_CALLBACK(on_logs_delete_run_clicked), w);
     gtk_box_append(GTK_BOX(left_box), delete_btn);
 
     gtk_paned_set_start_child(GTK_PANED(paned), left_box);
@@ -2151,12 +2246,12 @@ GtkWidget *create_logs_tab() {
     // Run info
     GtkWidget *info_label = gtk_label_new("Run Information:");
     gtk_label_set_xalign(GTK_LABEL(info_label), 0.0);
-    logs_run_info_text = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_run_info_text), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(logs_run_info_text), TRUE);
+    w->logs_run_info_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(w->logs_run_info_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->logs_run_info_text), TRUE);
     GtkWidget *info_scroll = gtk_scrolled_window_new();
     gtk_widget_set_size_request(info_scroll, -1, 220);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(info_scroll), logs_run_info_text);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(info_scroll), w->logs_run_info_text);
     gtk_box_append(GTK_BOX(right_box), info_label);
     gtk_box_append(GTK_BOX(right_box), info_scroll);
 
@@ -2168,17 +2263,17 @@ GtkWidget *create_logs_tab() {
 
     GtkWidget *save_note_btn = gtk_button_new_with_label("Save Note");
     gtk_widget_add_css_class(save_note_btn, "suggested-action");
-    g_signal_connect(save_note_btn, "clicked", G_CALLBACK(on_logs_save_note_clicked), NULL);
+    g_signal_connect(save_note_btn, "clicked", G_CALLBACK(on_logs_save_note_clicked), w);
 
     gtk_box_append(GTK_BOX(note_box), note_label);
     gtk_box_append(GTK_BOX(note_box), save_note_btn);
 
-    logs_note_text = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_note_text), TRUE);
-    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(logs_note_text), GTK_WRAP_WORD);
-    gtk_widget_set_size_request(logs_note_text, -1, 60);
+    w->logs_note_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(w->logs_note_text), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(w->logs_note_text), GTK_WRAP_WORD);
+    gtk_widget_set_size_request(w->logs_note_text, -1, 60);
     GtkWidget *note_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), logs_note_text);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), w->logs_note_text);
     gtk_box_append(GTK_BOX(right_box), note_box);
     gtk_box_append(GTK_BOX(right_box), note_scroll);
 
@@ -2186,53 +2281,53 @@ GtkWidget *create_logs_tab() {
     GtkWidget *filter_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *filter_label = gtk_label_new("Filters:");
 
-    logs_filter_all_check = gtk_check_button_new_with_label("All");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(logs_filter_all_check), TRUE);
-    g_signal_connect(logs_filter_all_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+    w->logs_filter_all_check = gtk_check_button_new_with_label("All");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_all_check), TRUE);
+    g_signal_connect(w->logs_filter_all_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
-    logs_filter_new_check = gtk_check_button_new_with_label("New");
-    g_signal_connect(logs_filter_new_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+    w->logs_filter_new_check = gtk_check_button_new_with_label("New");
+    g_signal_connect(w->logs_filter_new_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
-    logs_filter_changed_check = gtk_check_button_new_with_label("Changed");
-    g_signal_connect(logs_filter_changed_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+    w->logs_filter_changed_check = gtk_check_button_new_with_label("Changed");
+    g_signal_connect(w->logs_filter_changed_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
-    logs_filter_missing_check = gtk_check_button_new_with_label("Missing");
-    g_signal_connect(logs_filter_missing_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+    w->logs_filter_missing_check = gtk_check_button_new_with_label("Missing");
+    g_signal_connect(w->logs_filter_missing_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
-    logs_filter_unchanged_check = gtk_check_button_new_with_label("Unchanged");
-    g_signal_connect(logs_filter_unchanged_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+    w->logs_filter_unchanged_check = gtk_check_button_new_with_label("Unchanged");
+    g_signal_connect(w->logs_filter_unchanged_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
-    logs_filter_ignored_check = gtk_check_button_new_with_label("Ignored");
-    g_signal_connect(logs_filter_ignored_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+    w->logs_filter_ignored_check = gtk_check_button_new_with_label("Ignored");
+    g_signal_connect(w->logs_filter_ignored_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
-    logs_filter_errors_check = gtk_check_button_new_with_label("Errors");
-    g_signal_connect(logs_filter_errors_check, "toggled", G_CALLBACK(on_logs_filter_toggled), NULL);
+    w->logs_filter_errors_check = gtk_check_button_new_with_label("Errors");
+    g_signal_connect(w->logs_filter_errors_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
     gtk_box_append(GTK_BOX(filter_box), filter_label);
-    gtk_box_append(GTK_BOX(filter_box), logs_filter_all_check);
-    gtk_box_append(GTK_BOX(filter_box), logs_filter_new_check);
-    gtk_box_append(GTK_BOX(filter_box), logs_filter_changed_check);
-    gtk_box_append(GTK_BOX(filter_box), logs_filter_missing_check);
-    gtk_box_append(GTK_BOX(filter_box), logs_filter_unchanged_check);
-    gtk_box_append(GTK_BOX(filter_box), logs_filter_ignored_check);
-    gtk_box_append(GTK_BOX(filter_box), logs_filter_errors_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_all_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_new_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_changed_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_missing_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_unchanged_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_ignored_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_errors_check);
 
     GtkWidget *export_btn = gtk_button_new_with_label("Export");
     gtk_widget_set_hexpand(export_btn, TRUE);
     gtk_widget_set_halign(export_btn, GTK_ALIGN_END);
-    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_logs_export_clicked), NULL);
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_logs_export_clicked), w);
     gtk_box_append(GTK_BOX(filter_box), export_btn);
     gtk_box_append(GTK_BOX(right_box), filter_box);
 
     // Logs
     GtkWidget *logs_label = gtk_label_new("Logs:");
     gtk_label_set_xalign(GTK_LABEL(logs_label), 0.0);
-    logs_text = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(logs_text), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(logs_text), TRUE);
-    gtk_widget_set_vexpand(logs_text, TRUE);
+    w->logs_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(w->logs_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->logs_text), TRUE);
+    gtk_widget_set_vexpand(w->logs_text, TRUE);
     GtkWidget *logs_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(logs_scroll), logs_text);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(logs_scroll), w->logs_text);
     gtk_widget_set_vexpand(logs_scroll, TRUE);
     gtk_box_append(GTK_BOX(right_box), logs_label);
     gtk_box_append(GTK_BOX(right_box), logs_scroll);
@@ -2255,7 +2350,8 @@ typedef struct {
     long long mtime;
 } ScanLogEntry;
 
-typedef struct {
+struct ScannerContext {
+    AppWindow *win;  // window that started the scan; progress and results are shown there
     char scan_path[MAX_PATH];
     char db_path[MAX_PATH];
     char db_name[256];
@@ -2276,26 +2372,12 @@ typedef struct {
     GMutex lock;  // guards db, counters and log_buffer while workers are running
     char drive_error[512];  // set when the drive's drives.db entry could not be added or updated
     char open_error[512];   // set when the scan path itself could not be opened
-} ScannerContext;
+};
 
 // Most files queued for the workers before the directory walk pauses
 #define SCANNER_MAX_QUEUED 1000
 
-GtkWidget *scanner_volumes_list;
-GtkWidget *scanner_path_entry;
-GtkWidget *scanner_db_entry;
-GtkWidget *scanner_checksum_check;
-GtkWidget *scanner_update_check;
-GtkWidget *scanner_workers_spin;
-GtkWidget *scanner_note_text;
-GtkWidget *scanner_start_button;
-GtkWidget *scanner_stop_button;
-GtkProgressBar *scanner_progress_bar;
-GtkWidget *scanner_status_label;
-GtkWidget *scanner_current_file_label;
-GtkWidget *scanner_results_text;
 
-ScannerContext *current_scanner_scan = NULL;
 
 void scanner_log_message(ScannerContext *ctx, const char *status, const char *path, const char *checksum, long long size, long long mtime) {
     if (ctx->log_count >= ctx->log_capacity) {
@@ -2315,10 +2397,11 @@ void scanner_log_message(ScannerContext *ctx, const char *status, const char *pa
 
 gboolean scanner_update_progress(gpointer data) {
     ScannerContext *ctx = (ScannerContext *)data;
+    AppWindow *w = ctx->win;
     int processed = ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors;
 
     if (ctx->total_files > 0) {
-        gtk_progress_bar_set_fraction(scanner_progress_bar, (double)processed / ctx->total_files);
+        gtk_progress_bar_set_fraction(w->scanner_progress_bar, (double)processed / ctx->total_files);
     }
 
     char status[512], n[8][32];
@@ -2328,15 +2411,29 @@ gboolean scanner_update_progress(gpointer data) {
              format_count(ctx->unchanged, n[2], sizeof(n[2])), format_count(ctx->changed, n[3], sizeof(n[3])),
              format_count(ctx->new_files, n[4], sizeof(n[4])), format_count(ctx->missing, n[5], sizeof(n[5])),
              format_count(ctx->ignored, n[6], sizeof(n[6])), format_count(ctx->errors, n[7], sizeof(n[7])));
-    gtk_label_set_text(GTK_LABEL(scanner_status_label), status);
+    gtk_label_set_text(GTK_LABEL(w->scanner_status_label), status);
     return G_SOURCE_REMOVE;
 }
 
+typedef struct {
+    AppWindow *w;
+    char *filename;
+} ScannerCurrentFile;
+
 gboolean scanner_update_current_file(gpointer data) {
-    char *filename = (char *)data;
-    gtk_label_set_text(GTK_LABEL(scanner_current_file_label), filename);
-    g_free(filename);
+    ScannerCurrentFile *update = data;
+    gtk_label_set_text(GTK_LABEL(update->w->scanner_current_file_label), update->filename);
+    g_free(update->filename);
+    g_free(update);
     return G_SOURCE_REMOVE;
+}
+
+// Shows filename as the file being scanned, from any thread
+static void scanner_post_current_file(ScannerContext *ctx, const char *filename) {
+    ScannerCurrentFile *update = g_new(ScannerCurrentFile, 1);
+    update->w = ctx->win;
+    update->filename = g_strdup(filename);
+    g_idle_add(scanner_update_current_file, update);
 }
 
 gboolean scanner_scan_completed(gpointer data);
@@ -2462,7 +2559,7 @@ static void scanner_update_file_row(ScannerContext *ctx, const char *filepath, c
 void scanner_process_file(ScannerContext *ctx, const char *filepath, const char *filename) {
     if (ctx->should_stop) return;
 
-    g_idle_add(scanner_update_current_file, g_strdup(filename));
+    scanner_post_current_file(ctx, filename);
 
     char log_mesg[256];
 
@@ -2685,7 +2782,7 @@ gpointer scanner_thread_func(gpointer data) {
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, size INTEGER, mtime INTEGER, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
 
-    g_idle_add(scanner_update_current_file, g_strdup("Counting files..."));
+    scanner_post_current_file(ctx, "Counting files...");
     ctx->total_files = scanner_count_files(ctx->scan_path, ctx->scan_path);
 
     // This thread walks the tree; the pool's workers stat, hash and record each file
@@ -2750,13 +2847,14 @@ gpointer scanner_thread_func(gpointer data) {
 
 gboolean scanner_scan_completed(gpointer data) {
     ScannerContext *ctx = (ScannerContext *)data;
+    AppWindow *w = ctx->win;
 
-    gtk_widget_set_sensitive(scanner_start_button, TRUE);
-    gtk_widget_set_sensitive(scanner_stop_button, FALSE);
-    gtk_widget_set_sensitive(scanner_path_entry, TRUE);
-    gtk_widget_set_sensitive(scanner_db_entry, TRUE);
-    gtk_widget_set_sensitive(scanner_workers_spin, TRUE);
-    gtk_progress_bar_set_fraction(scanner_progress_bar, 1.0);
+    gtk_widget_set_sensitive(w->scanner_start_button, TRUE);
+    gtk_widget_set_sensitive(w->scanner_stop_button, FALSE);
+    gtk_widget_set_sensitive(w->scanner_path_entry, TRUE);
+    gtk_widget_set_sensitive(w->scanner_db_entry, TRUE);
+    gtk_widget_set_sensitive(w->scanner_workers_spin, TRUE);
+    gtk_progress_bar_set_fraction(w->scanner_progress_bar, 1.0);
 
     char results[3072], n[7][32];
     int len = snprintf(results, sizeof(results),
@@ -2788,15 +2886,30 @@ gboolean scanner_scan_completed(gpointer data) {
                  ctx->drive_error);
     }
 
-    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_results_text));
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->scanner_results_text));
     gtk_text_buffer_set_text(buffer, results, -1);
 
     if (ctx->db) sqlite3_close(ctx->db);
+
+    // Queuing this was the scan thread's last step. Progress updates it queued earlier have
+    // already run, so the context can be freed
+    g_thread_join(ctx->scan_thread);
+    g_mutex_clear(&ctx->lock);
+    free(ctx->log_buffer);
+    g_free(ctx);
+    w->current_scanner_scan = NULL;
+    app_window_set_title(w, NULL);
+
+    // The window was closed during the scan and kept open until the scan stopped
+    if (w->close_after_scan) {
+        app_window_detach(w);
+        gtk_window_destroy(GTK_WINDOW(w->window));
+    }
     return G_SOURCE_REMOVE;
 }
 
-void scanner_refresh_volumes() {
-    GtkListBox *list = GTK_LIST_BOX(scanner_volumes_list);
+void scanner_refresh_volumes(AppWindow *w) {
+    GtkListBox *list = GTK_LIST_BOX(w->scanner_volumes_list);
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(GTK_WIDGET(list))) != NULL) {
         gtk_list_box_remove(list, child);
@@ -2847,81 +2960,89 @@ void scanner_refresh_volumes() {
 }
 
 void on_scanner_volume_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
-    (void)box; (void)user_data;
+    AppWindow *w = user_data;
+    (void)box;
     if (!row) return;
 
     GtkWidget *row_widget = gtk_list_box_row_get_child(GTK_LIST_BOX_ROW(row));
     const char *volume_path = g_object_get_data(G_OBJECT(row_widget), "volume_path");
 
     if (volume_path) {
-        gtk_editable_set_text(GTK_EDITABLE(scanner_path_entry), volume_path);
+        gtk_editable_set_text(GTK_EDITABLE(w->scanner_path_entry), volume_path);
         char *vol_name = strrchr(volume_path, '/');
-        if (vol_name) gtk_editable_set_text(GTK_EDITABLE(scanner_db_entry), vol_name + 1);
+        if (vol_name) gtk_editable_set_text(GTK_EDITABLE(w->scanner_db_entry), vol_name + 1);
     }
 }
 
 void on_scanner_start_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    const char *path = gtk_editable_get_text(GTK_EDITABLE(scanner_path_entry));
-    const char *db_name = gtk_editable_get_text(GTK_EDITABLE(scanner_db_entry));
+    const char *path = gtk_editable_get_text(GTK_EDITABLE(w->scanner_path_entry));
+    const char *db_name = gtk_editable_get_text(GTK_EDITABLE(w->scanner_db_entry));
 
     if (strlen(path) == 0) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a directory to scan");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
 
-    current_scanner_scan = g_new0(ScannerContext, 1);
-    strncpy(current_scanner_scan->scan_path, path, sizeof(current_scanner_scan->scan_path) - 1);
+    w->current_scanner_scan = g_new0(ScannerContext, 1);
+    w->current_scanner_scan->win = w;
+    strncpy(w->current_scanner_scan->scan_path, path, sizeof(w->current_scanner_scan->scan_path) - 1);
 
     if (strlen(db_name) > 0) {
-        strncpy(current_scanner_scan->db_name, db_name, sizeof(current_scanner_scan->db_name) - 1);
+        strncpy(w->current_scanner_scan->db_name, db_name, sizeof(w->current_scanner_scan->db_name) - 1);
     } else {
         char *base = strrchr(path, '/');
-        strncpy(current_scanner_scan->db_name, base ? base + 1 : path, sizeof(current_scanner_scan->db_name) - 1);
+        strncpy(w->current_scanner_scan->db_name, base ? base + 1 : path, sizeof(w->current_scanner_scan->db_name) - 1);
     }
 
-    snprintf(current_scanner_scan->db_path, sizeof(current_scanner_scan->db_path),
-             "%s/%s.db", db_dir_path, current_scanner_scan->db_name);
+    snprintf(w->current_scanner_scan->db_path, sizeof(w->current_scanner_scan->db_path),
+             "%s/%s.db", db_dir_path, w->current_scanner_scan->db_name);
 
-    current_scanner_scan->enable_checksum = gtk_check_button_get_active(GTK_CHECK_BUTTON(scanner_checksum_check));
-    current_scanner_scan->update_mode = gtk_check_button_get_active(GTK_CHECK_BUTTON(scanner_update_check));
-    current_scanner_scan->num_workers = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(scanner_workers_spin));
-    g_mutex_init(&current_scanner_scan->lock);
+    w->current_scanner_scan->enable_checksum = gtk_check_button_get_active(GTK_CHECK_BUTTON(w->scanner_checksum_check));
+    w->current_scanner_scan->update_mode = gtk_check_button_get_active(GTK_CHECK_BUTTON(w->scanner_update_check));
+    w->current_scanner_scan->num_workers = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(w->scanner_workers_spin));
+    g_mutex_init(&w->current_scanner_scan->lock);
 
-    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_note_text));
+    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->scanner_note_text));
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(note_buffer, &start, &end);
     char *note = gtk_text_buffer_get_text(note_buffer, &start, &end, FALSE);
-    strncpy(current_scanner_scan->note, note, sizeof(current_scanner_scan->note) - 1);
+    strncpy(w->current_scanner_scan->note, note, sizeof(w->current_scanner_scan->note) - 1);
     g_free(note);
 
-    gtk_widget_set_sensitive(scanner_start_button, FALSE);
-    gtk_widget_set_sensitive(scanner_stop_button, TRUE);
-    gtk_widget_set_sensitive(scanner_path_entry, FALSE);
-    gtk_widget_set_sensitive(scanner_db_entry, FALSE);
-    gtk_widget_set_sensitive(scanner_workers_spin, FALSE);
-    gtk_progress_bar_set_fraction(scanner_progress_bar, 0.0);
-    gtk_label_set_text(GTK_LABEL(scanner_status_label), "Initializing...");
+    gtk_widget_set_sensitive(w->scanner_start_button, FALSE);
+    gtk_widget_set_sensitive(w->scanner_stop_button, TRUE);
+    gtk_widget_set_sensitive(w->scanner_path_entry, FALSE);
+    gtk_widget_set_sensitive(w->scanner_db_entry, FALSE);
+    gtk_widget_set_sensitive(w->scanner_workers_spin, FALSE);
+    gtk_progress_bar_set_fraction(w->scanner_progress_bar, 0.0);
+    gtk_label_set_text(GTK_LABEL(w->scanner_status_label), "Initializing...");
 
     // Clear results from any previous run
-    gtk_label_set_text(GTK_LABEL(scanner_current_file_label), "");
-    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(scanner_results_text)), "", -1);
+    gtk_label_set_text(GTK_LABEL(w->scanner_current_file_label), "");
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->scanner_results_text)), "", -1);
 
-    current_scanner_scan->scan_thread = g_thread_new("scanner", scanner_thread_func, current_scanner_scan);
+    char activity[300];
+    snprintf(activity, sizeof(activity), "Scanning %s", w->current_scanner_scan->db_name);
+    app_window_set_title(w, activity);
+
+    w->current_scanner_scan->scan_thread = g_thread_new("scanner", scanner_thread_func, w->current_scanner_scan);
 }
 
 void on_scanner_stop_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
-    if (current_scanner_scan) {
-        current_scanner_scan->should_stop = 1;
-        gtk_label_set_text(GTK_LABEL(scanner_status_label), "Stopping...");
+    AppWindow *w = user_data;
+    (void)button;
+    if (w->current_scanner_scan) {
+        w->current_scanner_scan->should_stop = 1;
+        gtk_label_set_text(GTK_LABEL(w->scanner_status_label), "Stopping...");
     }
 }
 
-GtkWidget *create_scanner_tab() {
+GtkWidget *create_scanner_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     // Left: Volumes
@@ -2938,15 +3059,15 @@ GtkWidget *create_scanner_tab() {
     gtk_label_set_xalign(GTK_LABEL(vol_label), 0.0);
     gtk_widget_set_hexpand(vol_label, TRUE);
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
-    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)scanner_refresh_volumes), NULL);
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(scanner_refresh_volumes), w);
     gtk_box_append(GTK_BOX(vol_header), vol_label);
     gtk_box_append(GTK_BOX(vol_header), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), vol_header);
 
-    scanner_volumes_list = gtk_list_box_new();
-    g_signal_connect(scanner_volumes_list, "row-activated", G_CALLBACK(on_scanner_volume_selected), NULL);
+    w->scanner_volumes_list = gtk_list_box_new();
+    g_signal_connect(w->scanner_volumes_list, "row-activated", G_CALLBACK(on_scanner_volume_selected), w);
     GtkWidget *vol_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(vol_scroll), scanner_volumes_list);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(vol_scroll), w->scanner_volumes_list);
     gtk_widget_set_vexpand(vol_scroll, TRUE);
     gtk_box_append(GTK_BOX(left_box), vol_scroll);
 
@@ -2963,95 +3084,95 @@ GtkWidget *create_scanner_tab() {
     GtkWidget *path_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *path_label = gtk_label_new("Path:");
     gtk_widget_set_size_request(path_label, 80, -1);
-    scanner_path_entry = gtk_entry_new();
-    gtk_widget_set_hexpand(scanner_path_entry, TRUE);
+    w->scanner_path_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(w->scanner_path_entry, TRUE);
     gtk_box_append(GTK_BOX(path_box), path_label);
-    gtk_box_append(GTK_BOX(path_box), scanner_path_entry);
+    gtk_box_append(GTK_BOX(path_box), w->scanner_path_entry);
     gtk_box_append(GTK_BOX(right_box), path_box);
 
     // Database
     GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *db_label = gtk_label_new("Database:");
     gtk_widget_set_size_request(db_label, 80, -1);
-    scanner_db_entry = gtk_entry_new();
-    gtk_widget_set_hexpand(scanner_db_entry, TRUE);
+    w->scanner_db_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(w->scanner_db_entry, TRUE);
     gtk_box_append(GTK_BOX(db_box), db_label);
-    gtk_box_append(GTK_BOX(db_box), scanner_db_entry);
+    gtk_box_append(GTK_BOX(db_box), w->scanner_db_entry);
     gtk_box_append(GTK_BOX(right_box), db_box);
 
     // Options
     GtkWidget *opts_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
-    scanner_checksum_check = gtk_check_button_new_with_label("Verify Checksums");
-    scanner_update_check = gtk_check_button_new_with_label("Update Database");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(scanner_update_check), TRUE);
-    gtk_box_append(GTK_BOX(opts_box), scanner_checksum_check);
-    gtk_box_append(GTK_BOX(opts_box), scanner_update_check);
+    w->scanner_checksum_check = gtk_check_button_new_with_label("Verify Checksums");
+    w->scanner_update_check = gtk_check_button_new_with_label("Update Database");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->scanner_update_check), TRUE);
+    gtk_box_append(GTK_BOX(opts_box), w->scanner_checksum_check);
+    gtk_box_append(GTK_BOX(opts_box), w->scanner_update_check);
     GtkWidget *workers_label = gtk_label_new("Workers:");
-    scanner_workers_spin = gtk_spin_button_new_with_range(1, MAX(2 * (int)g_get_num_processors(), 2), 1);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(scanner_workers_spin), 1);
-    gtk_widget_set_tooltip_text(scanner_workers_spin,
+    w->scanner_workers_spin = gtk_spin_button_new_with_range(1, MAX(2 * (int)g_get_num_processors(), 2), 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->scanner_workers_spin), 1);
+    gtk_widget_set_tooltip_text(w->scanner_workers_spin,
         "Number of files processed in parallel. Keep at 1 for spinning hard drives; "
         "higher values speed up checksum scans on SSD/NVMe drives.");
     GtkWidget *workers_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_box_append(GTK_BOX(workers_box), workers_label);
-    gtk_box_append(GTK_BOX(workers_box), scanner_workers_spin);
+    gtk_box_append(GTK_BOX(workers_box), w->scanner_workers_spin);
     gtk_box_append(GTK_BOX(opts_box), workers_box);
     gtk_box_append(GTK_BOX(right_box), opts_box);
 
     // Note
     GtkWidget *note_label = gtk_label_new("Note:");
     gtk_label_set_xalign(GTK_LABEL(note_label), 0.0);
-    scanner_note_text = gtk_text_view_new();
-    gtk_widget_set_size_request(scanner_note_text, -1, 50);
+    w->scanner_note_text = gtk_text_view_new();
+    gtk_widget_set_size_request(w->scanner_note_text, -1, 50);
     GtkWidget *note_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), scanner_note_text);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), w->scanner_note_text);
     gtk_box_append(GTK_BOX(right_box), note_label);
     gtk_box_append(GTK_BOX(right_box), note_scroll);
 
     // Buttons
     GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_halign(btn_box, GTK_ALIGN_CENTER);
-    scanner_start_button = gtk_button_new_with_label("Start Scan");
-    gtk_widget_add_css_class(scanner_start_button, "suggested-action");
-    gtk_widget_set_size_request(scanner_start_button, 120, -1);
-    g_signal_connect(scanner_start_button, "clicked", G_CALLBACK(on_scanner_start_clicked), NULL);
-    scanner_stop_button = gtk_button_new_with_label("Stop");
-    gtk_widget_add_css_class(scanner_stop_button, "destructive-action");
-    gtk_widget_set_size_request(scanner_stop_button, 120, -1);
-    gtk_widget_set_sensitive(scanner_stop_button, FALSE);
-    g_signal_connect(scanner_stop_button, "clicked", G_CALLBACK(on_scanner_stop_clicked), NULL);
-    gtk_box_append(GTK_BOX(btn_box), scanner_start_button);
-    gtk_box_append(GTK_BOX(btn_box), scanner_stop_button);
+    w->scanner_start_button = gtk_button_new_with_label("Start Scan");
+    gtk_widget_add_css_class(w->scanner_start_button, "suggested-action");
+    gtk_widget_set_size_request(w->scanner_start_button, 120, -1);
+    g_signal_connect(w->scanner_start_button, "clicked", G_CALLBACK(on_scanner_start_clicked), w);
+    w->scanner_stop_button = gtk_button_new_with_label("Stop");
+    gtk_widget_add_css_class(w->scanner_stop_button, "destructive-action");
+    gtk_widget_set_size_request(w->scanner_stop_button, 120, -1);
+    gtk_widget_set_sensitive(w->scanner_stop_button, FALSE);
+    g_signal_connect(w->scanner_stop_button, "clicked", G_CALLBACK(on_scanner_stop_clicked), w);
+    gtk_box_append(GTK_BOX(btn_box), w->scanner_start_button);
+    gtk_box_append(GTK_BOX(btn_box), w->scanner_stop_button);
     gtk_box_append(GTK_BOX(right_box), btn_box);
 
     gtk_box_append(GTK_BOX(right_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
 
     // Progress
-    scanner_progress_bar = GTK_PROGRESS_BAR(gtk_progress_bar_new());
-    gtk_widget_set_size_request(GTK_WIDGET(scanner_progress_bar), -1, 24);
-    gtk_box_append(GTK_BOX(right_box), GTK_WIDGET(scanner_progress_bar));
+    w->scanner_progress_bar = GTK_PROGRESS_BAR(gtk_progress_bar_new());
+    gtk_widget_set_size_request(GTK_WIDGET(w->scanner_progress_bar), -1, 24);
+    gtk_box_append(GTK_BOX(right_box), GTK_WIDGET(w->scanner_progress_bar));
 
     // Status
-    scanner_status_label = gtk_label_new("Ready");
-    gtk_label_set_xalign(GTK_LABEL(scanner_status_label), 0.0);
-    gtk_box_append(GTK_BOX(right_box), scanner_status_label);
+    w->scanner_status_label = gtk_label_new("Ready");
+    gtk_label_set_xalign(GTK_LABEL(w->scanner_status_label), 0.0);
+    gtk_box_append(GTK_BOX(right_box), w->scanner_status_label);
 
     // Current file
-    scanner_current_file_label = gtk_label_new("");
-    gtk_label_set_xalign(GTK_LABEL(scanner_current_file_label), 0.0);
-    gtk_widget_add_css_class(scanner_current_file_label, "dim-label");
-    gtk_label_set_ellipsize(GTK_LABEL(scanner_current_file_label), PANGO_ELLIPSIZE_START);
-    gtk_box_append(GTK_BOX(right_box), scanner_current_file_label);
+    w->scanner_current_file_label = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(w->scanner_current_file_label), 0.0);
+    gtk_widget_add_css_class(w->scanner_current_file_label, "dim-label");
+    gtk_label_set_ellipsize(GTK_LABEL(w->scanner_current_file_label), PANGO_ELLIPSIZE_START);
+    gtk_box_append(GTK_BOX(right_box), w->scanner_current_file_label);
 
     // Results
     GtkWidget *results_label = gtk_label_new("Results:");
     gtk_label_set_xalign(GTK_LABEL(results_label), 0.0);
-    scanner_results_text = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(scanner_results_text), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(scanner_results_text), TRUE);
+    w->scanner_results_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(w->scanner_results_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->scanner_results_text), TRUE);
     GtkWidget *results_scroll = gtk_scrolled_window_new();
     gtk_widget_set_vexpand(results_scroll, TRUE);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(results_scroll), scanner_results_text);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(results_scroll), w->scanner_results_text);
     gtk_box_append(GTK_BOX(right_box), results_label);
     gtk_box_append(GTK_BOX(right_box), results_scroll);
 
@@ -3065,26 +3186,7 @@ GtkWidget *create_scanner_tab() {
 // TAB 6: COMPARE RUNS
 // ============================================================================
 
-GtkWidget *compare_run1_drive_combo;
-GtkWidget *compare_run1_run_combo;
-GtkWidget *compare_run2_drive_combo;
-GtkWidget *compare_run2_run_combo;
-GtkWidget *compare_results_tree;
-GtkWidget *compare_filter_only_run1;
-GtkWidget *compare_filter_only_run2;
-GtkWidget *compare_filter_different;
-GtkWidget *compare_filter_missing_run1;
-GtkWidget *compare_filter_missing_run2;
-GtkWidget *compare_filter_all_run1;
-GtkWidget *compare_filter_all_run2;
-GtkWidget *compare_filter_all_diffs;
-GtkWidget *compare_filter_mtime_diff;
-GtkWidget *compare_filter_size_diff;
 
-char compare_run1_db_path[MAX_PATH] = "";
-char compare_run2_db_path[MAX_PATH] = "";
-sqlite3_int64 compare_run1_id = 0;
-sqlite3_int64 compare_run2_id = 0;
 
 void compare_load_runs_for_drive(GtkComboBoxText *combo, const char *db_name) {
     gtk_combo_box_text_remove_all(combo);
@@ -3117,35 +3219,35 @@ void compare_load_runs_for_drive(GtkComboBoxText *combo, const char *db_name) {
 }
 
 void on_compare_run1_drive_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
     const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
     if (db_name) {
-        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(compare_run1_run_combo), db_name);
-        snprintf(compare_run1_db_path, sizeof(compare_run1_db_path), "%s/%s.db", db_dir_path, db_name);
+        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(w->compare_run1_run_combo), db_name);
+        snprintf(w->compare_run1_db_path, sizeof(w->compare_run1_db_path), "%s/%s.db", db_dir_path, db_name);
         g_free((void *)db_name);
     }
 }
 
 void on_compare_run2_drive_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
     const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
     if (db_name) {
-        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(compare_run2_run_combo), db_name);
-        snprintf(compare_run2_db_path, sizeof(compare_run2_db_path), "%s/%s.db", db_dir_path, db_name);
+        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(w->compare_run2_run_combo), db_name);
+        snprintf(w->compare_run2_db_path, sizeof(w->compare_run2_db_path), "%s/%s.db", db_dir_path, db_name);
         g_free((void *)db_name);
     }
 }
 
 void on_compare_run1_run_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
     const char *id_str = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
-    compare_run1_id = id_str ? atoll(id_str) : 0;
+    w->compare_run1_id = id_str ? atoll(id_str) : 0;
 }
 
 void on_compare_run2_run_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
     const char *id_str = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
-    compare_run2_id = id_str ? atoll(id_str) : 0;
+    w->compare_run2_id = id_str ? atoll(id_str) : 0;
 }
 
 typedef struct {
@@ -3182,22 +3284,22 @@ const char* get_relative_path(const char *full_path) {
     return full_path;
 }
 
-void compare_perform_comparison() {
-    if (compare_run1_id == 0 || compare_run2_id == 0) {
+void compare_perform_comparison(AppWindow *w) {
+    if (w->compare_run1_id == 0 || w->compare_run2_id == 0) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Please select both runs to compare");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         return;
     }
 
     // Clear existing results
-    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(compare_results_tree)));
+    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->compare_results_tree)));
     gtk_list_store_clear(store);
 
     // Open both databases
     sqlite3 *db1, *db2;
-    if (sqlite3_open(compare_run1_db_path, &db1) != SQLITE_OK) return;
-    if (sqlite3_open(compare_run2_db_path, &db2) != SQLITE_OK) {
+    if (sqlite3_open(w->compare_run1_db_path, &db1) != SQLITE_OK) return;
+    if (sqlite3_open(w->compare_run2_db_path, &db2) != SQLITE_OK) {
         sqlite3_close(db1);
         return;
     }
@@ -3210,7 +3312,7 @@ void compare_perform_comparison() {
     if (sqlite3_prepare_v2(db1, "SELECT full_path, checksum, status, size, mtime FROM run_logs "
                                 "WHERE run_id = ?",
                           -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(stmt, 1, compare_run1_id);
+        sqlite3_bind_int64(stmt, 1, w->compare_run1_id);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *path = (const char *)sqlite3_column_text(stmt, 0);
             const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
@@ -3243,7 +3345,7 @@ void compare_perform_comparison() {
     if (sqlite3_prepare_v2(db2, "SELECT full_path, checksum, status, size, mtime FROM run_logs "
                                 "WHERE run_id = ?",
                           -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(stmt, 1, compare_run2_id);
+        sqlite3_bind_int64(stmt, 1, w->compare_run2_id);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *path = (const char *)sqlite3_column_text(stmt, 0);
             const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
@@ -3295,15 +3397,15 @@ void compare_perform_comparison() {
         CompareResult *result = (CompareResult *)value;
 
         int show = 0;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run1)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_only_run1)) &&
             strcmp(result->status_run2, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run2)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_only_run2)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_different)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_different)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
             strcmp(result->checksum_run1, result->checksum_run2) != 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_diffs)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_diffs)) &&
             (strcmp(result->status_run2, "NOT_IN_RUN") == 0 ||
              strcmp(result->status_run1, "NOT_IN_RUN") == 0 ||
              (strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
@@ -3311,19 +3413,19 @@ void compare_perform_comparison() {
               (strcmp(result->checksum_run1, result->checksum_run2) != 0 ||
                result->mtime_run1 != result->mtime_run2 ||
                result->size_run1 != result->size_run2)))) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run2)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_missing_run2)) &&
             strcmp(result->status_run2, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run1)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_missing_run1)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run1)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_run1)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") != 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_run2)) &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_mtime_diff)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_mtime_diff)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
             result->mtime_run1 != result->mtime_run2) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_size_diff)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_size_diff)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
             result->size_run1 != result->size_run2) show = 1;
@@ -3351,13 +3453,13 @@ void compare_perform_comparison() {
         CompareResult *result = (CompareResult *)value;
 
         int show = 0;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_only_run2)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_only_run2)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_diffs)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_diffs)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_missing_run1)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_missing_run1)) &&
             strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(compare_filter_all_run2)) &&
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_run2)) &&
             strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
 
         if (show) {
@@ -3383,25 +3485,27 @@ void compare_perform_comparison() {
 }
 
 void on_compare_filter_toggled(GtkCheckButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
-    compare_perform_comparison();
+    AppWindow *w = user_data;
+    (void)button;
+    compare_perform_comparison(w);
 }
 
 void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpointer user_data);
 
 void on_compare_export_csv_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
     GtkFileDialog *dialog = gtk_file_dialog_new();
     gtk_file_dialog_set_title(dialog, "Export Comparison to CSV");
     gtk_file_dialog_set_initial_name(dialog, "comparison.csv");
 
-    gtk_file_dialog_save(dialog, GTK_WINDOW(window), NULL,
-                        (GAsyncReadyCallback)on_compare_export_csv_response, NULL);
+    gtk_file_dialog_save(dialog, GTK_WINDOW(w->window), NULL,
+                        (GAsyncReadyCallback)on_compare_export_csv_response, w);
 }
 
 void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
 
     GtkFileDialog *dialog = GTK_FILE_DIALOG(source);
     GFile *file = gtk_file_dialog_save_finish(dialog, result, NULL);
@@ -3414,7 +3518,7 @@ void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpoin
     FILE *fp = fopen(path, "w");
     if (!fp) {
         GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to create CSV file");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
         g_object_unref(alert);
         g_free(path);
         return;
@@ -3424,7 +3528,7 @@ void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpoin
     fprintf(fp, "File Path,Status Run 1,Status Run 2,Checksum Run 1,Checksum Run 2\n");
 
     // Write data
-    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(compare_results_tree));
+    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->compare_results_tree));
     GtkTreeIter iter;
     gboolean valid = gtk_tree_model_get_iter_first(model, &iter);
 
@@ -3454,11 +3558,11 @@ void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpoin
     g_free(path);
 
     GtkAlertDialog *alert = gtk_alert_dialog_new("Comparison exported successfully");
-    gtk_alert_dialog_show(alert, GTK_WINDOW(window));
+    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
     g_object_unref(alert);
 }
 
-GtkWidget *create_compare_tab() {
+GtkWidget *create_compare_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     // Left panel: Selection and filters
@@ -3477,7 +3581,7 @@ GtkWidget *create_compare_tab() {
     gtk_widget_set_hexpand(run1_label, TRUE);
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
     gtk_widget_set_tooltip_text(refresh_btn, "Reload the drive and run lists");
-    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)compare_refresh_databases), NULL);
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(compare_refresh_databases), w);
     gtk_box_append(GTK_BOX(run1_header), run1_label);
     gtk_box_append(GTK_BOX(run1_header), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), run1_header);
@@ -3485,21 +3589,21 @@ GtkWidget *create_compare_tab() {
     GtkWidget *run1_drive_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *run1_drive_label = gtk_label_new("Drive:");
     gtk_widget_set_size_request(run1_drive_label, 60, -1);
-    compare_run1_drive_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(compare_run1_drive_combo, TRUE);
-    g_signal_connect(compare_run1_drive_combo, "changed", G_CALLBACK(on_compare_run1_drive_changed), NULL);
+    w->compare_run1_drive_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(w->compare_run1_drive_combo, TRUE);
+    g_signal_connect(w->compare_run1_drive_combo, "changed", G_CALLBACK(on_compare_run1_drive_changed), w);
     gtk_box_append(GTK_BOX(run1_drive_box), run1_drive_label);
-    gtk_box_append(GTK_BOX(run1_drive_box), compare_run1_drive_combo);
+    gtk_box_append(GTK_BOX(run1_drive_box), w->compare_run1_drive_combo);
     gtk_box_append(GTK_BOX(left_box), run1_drive_box);
 
     GtkWidget *run1_run_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *run1_run_label = gtk_label_new("Run:");
     gtk_widget_set_size_request(run1_run_label, 60, -1);
-    compare_run1_run_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(compare_run1_run_combo, TRUE);
-    g_signal_connect(compare_run1_run_combo, "changed", G_CALLBACK(on_compare_run1_run_changed), NULL);
+    w->compare_run1_run_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(w->compare_run1_run_combo, TRUE);
+    g_signal_connect(w->compare_run1_run_combo, "changed", G_CALLBACK(on_compare_run1_run_changed), w);
     gtk_box_append(GTK_BOX(run1_run_box), run1_run_label);
-    gtk_box_append(GTK_BOX(run1_run_box), compare_run1_run_combo);
+    gtk_box_append(GTK_BOX(run1_run_box), w->compare_run1_run_combo);
     gtk_box_append(GTK_BOX(left_box), run1_run_box);
 
     // Run 2 selection
@@ -3511,27 +3615,27 @@ GtkWidget *create_compare_tab() {
     GtkWidget *run2_drive_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *run2_drive_label = gtk_label_new("Drive:");
     gtk_widget_set_size_request(run2_drive_label, 60, -1);
-    compare_run2_drive_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(compare_run2_drive_combo, TRUE);
-    g_signal_connect(compare_run2_drive_combo, "changed", G_CALLBACK(on_compare_run2_drive_changed), NULL);
+    w->compare_run2_drive_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(w->compare_run2_drive_combo, TRUE);
+    g_signal_connect(w->compare_run2_drive_combo, "changed", G_CALLBACK(on_compare_run2_drive_changed), w);
     gtk_box_append(GTK_BOX(run2_drive_box), run2_drive_label);
-    gtk_box_append(GTK_BOX(run2_drive_box), compare_run2_drive_combo);
+    gtk_box_append(GTK_BOX(run2_drive_box), w->compare_run2_drive_combo);
     gtk_box_append(GTK_BOX(left_box), run2_drive_box);
 
     GtkWidget *run2_run_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *run2_run_label = gtk_label_new("Run:");
     gtk_widget_set_size_request(run2_run_label, 60, -1);
-    compare_run2_run_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(compare_run2_run_combo, TRUE);
-    g_signal_connect(compare_run2_run_combo, "changed", G_CALLBACK(on_compare_run2_run_changed), NULL);
+    w->compare_run2_run_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(w->compare_run2_run_combo, TRUE);
+    g_signal_connect(w->compare_run2_run_combo, "changed", G_CALLBACK(on_compare_run2_run_changed), w);
     gtk_box_append(GTK_BOX(run2_run_box), run2_run_label);
-    gtk_box_append(GTK_BOX(run2_run_box), compare_run2_run_combo);
+    gtk_box_append(GTK_BOX(run2_run_box), w->compare_run2_run_combo);
     gtk_box_append(GTK_BOX(left_box), run2_run_box);
 
     // Compare button
     GtkWidget *compare_btn = gtk_button_new_with_label("Compare Runs");
     gtk_widget_add_css_class(compare_btn, "suggested-action");
-    g_signal_connect(compare_btn, "clicked", G_CALLBACK((GCallback)compare_perform_comparison), NULL);
+    g_signal_connect_swapped(compare_btn, "clicked", G_CALLBACK(compare_perform_comparison), w);
     gtk_box_append(GTK_BOX(left_box), compare_btn);
 
     // Filters
@@ -3540,50 +3644,50 @@ GtkWidget *create_compare_tab() {
     gtk_label_set_xalign(GTK_LABEL(filter_label), 0.0);
     gtk_box_append(GTK_BOX(left_box), filter_label);
 
-    compare_filter_only_run1 = gtk_check_button_new_with_label("Only in Run 1");
-    g_signal_connect(compare_filter_only_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_only_run1);
+    w->compare_filter_only_run1 = gtk_check_button_new_with_label("Only in Run 1");
+    g_signal_connect(w->compare_filter_only_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_only_run1);
 
-    compare_filter_only_run2 = gtk_check_button_new_with_label("Only in Run 2");
-    g_signal_connect(compare_filter_only_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_only_run2);
+    w->compare_filter_only_run2 = gtk_check_button_new_with_label("Only in Run 2");
+    g_signal_connect(w->compare_filter_only_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_only_run2);
 
-    compare_filter_different = gtk_check_button_new_with_label("Different Checksum");
-    g_signal_connect(compare_filter_different, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_different);
+    w->compare_filter_different = gtk_check_button_new_with_label("Different Checksum");
+    g_signal_connect(w->compare_filter_different, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_different);
 
-    compare_filter_all_diffs = gtk_check_button_new_with_label("All Diffs");
-    g_signal_connect(compare_filter_all_diffs, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_all_diffs);
+    w->compare_filter_all_diffs = gtk_check_button_new_with_label("All Diffs");
+    g_signal_connect(w->compare_filter_all_diffs, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_all_diffs);
 
-    compare_filter_missing_run2 = gtk_check_button_new_with_label("Missing in Run 2");
-    g_signal_connect(compare_filter_missing_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_missing_run2);
+    w->compare_filter_missing_run2 = gtk_check_button_new_with_label("Missing in Run 2");
+    g_signal_connect(w->compare_filter_missing_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_missing_run2);
 
-    compare_filter_missing_run1 = gtk_check_button_new_with_label("Missing in Run 1");
-    g_signal_connect(compare_filter_missing_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_missing_run1);
+    w->compare_filter_missing_run1 = gtk_check_button_new_with_label("Missing in Run 1");
+    g_signal_connect(w->compare_filter_missing_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_missing_run1);
 
-    compare_filter_all_run1 = gtk_check_button_new_with_label("All Files in Run 1");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(compare_filter_all_run1), TRUE);
-    g_signal_connect(compare_filter_all_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_all_run1);
+    w->compare_filter_all_run1 = gtk_check_button_new_with_label("All Files in Run 1");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->compare_filter_all_run1), TRUE);
+    g_signal_connect(w->compare_filter_all_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_all_run1);
 
-    compare_filter_all_run2 = gtk_check_button_new_with_label("All Files in Run 2");
-    g_signal_connect(compare_filter_all_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_all_run2);
+    w->compare_filter_all_run2 = gtk_check_button_new_with_label("All Files in Run 2");
+    g_signal_connect(w->compare_filter_all_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_all_run2);
 
-    compare_filter_mtime_diff = gtk_check_button_new_with_label("Date/Time Difference");
-    g_signal_connect(compare_filter_mtime_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_mtime_diff);
+    w->compare_filter_mtime_diff = gtk_check_button_new_with_label("Date/Time Difference");
+    g_signal_connect(w->compare_filter_mtime_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_mtime_diff);
 
-    compare_filter_size_diff = gtk_check_button_new_with_label("Size Difference");
-    g_signal_connect(compare_filter_size_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), NULL);
-    gtk_box_append(GTK_BOX(left_box), compare_filter_size_diff);
+    w->compare_filter_size_diff = gtk_check_button_new_with_label("Size Difference");
+    g_signal_connect(w->compare_filter_size_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
+    gtk_box_append(GTK_BOX(left_box), w->compare_filter_size_diff);
 
     // Export button
     GtkWidget *export_btn = gtk_button_new_with_label("Export to CSV");
-    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_compare_export_csv_clicked), NULL);
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_compare_export_csv_clicked), w);
     gtk_box_append(GTK_BOX(left_box), export_btn);
 
     gtk_paned_set_start_child(GTK_PANED(paned), left_box);
@@ -3602,7 +3706,7 @@ GtkWidget *create_compare_tab() {
 
     GtkListStore *store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
                                              G_TYPE_STRING, G_TYPE_STRING);
-    compare_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    w->compare_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
     const char *titles[] = {"File Path", "Status Run 1", "Status Run 2", "Checksum Run 1", "Checksum Run 2"};
@@ -3611,11 +3715,11 @@ GtkWidget *create_compare_tab() {
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
         if (i == 0) gtk_tree_view_column_set_expand(column, TRUE);
-        gtk_tree_view_append_column(GTK_TREE_VIEW(compare_results_tree), column);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(w->compare_results_tree), column);
     }
 
     GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), compare_results_tree);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->compare_results_tree);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_box_append(GTK_BOX(right_box), scroll);
 
@@ -3635,17 +3739,6 @@ enum {
     DUPE_MODE_SAME_NAME_CHECKSUM   // Every file whose name and checksum both appear more than once
 };
 
-GtkWidget *dupe_mode_combo;       // DUPE_MODE_*
-GtkWidget *dupe_search_by_label;
-GtkWidget *dupe_search_by_combo;  // 0 = File Name, 1 = Checksum
-GtkWidget *dupe_search_entry;
-GtkWidget *dupe_search_filler;    // Takes the entry's space when the entry is hidden
-GtkWidget *dupe_db_combo;         // Single database or All (search mode)
-GtkWidget *dupe_db_multi_button;  // Popover of database checkboxes (duplicate-group modes)
-GtkWidget *dupe_db_all_check;
-GtkWidget *dupe_db_check_box;     // Holds one check button per database
-GtkWidget *dupe_results_tree;
-GtkWidget *dupe_status_label;
 
 // Builds a GLOB pattern from a user file name: '*' stays a wildcard, while GLOB's other
 // metacharacters (? and [) are bracketed so they match literally.
@@ -3862,16 +3955,16 @@ static int dupe_find_groups(char **db_files, int with_checksum, GtkListStore *st
 
 // Returns a NULL-terminated list of the database file names the "In:" combo selects.
 // In the duplicate-group modes the checkboxes pick the databases instead of the combo.
-static char **dupe_selected_databases(int mode) {
+static char **dupe_selected_databases(AppWindow *w, int mode) {
     GPtrArray *files = g_ptr_array_new();
     char *selected_db;
     if (mode == DUPE_MODE_SEARCH) {
-        selected_db = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(dupe_db_combo));
-    } else if (gtk_check_button_get_active(GTK_CHECK_BUTTON(dupe_db_all_check))) {
+        selected_db = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->dupe_db_combo));
+    } else if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->dupe_db_all_check))) {
         selected_db = g_strdup("All Databases");
     } else {
         selected_db = NULL;
-        for (GtkWidget *c = gtk_widget_get_first_child(dupe_db_check_box); c; c = gtk_widget_get_next_sibling(c)) {
+        for (GtkWidget *c = gtk_widget_get_first_child(w->dupe_db_check_box); c; c = gtk_widget_get_next_sibling(c)) {
             if (gtk_check_button_get_active(GTK_CHECK_BUTTON(c))) {
                 g_ptr_array_add(files, g_strdup(gtk_check_button_get_label(GTK_CHECK_BUTTON(c))));
             }
@@ -3899,35 +3992,36 @@ static char **dupe_selected_databases(int mode) {
 }
 
 void on_dupe_search_clicked(GtkButton *button, gpointer user_data) {
-    (void)button; (void)user_data;
+    AppWindow *w = user_data;
+    (void)button;
 
-    int mode = gtk_combo_box_get_active(GTK_COMBO_BOX(dupe_mode_combo));
-    int by_checksum = gtk_combo_box_get_active(GTK_COMBO_BOX(dupe_search_by_combo)) == 1;
+    int mode = gtk_combo_box_get_active(GTK_COMBO_BOX(w->dupe_mode_combo));
+    int by_checksum = gtk_combo_box_get_active(GTK_COMBO_BOX(w->dupe_search_by_combo)) == 1;
     char value[MAX_PATH];
     if (mode == DUPE_MODE_SEARCH) {
-        snprintf(value, sizeof(value), "%s", gtk_editable_get_text(GTK_EDITABLE(dupe_search_entry)));
+        snprintf(value, sizeof(value), "%s", gtk_editable_get_text(GTK_EDITABLE(w->dupe_search_entry)));
         if (by_checksum) g_strstrip(value);
         if (value[0] == '\0') {
-            gtk_label_set_text(GTK_LABEL(dupe_status_label),
+            gtk_label_set_text(GTK_LABEL(w->dupe_status_label),
                                by_checksum ? "Enter a checksum to search" : "Enter a file name to search");
             return;
         }
     }
 
     // Detach the model while filling it; a large result set fills much faster unsorted and unbound
-    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(dupe_results_tree)));
+    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->dupe_results_tree)));
     g_object_ref(store);
-    gtk_tree_view_set_model(GTK_TREE_VIEW(dupe_results_tree), NULL);
+    gtk_tree_view_set_model(GTK_TREE_VIEW(w->dupe_results_tree), NULL);
     gtk_list_store_clear(store);
     gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(store),
                                          GTK_TREE_SORTABLE_UNSORTED_SORT_COLUMN_ID, GTK_SORT_ASCENDING);
 
-    char **db_files = dupe_selected_databases(mode);
+    char **db_files = dupe_selected_databases(w, mode);
     if (!db_files[0]) {
         g_strfreev(db_files);
-        gtk_tree_view_set_model(GTK_TREE_VIEW(dupe_results_tree), GTK_TREE_MODEL(store));
+        gtk_tree_view_set_model(GTK_TREE_VIEW(w->dupe_results_tree), GTK_TREE_MODEL(store));
         g_object_unref(store);
-        gtk_label_set_text(GTK_LABEL(dupe_status_label), "Select at least one database");
+        gtk_label_set_text(GTK_LABEL(w->dupe_status_label), "Select at least one database");
         return;
     }
     int count = 0, drives = 0, groups = 0;
@@ -3960,37 +4054,37 @@ void on_dupe_search_clicked(GtkButton *button, gpointer user_data) {
     }
     g_strfreev(db_files);
 
-    gtk_tree_view_set_model(GTK_TREE_VIEW(dupe_results_tree), GTK_TREE_MODEL(store));
+    gtk_tree_view_set_model(GTK_TREE_VIEW(w->dupe_results_tree), GTK_TREE_MODEL(store));
     g_object_unref(store);
-    gtk_label_set_text(GTK_LABEL(dupe_status_label), status);
+    gtk_label_set_text(GTK_LABEL(w->dupe_status_label), status);
 }
 
 static void on_dupe_search_by_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
-    gtk_entry_set_placeholder_text(GTK_ENTRY(dupe_search_entry),
+    AppWindow *w = user_data;
+    gtk_entry_set_placeholder_text(GTK_ENTRY(w->dupe_search_entry),
                                    gtk_combo_box_get_active(combo) == 1 ? "Enter SHA-256 checksum..." : "File name (* matches any characters)...");
 }
 
 // The search fields only apply to the search mode; the duplicate-group modes need no input
 static void on_dupe_mode_changed(GtkComboBox *combo, gpointer user_data) {
-    (void)user_data;
+    AppWindow *w = user_data;
     gboolean searching = gtk_combo_box_get_active(combo) == DUPE_MODE_SEARCH;
-    gtk_widget_set_visible(dupe_search_by_label, searching);
-    gtk_widget_set_visible(dupe_search_by_combo, searching);
-    gtk_widget_set_visible(dupe_search_entry, searching);
-    gtk_widget_set_visible(dupe_search_filler, !searching);
-    gtk_widget_set_visible(dupe_db_combo, searching);
-    gtk_widget_set_visible(dupe_db_multi_button, !searching);
+    gtk_widget_set_visible(w->dupe_search_by_label, searching);
+    gtk_widget_set_visible(w->dupe_search_by_combo, searching);
+    gtk_widget_set_visible(w->dupe_search_entry, searching);
+    gtk_widget_set_visible(w->dupe_search_filler, !searching);
+    gtk_widget_set_visible(w->dupe_db_combo, searching);
+    gtk_widget_set_visible(w->dupe_db_multi_button, !searching);
 }
 
 // Shows the database selection on the button: "All Databases", one name, or a count
-static void dupe_update_db_multi_label(void) {
+static void dupe_update_db_multi_label(AppWindow *w) {
     const char *label = "All Databases";
     char buf[300];
-    if (!gtk_check_button_get_active(GTK_CHECK_BUTTON(dupe_db_all_check))) {
+    if (!gtk_check_button_get_active(GTK_CHECK_BUTTON(w->dupe_db_all_check))) {
         int n = 0;
         const char *only = NULL;
-        for (GtkWidget *c = gtk_widget_get_first_child(dupe_db_check_box); c; c = gtk_widget_get_next_sibling(c)) {
+        for (GtkWidget *c = gtk_widget_get_first_child(w->dupe_db_check_box); c; c = gtk_widget_get_next_sibling(c)) {
             if (gtk_check_button_get_active(GTK_CHECK_BUTTON(c))) {
                 n++;
                 only = gtk_check_button_get_label(GTK_CHECK_BUTTON(c));
@@ -4006,43 +4100,44 @@ static void dupe_update_db_multi_label(void) {
             label = buf;
         }
     }
-    gtk_menu_button_set_label(GTK_MENU_BUTTON(dupe_db_multi_button), label);
+    gtk_menu_button_set_label(GTK_MENU_BUTTON(w->dupe_db_multi_button), label);
 }
 
 // "All Databases" overrides the individual checkboxes, so they are disabled while it is on
 static void on_dupe_db_all_toggled(GtkCheckButton *check, gpointer user_data) {
-    (void)user_data;
-    gtk_widget_set_sensitive(dupe_db_check_box, !gtk_check_button_get_active(check));
-    dupe_update_db_multi_label();
+    AppWindow *w = user_data;
+    gtk_widget_set_sensitive(w->dupe_db_check_box, !gtk_check_button_get_active(check));
+    dupe_update_db_multi_label(w);
 }
 
 static void on_dupe_db_check_toggled(GtkCheckButton *check, gpointer user_data) {
-    (void)check; (void)user_data;
-    dupe_update_db_multi_label();
+    AppWindow *w = user_data;
+    (void)check;
+    dupe_update_db_multi_label(w);
 }
 
 // Rebuilds the database checkboxes from the given ".db" file names, keeping earlier selections
-static void dupe_refresh_db_checks(GPtrArray *files) {
+static void dupe_refresh_db_checks(AppWindow *w, GPtrArray *files) {
     GHashTable *checked = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     GtkWidget *c;
-    while ((c = gtk_widget_get_first_child(dupe_db_check_box)) != NULL) {
+    while ((c = gtk_widget_get_first_child(w->dupe_db_check_box)) != NULL) {
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(c))) {
             g_hash_table_add(checked, g_strdup(gtk_check_button_get_label(GTK_CHECK_BUTTON(c))));
         }
-        gtk_box_remove(GTK_BOX(dupe_db_check_box), c);
+        gtk_box_remove(GTK_BOX(w->dupe_db_check_box), c);
     }
     for (guint i = 0; i < files->len; i++) {
         const char *file_name = g_ptr_array_index(files, i);
         GtkWidget *check = gtk_check_button_new_with_label(file_name);
         gtk_check_button_set_active(GTK_CHECK_BUTTON(check), g_hash_table_contains(checked, file_name));
-        g_signal_connect(check, "toggled", G_CALLBACK(on_dupe_db_check_toggled), NULL);
-        gtk_box_append(GTK_BOX(dupe_db_check_box), check);
+        g_signal_connect(check, "toggled", G_CALLBACK(on_dupe_db_check_toggled), w);
+        gtk_box_append(GTK_BOX(w->dupe_db_check_box), check);
     }
     g_hash_table_destroy(checked);
-    dupe_update_db_multi_label();
+    dupe_update_db_multi_label(w);
 }
 
-GtkWidget *create_dupefinder_tab() {
+GtkWidget *create_dupefinder_tab(AppWindow *w) {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(box, 16);
     gtk_widget_set_margin_end(box, 16);
@@ -4051,32 +4146,32 @@ GtkWidget *create_dupefinder_tab() {
 
     GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 
-    dupe_mode_combo = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_mode_combo), "Search By File Name / Checksum");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_mode_combo), "All Files With Matching Names");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_mode_combo), "All Files With Matching Name + Checksum");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(dupe_mode_combo), DUPE_MODE_SEARCH);
-    g_signal_connect(dupe_mode_combo, "changed", G_CALLBACK(on_dupe_mode_changed), NULL);
+    w->dupe_mode_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->dupe_mode_combo), "Search By File Name / Checksum");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->dupe_mode_combo), "All Files With Matching Names");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->dupe_mode_combo), "All Files With Matching Name + Checksum");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(w->dupe_mode_combo), DUPE_MODE_SEARCH);
+    g_signal_connect(w->dupe_mode_combo, "changed", G_CALLBACK(on_dupe_mode_changed), w);
 
-    dupe_search_by_label = gtk_label_new("Search by:");
+    w->dupe_search_by_label = gtk_label_new("Search by:");
 
-    dupe_search_by_combo = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_search_by_combo), "File Name");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(dupe_search_by_combo), "File Checksum");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(dupe_search_by_combo), 0);
-    g_signal_connect(dupe_search_by_combo, "changed", G_CALLBACK(on_dupe_search_by_changed), NULL);
+    w->dupe_search_by_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->dupe_search_by_combo), "File Name");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->dupe_search_by_combo), "File Checksum");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(w->dupe_search_by_combo), 0);
+    g_signal_connect(w->dupe_search_by_combo, "changed", G_CALLBACK(on_dupe_search_by_changed), w);
 
-    dupe_search_entry = gtk_entry_new();
-    gtk_widget_set_hexpand(dupe_search_entry, TRUE);
-    gtk_entry_set_placeholder_text(GTK_ENTRY(dupe_search_entry), "File name (* matches any characters)...");
-    g_signal_connect(dupe_search_entry, "activate", G_CALLBACK(on_dupe_search_clicked), NULL);
+    w->dupe_search_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(w->dupe_search_entry, TRUE);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(w->dupe_search_entry), "File name (* matches any characters)...");
+    g_signal_connect(w->dupe_search_entry, "activate", G_CALLBACK(on_dupe_search_clicked), w);
 
-    dupe_search_filler = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_set_hexpand(dupe_search_filler, TRUE);
-    gtk_widget_set_visible(dupe_search_filler, FALSE);
+    w->dupe_search_filler = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_hexpand(w->dupe_search_filler, TRUE);
+    gtk_widget_set_visible(w->dupe_search_filler, FALSE);
 
-    dupe_db_combo = gtk_combo_box_text_new();
-    gtk_widget_set_size_request(dupe_db_combo, 200, -1);
+    w->dupe_db_combo = gtk_combo_box_text_new();
+    gtk_widget_set_size_request(w->dupe_db_combo, 200, -1);
 
     // Duplicate-group modes: pick one or more databases, or All, from a checkbox popover
     GtkWidget *popover_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -4084,52 +4179,52 @@ GtkWidget *create_dupefinder_tab() {
     gtk_widget_set_margin_end(popover_box, 6);
     gtk_widget_set_margin_top(popover_box, 6);
     gtk_widget_set_margin_bottom(popover_box, 6);
-    dupe_db_all_check = gtk_check_button_new_with_label("All Databases");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(dupe_db_all_check), TRUE);
-    g_signal_connect(dupe_db_all_check, "toggled", G_CALLBACK(on_dupe_db_all_toggled), NULL);
-    gtk_box_append(GTK_BOX(popover_box), dupe_db_all_check);
+    w->dupe_db_all_check = gtk_check_button_new_with_label("All Databases");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->dupe_db_all_check), TRUE);
+    g_signal_connect(w->dupe_db_all_check, "toggled", G_CALLBACK(on_dupe_db_all_toggled), w);
+    gtk_box_append(GTK_BOX(popover_box), w->dupe_db_all_check);
     gtk_box_append(GTK_BOX(popover_box), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
-    dupe_db_check_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_set_sensitive(dupe_db_check_box, FALSE);
+    w->dupe_db_check_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_sensitive(w->dupe_db_check_box, FALSE);
     GtkWidget *check_scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(check_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(check_scroll), TRUE);
     gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(check_scroll), 400);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(check_scroll), dupe_db_check_box);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(check_scroll), w->dupe_db_check_box);
     gtk_box_append(GTK_BOX(popover_box), check_scroll);
     GtkWidget *popover = gtk_popover_new();
     gtk_popover_set_child(GTK_POPOVER(popover), popover_box);
 
-    dupe_db_multi_button = gtk_menu_button_new();
-    gtk_menu_button_set_popover(GTK_MENU_BUTTON(dupe_db_multi_button), popover);
-    gtk_menu_button_set_label(GTK_MENU_BUTTON(dupe_db_multi_button), "All Databases");
-    gtk_widget_set_size_request(dupe_db_multi_button, 200, -1);
-    gtk_widget_set_visible(dupe_db_multi_button, FALSE);
+    w->dupe_db_multi_button = gtk_menu_button_new();
+    gtk_menu_button_set_popover(GTK_MENU_BUTTON(w->dupe_db_multi_button), popover);
+    gtk_menu_button_set_label(GTK_MENU_BUTTON(w->dupe_db_multi_button), "All Databases");
+    gtk_widget_set_size_request(w->dupe_db_multi_button, 200, -1);
+    gtk_widget_set_visible(w->dupe_db_multi_button, FALSE);
 
     GtkWidget *search_btn = gtk_button_new_with_label("Find Duplicates");
     gtk_widget_add_css_class(search_btn, "suggested-action");
-    g_signal_connect(search_btn, "clicked", G_CALLBACK(on_dupe_search_clicked), NULL);
+    g_signal_connect(search_btn, "clicked", G_CALLBACK(on_dupe_search_clicked), w);
 
     gtk_box_append(GTK_BOX(search_box), gtk_label_new("Mode:"));
-    gtk_box_append(GTK_BOX(search_box), dupe_mode_combo);
-    gtk_box_append(GTK_BOX(search_box), dupe_search_by_label);
-    gtk_box_append(GTK_BOX(search_box), dupe_search_by_combo);
-    gtk_box_append(GTK_BOX(search_box), dupe_search_entry);
-    gtk_box_append(GTK_BOX(search_box), dupe_search_filler);
+    gtk_box_append(GTK_BOX(search_box), w->dupe_mode_combo);
+    gtk_box_append(GTK_BOX(search_box), w->dupe_search_by_label);
+    gtk_box_append(GTK_BOX(search_box), w->dupe_search_by_combo);
+    gtk_box_append(GTK_BOX(search_box), w->dupe_search_entry);
+    gtk_box_append(GTK_BOX(search_box), w->dupe_search_filler);
     gtk_box_append(GTK_BOX(search_box), gtk_label_new("In:"));
-    gtk_box_append(GTK_BOX(search_box), dupe_db_combo);
+    gtk_box_append(GTK_BOX(search_box), w->dupe_db_combo);
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
     gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list");
-    g_signal_connect(refresh_btn, "clicked", G_CALLBACK((GCallback)dupe_refresh_databases), NULL);
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(dupe_refresh_databases), w);
 
-    gtk_box_append(GTK_BOX(search_box), dupe_db_multi_button);
+    gtk_box_append(GTK_BOX(search_box), w->dupe_db_multi_button);
     gtk_box_append(GTK_BOX(search_box), search_btn);
     gtk_box_append(GTK_BOX(search_box), refresh_btn);
     gtk_box_append(GTK_BOX(box), search_box);
 
     GtkListStore *store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
                                              G_TYPE_STRING, G_TYPE_STRING);
-    dupe_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    w->dupe_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
     const char *titles[] = {"File Name", "Drive", "Checksum", "Full Path", "Last Checksum Calculation"};
@@ -4139,18 +4234,18 @@ GtkWidget *create_dupefinder_tab() {
         gtk_tree_view_column_set_resizable(column, TRUE);
         gtk_tree_view_column_set_sort_column_id(column, i);
         if (i == 3) gtk_tree_view_column_set_expand(column, TRUE);
-        gtk_tree_view_append_column(GTK_TREE_VIEW(dupe_results_tree), column);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(w->dupe_results_tree), column);
     }
 
     GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), dupe_results_tree);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->dupe_results_tree);
     gtk_widget_set_vexpand(scroll, TRUE);
     gtk_box_append(GTK_BOX(box), scroll);
 
-    dupe_status_label = gtk_label_new("Ready");
-    gtk_label_set_xalign(GTK_LABEL(dupe_status_label), 0.0);
-    gtk_widget_add_css_class(dupe_status_label, "dim-label");
-    gtk_box_append(GTK_BOX(box), dupe_status_label);
+    w->dupe_status_label = gtk_label_new("Ready");
+    gtk_label_set_xalign(GTK_LABEL(w->dupe_status_label), 0.0);
+    gtk_widget_add_css_class(w->dupe_status_label, "dim-label");
+    gtk_box_append(GTK_BOX(box), w->dupe_status_label);
 
     return box;
 }
@@ -4198,25 +4293,25 @@ GtkWidget *create_about_tab() {
 // MAIN WINDOW SETUP
 // ============================================================================
 
-void locator_refresh_databases() {
+void locator_refresh_databases(AppWindow *w) {
     GPtrArray *files = list_database_files();
     if (!files) return;
-    refill_database_combo(locator_db_combo, files, "All Databases", FALSE);
+    refill_database_combo(w->locator_db_combo, files, "All Databases", FALSE);
     g_ptr_array_unref(files);
 }
 
-void dupe_refresh_databases() {
+void dupe_refresh_databases(AppWindow *w) {
     GPtrArray *files = list_database_files();
     if (!files) return;
-    refill_database_combo(dupe_db_combo, files, "All Databases", FALSE);
-    dupe_refresh_db_checks(files);
+    refill_database_combo(w->dupe_db_combo, files, "All Databases", FALSE);
+    dupe_refresh_db_checks(w, files);
     g_ptr_array_unref(files);
 }
 
-void summary_refresh_databases() {
+void summary_refresh_databases(AppWindow *w) {
     GPtrArray *files = list_database_files();
     if (!files) return;
-    refill_database_combo(summary_db_combo, files, NULL, FALSE);
+    refill_database_combo(w->summary_db_combo, files, NULL, FALSE);
     g_ptr_array_unref(files);
 }
 
@@ -4228,71 +4323,171 @@ static void compare_refill_side(GtkWidget *drive_combo, GtkWidget *run_combo, GP
     g_free(run_id);
 }
 
-void compare_refresh_databases() {
+void compare_refresh_databases(AppWindow *w) {
     GPtrArray *files = list_database_files();
     if (!files) return;
-    compare_refill_side(compare_run1_drive_combo, compare_run1_run_combo, files);
-    compare_refill_side(compare_run2_drive_combo, compare_run2_run_combo, files);
+    compare_refill_side(w->compare_run1_drive_combo, w->compare_run1_run_combo, files);
+    compare_refill_side(w->compare_run2_drive_combo, w->compare_run2_run_combo, files);
     g_ptr_array_unref(files);
 }
 
-void refresh_all_database_combos() {
-    locator_refresh_databases();
-    dupe_refresh_databases();
-    summary_refresh_databases();
-    compare_refresh_databases();
+void refresh_all_database_combos(AppWindow *w) {
+    locator_refresh_databases(w);
+    dupe_refresh_databases(w);
+    summary_refresh_databases(w);
+    compare_refresh_databases(w);
+}
+
+// After a drive database is deleted or renamed, every open window drops or renames it in its lists
+void refresh_database_lists_everywhere(void) {
+    for (GList *l = app_windows; l; l = l->next) {
+        AppWindow *w = l->data;
+        drives_refresh_list(w);
+        refresh_all_database_combos(w);
+        logs_refresh_databases(w);
+    }
 }
 
 // ============================================================================
-// NEW WINDOW
+// WINDOWS
 // ============================================================================
 
-// Each window is its own instance of the application (separate process), so
-// windows have fully independent tab state and can run scans side by side
-static void launch_new_instance(void) {
-    char exe[MAX_PATH] = "";
-#ifdef __APPLE__
-    char raw[MAX_PATH];
-    uint32_t size = sizeof(raw);
-    if (_NSGetExecutablePath(raw, &size) != 0 || !realpath(raw, exe)) exe[0] = '\0';
-#else
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    exe[n > 0 ? n : 0] = '\0';
-#endif
+static GtkApplication *the_app;
 
-    GError *error = NULL;
-    gboolean ok = FALSE;
-    if (exe[0]) {
-        // Inside an app bundle, ask Launch Services for a new instance of the
-        // bundle so it is activated and brought to the front
-        char *bundle_end = strstr(exe, ".app/Contents/MacOS/");
-        if (bundle_end) {
-            bundle_end[4] = '\0';
-            char *argv[] = { "/usr/bin/open", "-n", exe, NULL };
-            ok = g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, &error);
-        } else {
-            char *argv[] = { exe, NULL };
-            ok = g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, &error);
+static void app_window_new(GtkApplication *app);
+
+// Drops every signal handler that points at w, so nothing touches w while the window's
+// widgets are being torn down
+static void app_window_disconnect_handlers(GtkWidget *widget, AppWindow *w) {
+    g_signal_handlers_disconnect_matched(widget, G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, w);
+    if (GTK_IS_TREE_VIEW(widget)) {
+        g_signal_handlers_disconnect_matched(gtk_tree_view_get_selection(GTK_TREE_VIEW(widget)),
+                                             G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, w);
+    }
+    for (GtkWidget *c = gtk_widget_get_first_child(widget); c; c = gtk_widget_get_next_sibling(c)) {
+        app_window_disconnect_handlers(c, w);
+    }
+}
+
+// Removes w from the open windows before its window goes away. w itself is freed with the window.
+static void app_window_detach(AppWindow *w) {
+    app_windows = g_list_remove(app_windows, w);
+    app_window_disconnect_handlers(w->window, w);
+}
+
+static void on_close_with_scan_response(GObject *source, GAsyncResult *result, gpointer user_data) {
+    AppWindow *w = user_data;
+    // Buttons: 0 = Cancel, 1 = Stop Scan and Close
+    int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, NULL);
+    w->close_prompt_open = FALSE;
+    if (choice != 1 || !w->current_scanner_scan) return;
+
+    // The scan stops at the next file; scanner_scan_completed() then closes the window
+    w->close_after_scan = TRUE;
+    w->current_scanner_scan->should_stop = 1;
+    gtk_label_set_text(GTK_LABEL(w->scanner_status_label), "Stopping...");
+}
+
+static gboolean on_app_window_close_request(GtkWindow *window, gpointer user_data) {
+    (void)window;
+    AppWindow *w = user_data;
+
+    if (w->current_scanner_scan) {
+        if (!w->close_after_scan && !w->close_prompt_open) {
+            w->close_prompt_open = TRUE;
+            GtkAlertDialog *alert = gtk_alert_dialog_new("A scan is running in this window");
+            gtk_alert_dialog_set_detail(alert, "Stop the scan and close the window? "
+                                               "The files checked so far are saved as a run.");
+            gtk_alert_dialog_set_buttons(alert, (const char *[]){"Cancel", "Stop Scan and Close", NULL});
+            gtk_alert_dialog_set_cancel_button(alert, 0);
+            gtk_alert_dialog_set_default_button(alert, 0);
+            gtk_alert_dialog_choose(alert, GTK_WINDOW(w->window), NULL, on_close_with_scan_response, w);
+            g_object_unref(alert);
         }
+        return TRUE;  // stay open until the scan has stopped
     }
 
-    if (!ok) {
-        GtkAlertDialog *alert = gtk_alert_dialog_new("Could not open a new window");
-        gtk_alert_dialog_set_detail(alert, error ? error->message : "Could not find the application executable");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(window));
-        g_object_unref(alert);
+    app_window_detach(w);
+    return FALSE;
+}
+
+// Lowest window number not in use, so closing window 2 lets the next new window reuse "2"
+static int app_window_next_number(void) {
+    for (int n = 1; ; n++) {
+        gboolean used = FALSE;
+        for (GList *l = app_windows; l && !used; l = l->next) {
+            used = ((AppWindow *)l->data)->number == n;
+        }
+        if (!used) return n;
     }
-    g_clear_error(&error);
+}
+
+static void app_window_new(GtkApplication *app) {
+    AppWindow *w = g_new0(AppWindow, 1);
+    w->selected_drive_id = -1;
+    w->number = app_window_next_number();
+    app_windows = g_list_append(app_windows, w);
+
+    w->window = gtk_application_window_new(app);
+    g_object_set_data_full(G_OBJECT(w->window), "app-window", w, g_free);
+    g_signal_connect(w->window, "close-request", G_CALLBACK(on_app_window_close_request), w);
+    app_window_set_title(w, NULL);
+    gtk_window_set_default_size(GTK_WINDOW(w->window), 1200, 750);
+
+    // Create notebook with tabs
+    w->main_notebook = gtk_notebook_new();
+    gtk_notebook_set_tab_pos(GTK_NOTEBOOK(w->main_notebook), GTK_POS_TOP);
+
+    // Add tabs
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_locator_tab(w),
+                            gtk_label_new("File Locator"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_dupefinder_tab(w),
+                            gtk_label_new("DupeFinder"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_drives_tab(w),
+                            gtk_label_new("Drives"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_summary_tab(w),
+                            gtk_label_new("Summary"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_logs_tab(w),
+                            gtk_label_new("Logs"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_compare_tab(w),
+                            gtk_label_new("Compare"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_scanner_tab(w),
+                            gtk_label_new("File Scanner"));
+    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_about_tab(),
+                            gtk_label_new("About"));
+
+    gtk_window_set_child(GTK_WINDOW(w->window), w->main_notebook);
+
+    // Initialize scanner volumes list and logs databases
+    scanner_refresh_volumes(w);
+    logs_refresh_databases(w);
+    gtk_window_present(GTK_WINDOW(w->window));
+
+    // Initialize
+    refresh_all_database_combos(w);
+    drives_refresh_list(w);
 }
 
 static void on_new_window_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
-    (void)action; (void)parameter; (void)user_data;
-    launch_new_instance();
+    (void)action; (void)parameter;
+    app_window_new(GTK_APPLICATION(user_data));
 }
 
+#ifdef __APPLE__
+static void on_dock_new_window(void) {
+    app_window_new(the_app);
+}
+#endif
+
+// Closes every window the normal way, so a window with a running scan asks first.
+// The application exits once the last window has closed.
 static void on_quit_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
-    (void)action; (void)parameter;
-    g_application_quit(G_APPLICATION(user_data));
+    (void)action; (void)parameter; (void)user_data;
+    GList *windows = g_list_copy(app_windows);
+    for (GList *l = windows; l; l = l->next) {
+        gtk_window_close(GTK_WINDOW(((AppWindow *)l->data)->window));
+    }
+    g_list_free(windows);
 }
 
 void startup(GtkApplication *app, gpointer user_data) {
@@ -4304,11 +4499,13 @@ void startup(GtkApplication *app, gpointer user_data) {
     };
     g_action_map_add_action_entries(G_ACTION_MAP(app), app_actions, G_N_ELEMENTS(app_actions), app);
     gtk_application_set_accels_for_action(app, "app.new-window", (const char *[]){ "<Primary>n", NULL });
+    gtk_application_set_accels_for_action(app, "window.close", (const char *[]){ "<Primary>w", NULL });
     gtk_application_set_accels_for_action(app, "app.quit", (const char *[]){ "<Primary>q", NULL });
 
     // File menu (in the macOS menu bar; inside the window elsewhere)
     GMenu *file_menu = g_menu_new();
     g_menu_append(file_menu, "New Window", "app.new-window");
+    g_menu_append(file_menu, "Close Window", "window.close");
     GMenu *menubar = g_menu_new();
     g_menu_append_submenu(menubar, "File", G_MENU_MODEL(file_menu));
     gtk_application_set_menubar(app, G_MENU_MODEL(menubar));
@@ -4316,50 +4513,16 @@ void startup(GtkApplication *app, gpointer user_data) {
     g_object_unref(menubar);
 
 #ifdef __APPLE__
-    // Right-click the Dock icon → New Window
-    macos_install_dock_menu("New Window", launch_new_instance);
+    // Right-click the Dock icon: macOS lists the open windows, followed by New Window
+    macos_install_dock_menu("New Window", on_dock_new_window);
 #endif
 }
 
+// Launching the application (or launching it again on systems where the running copy
+// takes over) opens a window
 void activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
-
-    window = gtk_application_window_new(app);
-    gtk_window_set_title(GTK_WINDOW(window), "File Tracker Unified");
-    gtk_window_set_default_size(GTK_WINDOW(window), 1200, 750);
-
-    // Create notebook with tabs
-    main_notebook = gtk_notebook_new();
-    gtk_notebook_set_tab_pos(GTK_NOTEBOOK(main_notebook), GTK_POS_TOP);
-
-    // Add tabs
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_locator_tab(),
-                            gtk_label_new("File Locator"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_dupefinder_tab(),
-                            gtk_label_new("DupeFinder"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_drives_tab(),
-                            gtk_label_new("Drives"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_summary_tab(),
-                            gtk_label_new("Summary"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_logs_tab(),
-                            gtk_label_new("Logs"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_compare_tab(),
-                            gtk_label_new("Compare"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_scanner_tab(),
-                            gtk_label_new("File Scanner"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(main_notebook), create_about_tab(),
-                            gtk_label_new("About"));
-
-    gtk_window_set_child(GTK_WINDOW(window), main_notebook);
-
-    // Initialize scanner volumes list and logs databases
-    scanner_refresh_volumes();
-    logs_refresh_databases();
-    gtk_window_present(GTK_WINDOW(window));
-
-    // Initialize
-    refresh_all_database_combos();
-    drives_refresh_list();
+    app_window_new(app);
 }
 
 int main(int argc, char *argv[]) {
@@ -4380,9 +4543,8 @@ int main(int argc, char *argv[]) {
 
     load_ignore_list();
 
-    // NON_UNIQUE: every launch runs its own window rather than handing off
-    // to an already-running instance
-    GtkApplication *app = gtk_application_new("com.filetracker.unified", G_APPLICATION_NON_UNIQUE);
+    GtkApplication *app = gtk_application_new("com.filetracker.unified", G_APPLICATION_DEFAULT_FLAGS);
+    the_app = app;
     g_signal_connect(app, "startup", G_CALLBACK(startup), NULL);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
 
