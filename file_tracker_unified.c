@@ -1325,6 +1325,191 @@ void on_drives_export_clicked(GtkButton *button, gpointer user_data) {
     g_object_unref(dialog);
 }
 
+// ---- Export Contents: saves the selected drive's file index (its <name>.db files table) as CSV ----
+
+typedef struct {
+    AppWindow *w;
+    char name[256];
+} DriveContentsExport;
+
+// Writes epoch seconds as local time; empty when unknown
+static void csv_time_field(FILE *fp, sqlite3_stmt *stmt, int col) {
+    if (sqlite3_column_type(stmt, col) == SQLITE_NULL) return;
+    time_t t = sqlite3_column_int64(stmt, col);
+    struct tm *tm_info = localtime(&t);
+    char buf[64] = "";
+    if (tm_info) strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    csv_field(fp, buf);
+}
+
+// 1 if table has the named column (older databases lack some)
+static int table_has_column(sqlite3 *db, const char *table, const char *column) {
+    char sql[128];
+    snprintf(sql, sizeof(sql), "PRAGMA table_info(%s)", table);
+    int found = 0;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *col = (const char *)sqlite3_column_text(stmt, 1);
+            if (col && strcmp(col, column) == 0) found = 1;
+        }
+        sqlite3_finalize(stmt);
+    }
+    return found;
+}
+
+// Opens a drive database read-only for export. Returns 1 on success, 0 with a message in err.
+static int file_list_open(const char *db_path, sqlite3 **db, char *err, size_t err_size) {
+    *db = NULL;
+    if (sqlite3_open_v2(db_path, db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        snprintf(err, err_size, "Could not open %s: %s", db_path, *db ? sqlite3_errmsg(*db) : "out of memory");
+        if (*db) sqlite3_close(*db);
+        *db = NULL;
+        return 0;
+    }
+    sqlite3_busy_timeout(*db, 5000);
+    return 1;
+}
+
+// Writes the rows of sql as a file list CSV. sql selects full_path, file_name, size, mtime,
+// created, owner, checksum, status (NULL file_name is taken from the path); run_id, when > 0,
+// is bound to its first parameter. Returns the number of files written, or -1 with a message in err.
+static long file_list_write_csv(sqlite3 *db, const char *sql, sqlite3_int64 run_id, const char *status_header,
+                                const char *out_path, char *err, size_t err_size) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        snprintf(err, err_size, "Could not read the database: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    if (run_id > 0) sqlite3_bind_int64(stmt, 1, run_id);
+
+    FILE *fp = fopen(out_path, "w");
+    if (!fp) {
+        snprintf(err, err_size, "Could not create %s: %s", out_path, strerror(errno));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    fprintf(fp, "Full Path,File Name,Size (bytes),Last Modified,Created,Owner,Checksum,%s\n", status_header);
+    long count = 0;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *full_path = (const char *)sqlite3_column_text(stmt, 0);
+        const char *file_name = (const char *)sqlite3_column_text(stmt, 1);
+        if (!file_name && full_path) {
+            const char *slash = strrchr(full_path, '/');
+            file_name = slash ? slash + 1 : full_path;
+        }
+        csv_field(fp, full_path);
+        fputc(',', fp);
+        csv_field(fp, file_name);
+        fputc(',', fp);
+        if (sqlite3_column_type(stmt, 2) != SQLITE_NULL) fprintf(fp, "%lld", (long long)sqlite3_column_int64(stmt, 2));
+        fputc(',', fp);
+        csv_time_field(fp, stmt, 3);
+        fputc(',', fp);
+        csv_time_field(fp, stmt, 4);
+        fputc(',', fp);
+        csv_field(fp, (const char *)sqlite3_column_text(stmt, 5));
+        fputc(',', fp);
+        csv_field(fp, (const char *)sqlite3_column_text(stmt, 6));
+        fputc(',', fp);
+        csv_field(fp, (const char *)sqlite3_column_text(stmt, 7));
+        fputc('\n', fp);
+        count++;
+    }
+    if (rc != SQLITE_DONE) snprintf(err, err_size, "Error reading the database: %s", sqlite3_errmsg(db));
+    sqlite3_finalize(stmt);
+
+    int write_failed = ferror(fp);
+    if (fclose(fp) != 0) write_failed = 1;
+    if (write_failed) snprintf(err, err_size, "Error writing %s", out_path);
+    return (rc != SQLITE_DONE || write_failed) ? -1 : count;
+}
+
+// Exports the files currently recorded for the drive (MISSING rows excluded), sorted by path.
+// Returns the number of files written, or -1 with a message in err.
+static long drives_export_contents(const char *drive_name, const char *out_path, char *err, size_t err_size) {
+    char db_path[MAX_PATH];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", db_dir_path, drive_name);
+    if (access(db_path, F_OK) != 0) {
+        snprintf(err, err_size, "Drive '%s' has no database (%s.db). Scan it with \"Update Database\" enabled first.",
+                 drive_name, drive_name);
+        return -1;
+    }
+
+    sqlite3 *db;
+    if (!file_list_open(db_path, &db, err, err_size)) return -1;
+
+    // Older databases have no status column; every row in them is current
+    int has_status = table_has_column(db, "files", "status");
+
+    // files.status only marks MISSING files; each file's UNCHANGED/CHANGED/NEW status is in
+    // run_logs. Index the most recent run's log by path (in the temp database, which is
+    // writable on a read-only connection) so it can be joined to files.
+    int has_last_run = sqlite3_exec(db,
+        "CREATE TEMP TABLE last_run (full_path TEXT PRIMARY KEY, status TEXT) WITHOUT ROWID;"
+        "INSERT OR REPLACE INTO temp.last_run (full_path, status) "
+        "SELECT full_path, status FROM run_logs WHERE run_id = (SELECT MAX(id) FROM meta) ORDER BY id;",
+        NULL, NULL, NULL) == SQLITE_OK;
+
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "SELECT f.full_path, f.file_name, f.size, f.last_modified, f.created, f.owner, f.checksum, %s "
+             "FROM files f %s %s ORDER BY f.full_path;",
+             has_last_run ? "r.status" : "NULL",
+             has_last_run ? "LEFT JOIN temp.last_run r ON r.full_path = f.full_path" : "",
+             has_status ? "WHERE f.status IS NULL OR f.status != 'MISSING'" : "");
+    long count = file_list_write_csv(db, sql, 0, "Status (Last Run)", out_path, err, err_size);
+    sqlite3_close(db);
+    return count;
+}
+
+static void on_drives_export_contents_response(GObject *source, GAsyncResult *result, gpointer user_data) {
+    DriveContentsExport *req = user_data;
+    AppWindow *w = req->w;
+
+    GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, NULL);
+    char *path = file ? g_file_get_path(file) : NULL;
+    if (file) g_object_unref(file);
+    if (path) {
+        char err[MAX_PATH + 256] = "";
+        long count = drives_export_contents(req->name, path, err, sizeof(err));
+
+        char msg[MAX_PATH + 512];
+        if (count < 0) snprintf(msg, sizeof(msg), "%s", err);
+        else snprintf(msg, sizeof(msg), "Exported %'ld file%s on '%s' to %s",
+                      count, count == 1 ? "" : "s", req->name, path);
+        drives_show_message(w, msg);
+        g_free(path);
+    }
+    g_free(req);
+}
+
+void on_drives_export_contents_clicked(GtkButton *button, gpointer user_data) {
+    AppWindow *w = user_data;
+    (void)button;
+
+    if (w->selected_drive_id < 0) {
+        drives_show_message(w, "Please select a drive to export its contents");
+        return;
+    }
+
+    // Copy the name now: the selection may change while the save dialog is open
+    DriveContentsExport *req = g_new0(DriveContentsExport, 1);
+    req->w = w;
+    snprintf(req->name, sizeof(req->name), "%s", gtk_editable_get_text(GTK_EDITABLE(w->drives_name_entry)));
+
+    char initial[300];
+    snprintf(initial, sizeof(initial), "%s_contents.csv", req->name);
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Export Drive Contents to CSV");
+    gtk_file_dialog_set_initial_name(dialog, initial);
+    gtk_file_dialog_save(dialog, GTK_WINDOW(w->window), NULL, on_drives_export_contents_response, req);
+    g_object_unref(dialog);
+}
+
 GtkWidget *create_drives_tab(AppWindow *w) {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start(box, 16);
@@ -1367,6 +1552,12 @@ GtkWidget *create_drives_tab(AppWindow *w) {
 
     GtkWidget *export_btn = gtk_button_new_with_label("Export to CSV");
     g_signal_connect(export_btn, "clicked", G_CALLBACK(on_drives_export_clicked), w);
+    gtk_widget_set_tooltip_text(export_btn, "Save the drives table as CSV");
+
+    GtkWidget *export_contents_btn = gtk_button_new_with_label("Export Contents");
+    g_signal_connect(export_contents_btn, "clicked", G_CALLBACK(on_drives_export_contents_clicked), w);
+    gtk_widget_set_tooltip_text(export_contents_btn,
+        "Save the file list recorded for the selected drive (from its last database update) as CSV");
 
     gtk_box_append(GTK_BOX(add_box), name_label);
     gtk_box_append(GTK_BOX(add_box), w->drives_name_entry);
@@ -1379,6 +1570,7 @@ GtkWidget *create_drives_tab(AppWindow *w) {
     gtk_box_append(GTK_BOX(add_box), refresh_btn);
     gtk_box_append(GTK_BOX(add_box), update_mounted_btn);
     gtk_box_append(GTK_BOX(add_box), export_btn);
+    gtk_box_append(GTK_BOX(add_box), export_contents_btn);
     gtk_box_append(GTK_BOX(box), add_box);
 
     // Description
@@ -1985,6 +2177,100 @@ void on_logs_export_clicked(GtkButton *button, gpointer user_data) {
     g_object_unref(dialog);
 }
 
+// ---- Export Contents: saves the selected run's files, with size, times and checksum, as CSV ----
+
+typedef struct {
+    AppWindow *w;
+    char db_path[MAX_PATH];
+    sqlite3_int64 run_id;
+    char status_filter[512];
+} RunContentsExport;
+
+// Exports the run's log entries matching status_filter, sorted by path. Size, modified time
+// and checksum are the values recorded by the run; entries logged without them (MISSING,
+// IGNORED, ERROR) use the file's last recorded values. Created and owner come from the
+// files table. Returns the number of files written, or -1 with a message in err.
+static long logs_export_run_contents(const char *db_path, sqlite3_int64 run_id, const char *status_filter,
+                                     const char *out_path, char *err, size_t err_size) {
+    sqlite3 *db;
+    if (!file_list_open(db_path, &db, err, err_size)) return -1;
+
+    // Older run_logs tables may lack size/mtime (then the files table's values are used) or checksum
+    int has_mtime = table_has_column(db, "run_logs", "size") && table_has_column(db, "run_logs", "mtime");
+    int has_checksum = table_has_column(db, "run_logs", "checksum");
+    const char *logged = has_mtime ? "l.mtime > 0" : "0";
+
+    char sql[1536];
+    snprintf(sql, sizeof(sql),
+             "SELECT l.full_path, f.file_name, "
+             "CASE WHEN %s THEN l.size ELSE f.size END, "
+             "CASE WHEN %s THEN l.mtime ELSE f.last_modified END, "
+             "f.created, f.owner, "
+             "CASE WHEN %s THEN %s ELSE f.checksum END, "
+             "l.status "
+             "FROM (SELECT * FROM run_logs WHERE run_id = ? AND (%s)) l "
+             "LEFT JOIN files f ON f.full_path = l.full_path "
+             "ORDER BY l.full_path;",
+             logged, logged, logged, has_checksum ? "NULLIF(l.checksum, '')" : "NULL", status_filter);
+    long count = file_list_write_csv(db, sql, run_id, "Status", out_path, err, err_size);
+    sqlite3_close(db);
+    return count;
+}
+
+static void on_logs_export_contents_response(GObject *source, GAsyncResult *result, gpointer user_data) {
+    RunContentsExport *req = user_data;
+
+    GFile *file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(source), result, NULL);
+    char *path = file ? g_file_get_path(file) : NULL;
+    if (file) g_object_unref(file);
+    if (path) {
+        char err[MAX_PATH + 256] = "";
+        long count = logs_export_run_contents(req->db_path, req->run_id, req->status_filter, path, err, sizeof(err));
+
+        char msg[MAX_PATH + 512];
+        if (count < 0) snprintf(msg, sizeof(msg), "%s", err);
+        else snprintf(msg, sizeof(msg), "Exported %'ld file%s from run #%lld to %s",
+                      count, count == 1 ? "" : "s", (long long)req->run_id, path);
+        logs_alert(req->w, msg);
+        g_free(path);
+    }
+    g_free(req);
+}
+
+void on_logs_export_contents_clicked(GtkButton *button, gpointer user_data) {
+    AppWindow *w = user_data;
+    (void)button;
+
+    if (w->logs_selected_run_id == 0) {
+        logs_alert(w, "Please select a run to export");
+        return;
+    }
+
+    // Capture the run and filter now: they may change while the save dialog is open
+    RunContentsExport *req = g_new0(RunContentsExport, 1);
+    req->w = w;
+    snprintf(req->db_path, sizeof(req->db_path), "%s", w->logs_current_db_path);
+    req->run_id = w->logs_selected_run_id;
+    if (!logs_build_status_filter(w, req->status_filter)) {
+        logs_alert(w, "No filters selected. Select at least one filter or 'All'.");
+        g_free(req);
+        return;
+    }
+
+    // Default name: <database>_run_<id>_contents.csv
+    const char *base = strrchr(req->db_path, '/');
+    base = base ? base + 1 : req->db_path;
+    char name[MAX_PATH];
+    snprintf(name, sizeof(name), "%.*s_run_%lld_contents.csv",
+             (int)(strlen(base) > 3 ? strlen(base) - 3 : strlen(base)), base, (long long)req->run_id);
+
+    GtkFileDialog *dialog = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dialog, "Export Run Contents to CSV");
+    gtk_file_dialog_set_initial_name(dialog, name);
+    gtk_file_dialog_save(dialog, GTK_WINDOW(w->window), NULL, on_logs_export_contents_response, req);
+    g_object_unref(dialog);
+}
+
 void on_logs_db_changed(GtkComboBox *combo, gpointer user_data) {
     AppWindow *w = user_data;
     char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
@@ -2316,7 +2602,14 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     gtk_widget_set_hexpand(export_btn, TRUE);
     gtk_widget_set_halign(export_btn, GTK_ALIGN_END);
     g_signal_connect(export_btn, "clicked", G_CALLBACK(on_logs_export_clicked), w);
+    gtk_widget_set_tooltip_text(export_btn, "Save the status and path of the files matching the filter as CSV");
     gtk_box_append(GTK_BOX(filter_box), export_btn);
+
+    GtkWidget *export_contents_btn = gtk_button_new_with_label("Export Contents");
+    g_signal_connect(export_contents_btn, "clicked", G_CALLBACK(on_logs_export_contents_clicked), w);
+    gtk_widget_set_tooltip_text(export_contents_btn,
+        "Save the files matching the filter, with size, dates, owner and checksum, as CSV");
+    gtk_box_append(GTK_BOX(filter_box), export_contents_btn);
     gtk_box_append(GTK_BOX(right_box), filter_box);
 
     // Logs

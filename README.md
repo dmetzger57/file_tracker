@@ -89,6 +89,7 @@ The detailed, per-file log of any run.
 - **Filters:** All, New, Changed, Missing, Unchanged, Ignored, Errors.
 - **Note / Save Note:** view or edit the run's note.
 - **Export:** save the files matching the current filter as CSV (`Status,Full Path`).
+- **Export Contents:** save the files matching the current filter with their details, in the same format as the Drives tab's Export Contents, sorted by path: `Full Path,File Name,Size (bytes),Last Modified,Created,Owner,Checksum,Status`. Size, Last Modified and Checksum are the values the run recorded; for Missing, Ignored and Error entries (which the run logs without them) they are the file's last recorded values, or empty. Created and Owner are the file's current database values.
 - **Delete Selected Run:** remove a run and its log.
 
 ### Compare
@@ -118,6 +119,7 @@ All columns are sortable; Available and Files (Last Run) sort numerically.
 - **Refresh:** reload the list.
 - **Update Mounted Drives:** refresh capacity and free space for every tracked drive that is currently mounted.
 - **Export to CSV:** save the table, in its current sort order, to a file you choose: `ID,Name,Location,Available,Available (bytes),Description,Last Checksum Scan,Files (Last Run)`. Files (Last Run) is written without thousands separators and is empty when unknown.
+- **Export Contents:** save the file index of the selected drive (from its database, as of the last scan with "Update Database" enabled) as CSV, sorted by path: `Full Path,File Name,Size (bytes),Last Modified,Created,Owner,Checksum,Status (Last Run)`. Status (Last Run) is the file's status in the drive's most recent scan (empty if that scan did not cover it). Files marked MISSING are left out; times are local `YYYY-MM-DD HH:MM:SS`.
 
 ### File Locator
 
