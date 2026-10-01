@@ -9,7 +9,16 @@ The repository contains two programs that share the same databases:
 | `file_tracker_unified` | `file_tracker_unified.c` | GTK4 desktop application with sidebar sections for scanning, browsing results, managing drives and finding duplicates. Packaged as **File Tracker Unified.app** |
 | `file_tracker` | `file_tracker.c` | Command-line scanner, for scripts and scheduled scans |
 
-## Quick Start
+## Download
+
+Download **FileTracker-0.0.1.dmg** from the [latest release](https://github.com/dmetzger57/file_tracker/releases/latest), open it and drag **File Tracker Unified** to Applications. It needs an Apple silicon Mac with macOS 26 or later. GTK and the other libraries are inside the app, so Homebrew is not needed.
+
+> The app isn't notarized by Apple, so the first time you open it macOS says it can't verify the developer. Go to **System Settings → Privacy & Security** and click **Open Anyway**, or run
+> `xattr -dr com.apple.quarantine "/Applications/File Tracker Unified.app"`.
+
+The download contains the desktop application only. To use the command-line `file_tracker`, build from source.
+
+## Quick Start (build from source)
 
 ```bash
 brew install openssl@3 sqlite gtk4   # dependencies (macOS)
@@ -219,9 +228,19 @@ On macOS: `brew install openssl@3 sqlite gtk4`. The Makefile adds the Homebrew i
 | `make` | Build `file_tracker_unified` and `file_tracker` |
 | `make apps` | Build `file_tracker_unified` and create **File Tracker Unified.app** (`create_app_bundles.sh`) |
 | `make install` | Copy **File Tracker Unified.app** to `/Applications` (run `make apps` first) |
-| `make clean` | Remove the built binaries |
+| `make dmg` | Create the downloadable `dist/FileTracker-<version>.dmg`: a self-contained app with the Homebrew libraries and GTK data inside (`make_dmg.sh`) |
+| `make clean` | Remove the built binaries and `dist/` |
 
 `make install` does not install `file_tracker`. Copy it somewhere on your `PATH` (e.g. `~/bin`) yourself.
+
+The version number is `VERSION` at the top of the Makefile. It is shown on the About page and in the app's Info.plist.
+
+### Releases
+
+1. Set `VERSION` in the Makefile, commit, and run `make dmg`.
+2. Tag and publish: `git tag v<version> && git push --tags`, then `gh release create v<version> dist/FileTracker-<version>.dmg dist/SHA256SUMS`.
+
+The dmg's app requires the macOS version Homebrew built its libraries for (`make dmg` prints it and writes it into the app's Info.plist), and only runs on Apple silicon.
 
 After rebuilding, run `make apps` again so the bundle picks up the new binary. If the app reports missing libraries, check the Homebrew packages above are installed.
 
@@ -246,6 +265,7 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 | `macos_dock_menu.m` | macOS Dock menu ("New Window") for the desktop application |
 | `macos_appearance.m` | Follows the macOS Light/Dark appearance in the desktop application |
 | `Makefile`, `create_app_bundles.sh`, `icon/` | Build and `.app` packaging |
+| `make_dmg.sh` | Self-contained app and release disk image (`make dmg`) |
 | `migrate_*.sh`, `migrate_*.sql` | Database migrations for old databases |
 | `launcher.c`, `launcher.m` | Legacy `.app` launchers. Not used: the bundle now runs the real binary directly |
 | `CLAUDE.md` | Notes for AI-assisted development |

@@ -38,14 +38,16 @@ create_app_bundle() {
     <string>$APP_NAME</string>
     <key>CFBundleDisplayName</key>
     <string>$APP_NAME</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${VERSION:-0.0.0}</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>${VERSION:-0.0.0}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
+    <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

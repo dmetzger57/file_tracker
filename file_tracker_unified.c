@@ -14,11 +14,16 @@
 #include <pwd.h>
 #include <locale.h>
 #ifdef __APPLE__
+#include <mach-o/dyld.h>
 // macos_dock_menu.m
 void macos_install_dock_menu(const char *title, void (*callback)(void));
 // macos_appearance.m
 int macos_dark_mode(void);
 void macos_watch_appearance(void (*callback)(int dark));
+#endif
+
+#ifndef FT_VERSION
+#define FT_VERSION "dev"  // set by the Makefile (VERSION)
 #endif
 
 #define HASH_SIZE 65
@@ -4569,7 +4574,7 @@ GtkWidget *create_about_tab() {
     gtk_widget_add_css_class(title, "title-1");
     gtk_box_append(GTK_BOX(box), title);
 
-    GtkWidget *version = gtk_label_new("Version 1.0");
+    GtkWidget *version = gtk_label_new("Version " FT_VERSION);
     gtk_widget_add_css_class(version, "dim-label");
     gtk_box_append(GTK_BOX(box), version);
 
@@ -5034,8 +5039,32 @@ void activate(GtkApplication *app, gpointer user_data) {
     app_window_new(app);
 }
 
+#ifdef __APPLE__
+// The downloadable app carries GTK's data files (icons, settings schemas) in
+// Contents/Resources/share (see make_dmg.sh); point GTK at them before it starts.
+// Builds that use Homebrew's files directly have no such folder and are left alone.
+static void use_bundled_gtk_data(void) {
+    char exe[MAX_PATH];
+    uint32_t size = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &size) != 0) return;
+    char *dir = g_path_get_dirname(exe);  // .../Contents/MacOS
+    char *share = g_build_filename(dir, "..", "Resources", "share", NULL);
+    if (g_file_test(share, G_FILE_TEST_IS_DIR)) {
+        char *schemas = g_build_filename(share, "glib-2.0", "schemas", NULL);
+        g_setenv("XDG_DATA_DIRS", share, TRUE);
+        g_setenv("GSETTINGS_SCHEMA_DIR", schemas, TRUE);
+        g_free(schemas);
+    }
+    g_free(share);
+    g_free(dir);
+}
+#endif
+
 int main(int argc, char *argv[]) {
     setlocale(LC_NUMERIC, "");
+#ifdef __APPLE__
+    use_bundled_gtk_data();
+#endif
 
     const char *home = getenv("HOME");
     if (!home) {

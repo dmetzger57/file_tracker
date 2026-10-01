@@ -51,6 +51,7 @@ make              # Build file_tracker_unified
 make apps         # Build and create .app bundle
 make clean        # Remove binaries
 make install      # Copy File Tracker Unified.app to /Applications
+make dmg          # Self-contained app (Homebrew libs bundled) -> dist/FileTracker-$(VERSION).dmg
 ```
 
 ### Manual Compilation
@@ -78,7 +79,8 @@ gcc -Wall -Wextra -O2 \
 - `macos_appearance.m`: Reports the macOS Light/Dark appearance and its changes; `app_apply_color_scheme()` mirrors it into GTK
 
 ### Scripts
-- `create_app_bundles.sh`: Create macOS app bundle from binary
+- `create_app_bundles.sh`: Create macOS app bundle from binary (Info.plist version from `VERSION`)
+- `make_dmg.sh`: Copies Homebrew dylibs into `Contents/Frameworks` (rewritten to `@rpath`), GTK icons/schemas into `Contents/Resources/share` (found at startup by `use_bundled_gtk_data()`), ad-hoc signs, builds the release dmg. Version is `VERSION` in the Makefile (`FT_VERSION` in C)
 - `migrate_add_*.sh`: Database schema migration scripts (idempotent)
 
 ## Code Conventions

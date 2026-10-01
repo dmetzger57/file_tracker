@@ -75,3 +75,6 @@ dkms.conf
 *.app/
 
 .DS_Store
+
+# Release disk images
+dist/

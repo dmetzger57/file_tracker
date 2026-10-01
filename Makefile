@@ -1,5 +1,6 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -Wno-deprecated-declarations
+VERSION = 0.0.1
+CFLAGS = -Wall -Wextra -O2 -Wno-deprecated-declarations -DFT_VERSION='"$(VERSION)"'
 UNAME_S := $(shell uname -s)
 
 # macOS specific paths (Homebrew)
@@ -14,7 +15,7 @@ endif
 # Common Libraries
 LIBS = -lssl -lcrypto -lsqlite3 -lpthread
 
-.PHONY: all clean install apps
+.PHONY: all clean install apps dmg
 
 all: file_tracker_unified file_tracker
 
@@ -26,6 +27,7 @@ file_tracker_unified: file_tracker_unified.c $(UNIFIED_MACOS_SRC)
 
 clean:
 	rm -f file_tracker_unified file_tracker *.o
+	rm -rf dist
 
 install:
 	@echo "Installing File Tracker Unified to /Applications..."
@@ -44,4 +46,9 @@ install:
 	fi
 
 apps: file_tracker_unified
-	./create_app_bundles.sh
+	VERSION=$(VERSION) ./create_app_bundles.sh
+
+# Self-contained app (GTK and other Homebrew libraries inside) on a disk image,
+# for GitHub releases: dist/FileTracker-$(VERSION).dmg
+dmg: apps
+	VERSION=$(VERSION) ./make_dmg.sh
