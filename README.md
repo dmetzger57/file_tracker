@@ -11,7 +11,7 @@ The repository contains two programs that share the same databases:
 
 ## Download
 
-Download **FileTracker-0.0.1.dmg** from the [latest release](https://github.com/dmetzger57/file_tracker/releases/latest), open it and drag **File Tracker Unified** to Applications. It needs an Apple silicon Mac with macOS 26 or later. GTK and the other libraries are inside the app, so Homebrew is not needed.
+Download **FileTracker-<version>.dmg** from the [latest release](https://github.com/dmetzger57/file_tracker/releases/latest), open it and drag **File Tracker Unified** to Applications. It needs an Apple silicon Mac with macOS 26 or later. GTK and the other libraries are inside the app, so Homebrew is not needed.
 
 > The app isn't notarized by Apple, so the first time you open it macOS says it can't verify the developer. Go to **System Settings → Privacy & Security** and click **Open Anyway**, or run
 > `xattr -dr com.apple.quarantine "/Applications/File Tracker Unified.app"`.

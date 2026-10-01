@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 CC = gcc
-VERSION = 0.0.1
+VERSION = 0.0.2
 CFLAGS = -Wall -Wextra -O2 -Wno-deprecated-declarations -DFT_VERSION='"$(VERSION)"'
 UNAME_S := $(shell uname -s)
 
