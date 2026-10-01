@@ -3,6 +3,9 @@
 // GTK's macOS backend does not report the system appearance, so GTK always draws
 // light. This reads NSApp's effective appearance and calls back whenever the user
 // switches between Light and Dark (or Auto flips it).
+//
+// Copyright (c) 2026 Dennis Metzger
+// SPDX-License-Identifier: MIT
 
 #import <Cocoa/Cocoa.h>
 

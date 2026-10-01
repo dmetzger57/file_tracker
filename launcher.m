@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Dennis Metzger
+// SPDX-License-Identifier: MIT
+
 #import <Cocoa/Cocoa.h>
 #include <unistd.h>
 #include <libgen.h>

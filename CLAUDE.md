@@ -85,6 +85,9 @@ gcc -Wall -Wextra -O2 \
 
 ## Code Conventions
 
+### License
+- MIT (`LICENSE`). New source files start with `Copyright (c) 2026 Dennis Metzger` and `SPDX-License-Identifier: MIT` comment lines. `LICENSE` ships in the app (`Contents/Resources`) and on the dmg (`LICENSE.txt`)
+
 ### Windows
 - Never add file-scope globals for UI or tab state: put them in `AppWindow` and pass `w` as `user_data` when connecting signals or starting async dialogs
 - Functions that need the window take `AppWindow *w` as their first parameter

@@ -1,5 +1,8 @@
 -- Migration script to add 'note' field to the meta table
 -- This script is idempotent and can be run multiple times safely
+--
+-- Copyright (c) 2026 Dennis Metzger
+-- SPDX-License-Identifier: MIT
 
 -- SQLite doesn't support "ADD COLUMN IF NOT EXISTS" directly,
 -- so we use a workaround with PRAGMA table_info

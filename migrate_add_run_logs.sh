@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 Dennis Metzger
+# SPDX-License-Identifier: MIT
 
 # Migration script to add run_logs table to existing file_tracker databases
 # Usage: ./migrate_add_run_logs.sh [database_path]

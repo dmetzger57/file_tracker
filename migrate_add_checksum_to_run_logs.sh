@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 Dennis Metzger
+# SPDX-License-Identifier: MIT
 
 # Migration script to add checksum column to run_logs table
 # This is idempotent - safe to run multiple times

@@ -1,6 +1,9 @@
 // file_tracker - command line scanner sharing the database with file_tracker_unified
 //
 // Usage: file_tracker -s source_path [-v] [-u] [-n note]
+//
+// Copyright (c) 2026 Dennis Metzger
+// SPDX-License-Identifier: MIT
 
 #include <sqlite3.h>
 #include <openssl/evp.h>

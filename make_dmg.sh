@@ -7,6 +7,9 @@
 # to @rpath, adds the GTK data files (symbolic icons, settings schemas) under
 # Contents/Resources/share, and ad-hoc signs the result, so it runs on a Mac
 # without Homebrew. Run via `make dmg`.
+#
+# Copyright (c) 2026 Dennis Metzger
+# SPDX-License-Identifier: MIT
 set -euo pipefail
 
 VERSION="${VERSION:?set VERSION (make dmg does this)}"
@@ -94,7 +97,8 @@ codesign --force --sign - "$FRAMEWORKS"/*.dylib 2>/dev/null
 codesign --force --sign - "$APP" 2>/dev/null
 codesign --verify --deep --strict "$APP"
 
-# Disk image: the app plus an Applications shortcut to drag it onto
+# Disk image: the app, its license, and an Applications shortcut to drag it onto
+cp LICENSE "$STAGE/LICENSE.txt"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -quiet -volname "File Tracker $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG"
 rm -rf "$STAGE"

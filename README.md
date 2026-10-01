@@ -16,7 +16,7 @@ Download **FileTracker-0.0.1.dmg** from the [latest release](https://github.com/
 > The app isn't notarized by Apple, so the first time you open it macOS says it can't verify the developer. Go to **System Settings → Privacy & Security** and click **Open Anyway**, or run
 > `xattr -dr com.apple.quarantine "/Applications/File Tracker Unified.app"`.
 
-The download contains the desktop application only. To use the command-line `file_tracker`, build from source.
+The disk image also contains the license (`LICENSE.txt`). The download contains the desktop application only. To use the command-line `file_tracker`, build from source.
 
 ## Quick Start (build from source)
 
@@ -269,3 +269,9 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 | `migrate_*.sh`, `migrate_*.sql` | Database migrations for old databases |
 | `launcher.c`, `launcher.m` | Legacy `.app` launchers. Not used: the bundle now runs the real binary directly |
 | `CLAUDE.md` | Notes for AI-assisted development |
+| `LICENSE` | MIT License |
+
+## License
+
+File Tracker is released under the [MIT License](LICENSE).
+Copyright (c) 2026 Dennis Metzger.

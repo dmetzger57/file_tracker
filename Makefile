@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Dennis Metzger
+# SPDX-License-Identifier: MIT
+
 CC = gcc
 VERSION = 0.0.1
 CFLAGS = -Wall -Wextra -O2 -Wno-deprecated-declarations -DFT_VERSION='"$(VERSION)"'

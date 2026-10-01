@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 Dennis Metzger
+# SPDX-License-Identifier: MIT
 
 # Function to create a .app bundle
 create_app_bundle() {
@@ -19,8 +21,9 @@ create_app_bundle() {
     # Dock shows a single icon tied to this bundle
     cp "$EXECUTABLE" "${APP_NAME}.app/Contents/MacOS/${EXECUTABLE}"
 
-    # Copy app icon
+    # Copy app icon and the license
     cp icon/AppIcon.icns "${APP_NAME}.app/Contents/Resources/AppIcon.icns"
+    cp LICENSE "${APP_NAME}.app/Contents/Resources/LICENSE"
 
     # Create Info.plist
     cat > "${APP_NAME}.app/Contents/Info.plist" << PLIST
@@ -42,6 +45,8 @@ create_app_bundle() {
     <string>${VERSION:-0.0.0}</string>
     <key>CFBundleVersion</key>
     <string>${VERSION:-0.0.0}</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Dennis Metzger. Released under the MIT License.</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>

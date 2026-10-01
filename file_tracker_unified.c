@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Dennis Metzger
+// SPDX-License-Identifier: MIT
+
 #include <gtk/gtk.h>
 #include <sqlite3.h>
 #include <openssl/evp.h>
@@ -4592,6 +4595,11 @@ GtkWidget *create_about_tab() {
         "in one convenient application.");
     gtk_label_set_justify(GTK_LABEL(desc), GTK_JUSTIFY_CENTER);
     gtk_box_append(GTK_BOX(box), desc);
+
+    GtkWidget *license = gtk_label_new("Copyright © 2026 Dennis Metzger\nReleased under the MIT License");
+    gtk_label_set_justify(GTK_LABEL(license), GTK_JUSTIFY_CENTER);
+    gtk_widget_add_css_class(license, "dim-label");
+    gtk_box_append(GTK_BOX(box), license);
 
     return box;
 }

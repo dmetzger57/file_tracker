@@ -1,5 +1,8 @@
 -- Migration script to add 'run_logs' table for storing per-run log messages
 -- This script is idempotent and can be run multiple times safely
+--
+-- Copyright (c) 2026 Dennis Metzger
+-- SPDX-License-Identifier: MIT
 
 BEGIN TRANSACTION;
 

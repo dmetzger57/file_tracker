@@ -4,6 +4,9 @@
 // which does not implement applicationDockMenu:. This adds that method to the
 // delegate's class at runtime so right-clicking the Dock icon offers a
 // "New Window" item, like Terminal's "New Terminal".
+//
+// Copyright (c) 2026 Dennis Metzger
+// SPDX-License-Identifier: MIT
 
 #import <Cocoa/Cocoa.h>
 #include <objc/runtime.h>
