@@ -16,6 +16,9 @@
 #ifdef __APPLE__
 // macos_dock_menu.m
 void macos_install_dock_menu(const char *title, void (*callback)(void));
+// macos_appearance.m
+int macos_dark_mode(void);
+void macos_watch_appearance(void (*callback)(int dark));
 #endif
 
 #define HASH_SIZE 65
@@ -34,7 +37,9 @@ typedef struct ScannerContext ScannerContext;
 // (File > New Window) - e.g. one scanning a drive while another browses logs.
 typedef struct {
     GtkWidget *window;
-    GtkWidget *main_notebook;
+    GtkWidget *main_stack;        // one page per sidebar item
+    GtkWidget *page_title;        // header above the page: name of the selected sidebar item
+    GtkWidget *page_subtitle;
     int number;                   // 1 for the first window opened, 2 for the next, ...
     gboolean close_prompt_open;   // "A scan is running" prompt is showing
     gboolean close_after_scan;    // close was confirmed while a scan was running
@@ -1705,6 +1710,7 @@ void on_summary_run_selected(GtkTreeSelection *selection, gpointer user_data) {
 
 GtkWidget *create_summary_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
 
     // Left: Run list
     GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -2482,6 +2488,7 @@ void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer us
 
 GtkWidget *create_logs_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
 
     // Left: Database and runs list
     GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -3337,6 +3344,7 @@ void on_scanner_stop_clicked(GtkButton *button, gpointer user_data) {
 
 GtkWidget *create_scanner_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
 
     // Left: Volumes
     GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -3857,6 +3865,7 @@ void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpoin
 
 GtkWidget *create_compare_tab(AppWindow *w) {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
 
     // Left panel: Selection and filters
     GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
@@ -4715,6 +4724,233 @@ static int app_window_next_number(void) {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Layout: a sidebar of sections on the left, the selected section on the right
+// (the same shape as photo-meta's window), styled to look like a native macOS app.
+// ----------------------------------------------------------------------------
+
+typedef struct {
+    const char *id;
+    const char *title;
+    const char *subtitle;
+    const char *icon;
+    GtkWidget *(*build)(AppWindow *w);
+} AppPage;
+
+static GtkWidget *create_about_page(AppWindow *w) { (void)w; return create_about_tab(); }
+
+static const AppPage app_pages[] = {
+    { "locator",  "File Locator", "Search for files across drive databases",     "system-search-symbolic",        create_locator_tab },
+    { "dupes",    "DupeFinder",   "Find duplicate files by name or checksum",    "edit-copy-symbolic",            create_dupefinder_tab },
+    { "drives",   "Drives",       "Storage drives and their capacity",           "drive-harddisk-symbolic",       create_drives_tab },
+    { "summary",  "Summary",      "Scan history and statistics",                 "x-office-spreadsheet-symbolic", create_summary_tab },
+    { "logs",     "Logs",         "Per-file results of each scan run",           "document-open-recent-symbolic", create_logs_tab },
+    { "compare",  "Compare",      "Differences between two scan runs",           "view-dual-symbolic",            create_compare_tab },
+    { "scanner",  "File Scanner", "Scan a volume and verify its checksums",      "media-playback-start-symbolic", create_scanner_tab },
+    { "about",    "About",        "File Tracker Unified",                        "help-about-symbolic",           create_about_page },
+};
+
+static const char *app_css =
+    /* macOS system colors (light, then dark below) */
+    "@define-color ft_accent #007aff;\n"
+    "@define-color ft_sidebar_bg #e8e6ea;\n"
+    "@define-color ft_content_bg #ffffff;\n"
+    "@define-color ft_label rgba(0,0,0,0.85);\n"
+    "@define-color ft_secondary rgba(0,0,0,0.50);\n"
+    "@define-color ft_separator rgba(0,0,0,0.10);\n"
+    "@define-color ft_control_bg #ffffff;\n"
+    "@define-color ft_control_border rgba(0,0,0,0.14);\n"
+    "@define-color ft_row_alt rgba(0,0,0,0.03);\n"
+    "@define-color ft_hover rgba(0,0,0,0.05);\n"
+    "@define-color ft_sidebar_sel rgba(0,0,0,0.10);\n"
+    "@media (prefers-color-scheme: dark) {\n"
+    "  @define-color ft_accent #0a84ff;\n"
+    "  @define-color ft_sidebar_bg #3a3a3c;\n"
+    "  @define-color ft_content_bg #1e1e1e;\n"
+    "  @define-color ft_label rgba(255,255,255,0.85);\n"
+    "  @define-color ft_secondary rgba(255,255,255,0.55);\n"
+    "  @define-color ft_separator rgba(255,255,255,0.10);\n"
+    "  @define-color ft_control_bg rgba(255,255,255,0.10);\n"
+    "  @define-color ft_control_border rgba(255,255,255,0.08);\n"
+    "  @define-color ft_row_alt rgba(255,255,255,0.04);\n"
+    "  @define-color ft_hover rgba(255,255,255,0.06);\n"
+    "  @define-color ft_sidebar_sel rgba(255,255,255,0.12);\n"
+    "}\n"
+    "window, dialog, popover > contents {\n"
+    "  font-family: -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif; font-size: 13px;\n"
+    "}\n"
+    "window.ft-main { background: @ft_content_bg; color: @ft_label; }\n"
+    ".dim-label { color: @ft_secondary; opacity: 1; }\n"
+    ".heading { font-weight: 600; font-size: 13px; }\n"
+    ".title-1 { font-weight: 700; font-size: 26px; }\n"
+
+    /* Sidebar */
+    ".ft-sidebar { background: @ft_sidebar_bg; }\n"
+    ".ft-sidebar headerbar { background: transparent; box-shadow: none; border: none; min-height: 52px; }\n"
+    ".ft-sidebar list { background: transparent; padding: 0 10px; }\n"
+    ".ft-sidebar list row { border-radius: 6px; padding: 5px 8px; margin: 1px 0; color: @ft_label; }\n"
+    ".ft-sidebar list row:hover { background: @ft_hover; }\n"
+    ".ft-sidebar list row:selected { background: @ft_sidebar_sel; color: @ft_label; }\n"
+    ".ft-sidebar list row image { color: @ft_accent; }\n"
+    ".ft-sidebar .ft-sidebar-heading { font-size: 11px; font-weight: 600; color: @ft_secondary; margin: 0 18px 4px 18px; }\n"
+    ".ft-sidebar .ft-sidebar-footer { font-size: 11px; color: @ft_secondary; margin: 12px 18px; }\n"
+    ".ft-divider { background: @ft_separator; min-width: 1px; min-height: 1px; }\n"
+
+    /* Page header: bold title like photo-meta's "Metadata" */
+    ".ft-page-header { min-height: 52px; padding: 0 24px; }\n"
+    ".ft-page-title { font-size: 15px; font-weight: 700; color: @ft_label; }\n"
+    ".ft-page-subtitle { font-size: 12px; color: @ft_secondary; }\n"
+
+    /* Controls */
+    "button { border-radius: 6px; padding: 3px 12px; min-height: 22px; background: @ft_control_bg;"
+    "  border: 1px solid @ft_control_border; box-shadow: 0 0.5px 1px rgba(0,0,0,0.08); color: @ft_label; }\n"
+    "button:hover { background: shade(@ft_control_bg, 0.97); }\n"
+    "button.suggested-action { background: @ft_accent; color: white; border-color: transparent; }\n"
+    "button.suggested-action:hover { background: shade(@ft_accent, 1.08); }\n"
+    "button.destructive-action { color: #ff3b30; }\n"
+    "button.flat, .ft-sidebar headerbar button { background: transparent; border: none; box-shadow: none; }\n"
+    "entry, spinbutton, dropdown > button, combobox > box > button {\n"
+    "  border-radius: 6px; background: @ft_control_bg; border: 1px solid @ft_control_border; box-shadow: none; }\n"
+    "entry:focus-within, spinbutton:focus-within { outline: 3px solid alpha(@ft_accent, 0.45); outline-offset: 0; }\n"
+    "checkbutton check:checked, checkbutton radio:checked { background: @ft_accent; border-color: @ft_accent; color: white; }\n"
+    "progressbar trough { min-height: 6px; border-radius: 3px; }\n"
+    "progressbar progress { min-height: 6px; border-radius: 3px; background: @ft_accent; }\n"
+
+    /* Tables: inset, rounded, alternating rows (NSTableView inset style) */
+    "scrolledwindow:not(.ft-plain) { border-radius: 8px; border: 1px solid @ft_separator; background: @ft_content_bg; }\n"
+    "treeview.view, textview, textview text { background: @ft_content_bg; color: @ft_label; }\n"
+    "treeview.view:selected, treeview.view:selected:focus { background: @ft_accent; color: white; border-radius: 0; }\n"
+    "treeview.view header button { background: @ft_content_bg; border: none; border-bottom: 1px solid @ft_separator;"
+    "  border-radius: 0; box-shadow: none; font-weight: 500; font-size: 12px; color: @ft_secondary; padding: 4px 8px; }\n"
+    "notebook > header { background: transparent; border: none; }\n"
+    "notebook > header tab { border-radius: 6px; padding: 3px 12px; min-height: 0; }\n"
+    "notebook > header tab:checked { background: @ft_sidebar_sel; box-shadow: none; }\n"
+    "notebook > stack { background: transparent; }\n"
+    "paned > separator { background-color: transparent; background-image: image(@ft_separator); }\n";
+
+static GtkCssProvider *app_css_provider;
+
+// GTK on macOS doesn't follow the system appearance by itself; mirror it into GTK's
+// color scheme so the built-in theme and the "prefers-color-scheme: dark" rules above apply
+static void app_apply_color_scheme(int dark) {
+    GtkInterfaceColorScheme scheme = dark ? GTK_INTERFACE_COLOR_SCHEME_DARK : GTK_INTERFACE_COLOR_SCHEME_LIGHT;
+    g_object_set(gtk_settings_get_default(),
+                 "gtk-interface-color-scheme", scheme,
+                 "gtk-application-prefer-dark-theme", dark,
+                 NULL);
+    if (app_css_provider) g_object_set(app_css_provider, "prefers-color-scheme", scheme, NULL);
+}
+
+static void app_install_style(void) {
+    app_css_provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(app_css_provider, app_css);
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(app_css_provider),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+#ifdef __APPLE__
+    app_apply_color_scheme(macos_dark_mode());
+    macos_watch_appearance(app_apply_color_scheme);
+#endif
+}
+
+static void on_sidebar_row_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
+    (void)box;
+    AppWindow *w = user_data;
+    if (!row) return;
+    const AppPage *page = &app_pages[gtk_list_box_row_get_index(row)];
+    gtk_stack_set_visible_child_name(GTK_STACK(w->main_stack), page->id);
+    gtk_label_set_text(GTK_LABEL(w->page_title), page->title);
+    gtk_label_set_text(GTK_LABEL(w->page_subtitle), page->subtitle);
+}
+
+static GtkWidget *app_window_build_layout(AppWindow *w) {
+    gtk_widget_add_css_class(w->window, "ft-main");
+    // The window's real title bar is replaced by the sidebar and page header below;
+    // the sidebar's header bar keeps the native traffic-light buttons
+    GtkWidget *no_titlebar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_visible(no_titlebar, FALSE);
+    gtk_window_set_titlebar(GTK_WINDOW(w->window), no_titlebar);
+
+    GtkWidget *root = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+
+    // Sidebar
+    GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(sidebar, "ft-sidebar");
+    gtk_widget_set_size_request(sidebar, 210, -1);
+
+    GtkWidget *sidebar_bar = gtk_header_bar_new();
+    gtk_header_bar_set_use_native_controls(GTK_HEADER_BAR(sidebar_bar), TRUE);
+    gtk_header_bar_set_show_title_buttons(GTK_HEADER_BAR(sidebar_bar), TRUE);
+    gtk_header_bar_set_decoration_layout(GTK_HEADER_BAR(sidebar_bar), "close,minimize,maximize:");
+    gtk_header_bar_set_title_widget(GTK_HEADER_BAR(sidebar_bar), gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
+    gtk_box_append(GTK_BOX(sidebar), sidebar_bar);
+
+    GtkWidget *heading = gtk_label_new("File Tracker");
+    gtk_widget_add_css_class(heading, "ft-sidebar-heading");
+    gtk_label_set_xalign(GTK_LABEL(heading), 0);
+    gtk_box_append(GTK_BOX(sidebar), heading);
+
+    GtkWidget *nav = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(nav), GTK_SELECTION_BROWSE);
+    gtk_widget_set_vexpand(nav, TRUE);
+    gtk_box_append(GTK_BOX(sidebar), nav);
+
+    GtkWidget *footer = gtk_label_new("Checksums: SHA-256");
+    gtk_widget_add_css_class(footer, "ft-sidebar-footer");
+    gtk_label_set_xalign(GTK_LABEL(footer), 0);
+    gtk_box_append(GTK_BOX(sidebar), footer);
+
+    GtkWidget *divider = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(divider, "ft-divider");
+
+    // Content: page header + pages
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_hexpand(content, TRUE);
+
+    GtkWidget *header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_add_css_class(header_box, "ft-page-header");
+    w->page_title = gtk_label_new("");
+    gtk_widget_add_css_class(w->page_title, "ft-page-title");
+    w->page_subtitle = gtk_label_new("");
+    gtk_widget_add_css_class(w->page_subtitle, "ft-page-subtitle");
+    gtk_widget_set_valign(w->page_title, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(w->page_subtitle, GTK_ALIGN_BASELINE_CENTER);
+    gtk_box_append(GTK_BOX(header_box), w->page_title);
+    gtk_box_append(GTK_BOX(header_box), w->page_subtitle);
+    GtkWidget *header = gtk_window_handle_new();  // drag the window by its header, as with a title bar
+    gtk_window_handle_set_child(GTK_WINDOW_HANDLE(header), header_box);
+    gtk_box_append(GTK_BOX(content), header);
+
+    GtkWidget *header_rule = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(header_rule, "ft-divider");
+    gtk_box_append(GTK_BOX(content), header_rule);
+
+    w->main_stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(w->main_stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+    gtk_stack_set_transition_duration(GTK_STACK(w->main_stack), 120);
+    gtk_widget_set_vexpand(w->main_stack, TRUE);
+    gtk_box_append(GTK_BOX(content), w->main_stack);
+
+    for (size_t i = 0; i < G_N_ELEMENTS(app_pages); i++) {
+        const AppPage *page = &app_pages[i];
+        gtk_stack_add_named(GTK_STACK(w->main_stack), page->build(w), page->id);
+
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(row), gtk_image_new_from_icon_name(page->icon));
+        GtkWidget *name = gtk_label_new(page->title);
+        gtk_label_set_xalign(GTK_LABEL(name), 0);
+        gtk_box_append(GTK_BOX(row), name);
+        gtk_list_box_append(GTK_LIST_BOX(nav), row);
+    }
+
+    g_signal_connect(nav, "row-selected", G_CALLBACK(on_sidebar_row_selected), w);
+    gtk_list_box_select_row(GTK_LIST_BOX(nav), gtk_list_box_get_row_at_index(GTK_LIST_BOX(nav), 0));
+
+    gtk_box_append(GTK_BOX(root), sidebar);
+    gtk_box_append(GTK_BOX(root), divider);
+    gtk_box_append(GTK_BOX(root), content);
+    return root;
+}
+
 static void app_window_new(GtkApplication *app) {
     AppWindow *w = g_new0(AppWindow, 1);
     w->selected_drive_id = -1;
@@ -4725,31 +4961,9 @@ static void app_window_new(GtkApplication *app) {
     g_object_set_data_full(G_OBJECT(w->window), "app-window", w, g_free);
     g_signal_connect(w->window, "close-request", G_CALLBACK(on_app_window_close_request), w);
     app_window_set_title(w, NULL);
-    gtk_window_set_default_size(GTK_WINDOW(w->window), 1200, 750);
+    gtk_window_set_default_size(GTK_WINDOW(w->window), 1420, 800);
 
-    // Create notebook with tabs
-    w->main_notebook = gtk_notebook_new();
-    gtk_notebook_set_tab_pos(GTK_NOTEBOOK(w->main_notebook), GTK_POS_TOP);
-
-    // Add tabs
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_locator_tab(w),
-                            gtk_label_new("File Locator"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_dupefinder_tab(w),
-                            gtk_label_new("DupeFinder"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_drives_tab(w),
-                            gtk_label_new("Drives"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_summary_tab(w),
-                            gtk_label_new("Summary"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_logs_tab(w),
-                            gtk_label_new("Logs"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_compare_tab(w),
-                            gtk_label_new("Compare"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_scanner_tab(w),
-                            gtk_label_new("File Scanner"));
-    gtk_notebook_append_page(GTK_NOTEBOOK(w->main_notebook), create_about_tab(),
-                            gtk_label_new("About"));
-
-    gtk_window_set_child(GTK_WINDOW(w->window), w->main_notebook);
+    gtk_window_set_child(GTK_WINDOW(w->window), app_window_build_layout(w));
 
     // Initialize scanner volumes list and logs databases
     scanner_refresh_volumes(w);
@@ -4809,6 +5023,8 @@ void startup(GtkApplication *app, gpointer user_data) {
     // Right-click the Dock icon: macOS lists the open windows, followed by New Window
     macos_install_dock_menu("New Window", on_dock_new_window);
 #endif
+
+    app_install_style();
 }
 
 // Launching the application (or launching it again on systems where the running copy

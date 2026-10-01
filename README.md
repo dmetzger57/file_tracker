@@ -6,7 +6,7 @@ The repository contains two programs that share the same databases:
 
 | Program | Source | What it is |
 |---------|--------|------------|
-| `file_tracker_unified` | `file_tracker_unified.c` | GTK4 desktop application with tabs for scanning, browsing results, managing drives and finding duplicates. Packaged as **File Tracker Unified.app** |
+| `file_tracker_unified` | `file_tracker_unified.c` | GTK4 desktop application with sidebar sections for scanning, browsing results, managing drives and finding duplicates. Packaged as **File Tracker Unified.app** |
 | `file_tracker` | `file_tracker.c` | Command-line scanner, for scripts and scheduled scans |
 
 ## Quick Start
@@ -49,7 +49,7 @@ With *Update Database* on (`-u` on the command line), changed files have their s
 
 ## Desktop Application
 
-The tabs appear in this order: File Locator, DupeFinder, Drives, Summary, Logs, Compare, File Scanner, About.
+The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are, in order: File Locator, DupeFinder, Drives, Summary, Logs, Compare, File Scanner, About. The window follows the macOS Light/Dark appearance.
 
 ### Multiple Windows
 
@@ -244,6 +244,7 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 | `file_tracker_unified.c` | Desktop application |
 | `file_tracker.c` | Command-line scanner |
 | `macos_dock_menu.m` | macOS Dock menu ("New Window") for the desktop application |
+| `macos_appearance.m` | Follows the macOS Light/Dark appearance in the desktop application |
 | `Makefile`, `create_app_bundles.sh`, `icon/` | Build and `.app` packaging |
 | `migrate_*.sh`, `migrate_*.sql` | Database migrations for old databases |
 | `launcher.c`, `launcher.m` | Legacy `.app` launchers. Not used: the bundle now runs the real binary directly |

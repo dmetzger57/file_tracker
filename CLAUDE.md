@@ -8,7 +8,7 @@ File tracking suite using SHA-256 checksums to detect bit-rot and silent corrupt
 ## Architecture
 
 ### Application
-**Unified GUI:** `file_tracker_unified` - All-in-one GTK4 application with tabbed interface:
+**Unified GUI:** `file_tracker_unified` - All-in-one GTK4 application; a sidebar (left) selects the section shown on the right:
 1. **Scanner** - Scan directories and compute checksums
 2. **Summary** - View scan history and statistics
 3. **Logs** - Browse detailed per-file change logs
@@ -66,7 +66,7 @@ gcc -Wall -Wextra -O2 \
 ## Key Source Files
 
 ### Application
-- `file_tracker_unified.c` (~120KB): All-in-one GTK4 application with tabbed interface
+- `file_tracker_unified.c` (~120KB): All-in-one GTK4 application; sidebar sections ("tabs") in a `GtkStack`
   - Scanner tab: SHA-256 / mtime scanner with an adjustable worker pool (Workers setting)
   - Summary tab: Run history and statistics viewer
   - Logs tab: Per-run detailed log viewer with filters
@@ -75,6 +75,7 @@ gcc -Wall -Wextra -O2 \
   - Compare tab: Compare two scan runs to see changes
   - Multiple windows in one process (File > New Window ⌘N, Dock menu). All per-window widgets and state live in `AppWindow` (`w->...`); open windows are in `app_windows`. Callbacks receive the `AppWindow *` as `user_data` (or via a request struct such as `DriveDeleteRequest`/`RenameDialog`; `ScannerContext.win` for scanner idle callbacks)
 - `macos_dock_menu.m`: Adds `applicationDockMenu:` to GTK's NSApp delegate at runtime (macOS only; linked with `-framework Cocoa`)
+- `macos_appearance.m`: Reports the macOS Light/Dark appearance and its changes; `app_apply_color_scheme()` mirrors it into GTK
 
 ### Scripts
 - `create_app_bundles.sh`: Create macOS app bundle from binary
@@ -170,7 +171,7 @@ gcc -Wall -Wextra -O2 \
 ## GUI Application Bundle
 
 Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via `make install`:
-- **File Tracker Unified.app:** All-in-one tabbed interface with Scanner, Summary, Logs, Drives, Locator, and Compare tabs
+- **File Tracker Unified.app:** All-in-one sidebar interface with Scanner, Summary, Logs, Drives, Locator, and Compare tabs
 
 ## Development Notes
 
@@ -188,7 +189,8 @@ Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via
 5. Update all tools that query the table
 
 ### GUI Development
-- Tabbed interface using `GtkNotebook`
+- Window layout (modeled on ../photo-meta): sidebar `GtkListBox` → `GtkStack` of sections, built from the `app_pages[]` table in `app_window_build_layout()`; add a section there. The window has no title bar: the sidebar's `GtkHeaderBar` holds the native traffic lights and the page header is a `GtkWindowHandle`
+- Look and feel: one app-wide stylesheet (`app_css`) with macOS colors as `@define-color ft_*` tokens, redefined under `@media (prefers-color-scheme: dark)`. Style with these tokens; use the stock classes (`suggested-action`, `destructive-action`, `heading`, `dim-label`) on widgets
 - Progress updates: `g_idle_add()` for thread-safe UI updates
 - Use `GtkColumnView` for tables, `GtkTextView` for logs
 - File dialogs: `GtkFileDialog` (async API)
@@ -292,7 +294,7 @@ make apps                       # Build + create .app bundle
 - Consolidated all functionality into file_tracker_unified
 - Removed legacy individual CLI and GUI tools
 - Updated documentation to focus on unified application
-- All features accessible via tabbed interface
+- All features accessible from the sidebar
 
 **Active Development:**
 - Enhancements to unified GUI application

@@ -6,8 +6,8 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S), Darwin)
     CFLAGS += -I/opt/homebrew/opt/openssl@3/include -I/opt/homebrew/opt/sqlite/include
     LDFLAGS += -L/opt/homebrew/opt/openssl@3/lib -L/opt/homebrew/opt/sqlite/lib
-    # Dock menu ("New Window") for the unified app
-    UNIFIED_MACOS_SRC = macos_dock_menu.m
+    # Dock menu ("New Window") and Light/Dark appearance for the unified app
+    UNIFIED_MACOS_SRC = macos_dock_menu.m macos_appearance.m
     UNIFIED_MACOS_LIBS = -framework Cocoa
 endif
 
