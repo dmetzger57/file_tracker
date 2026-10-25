@@ -5,9 +5,9 @@
 # Migration script to add run_logs table to existing file_tracker databases
 # Usage: ./migrate_add_run_logs.sh [database_path]
 #
-# If no database path is provided, it will migrate all databases in $DB_FOLDER (default ~/db/FileTracker/)
+# If no database path is provided, it will migrate all databases in $File_Tracker_DB_PATH (default ~/db/FileTracker/)
 
-DB_DIR="${DB_FOLDER:-${HOME}/db/FileTracker}"
+DB_DIR="${File_Tracker_DB_PATH:-${HOME}/db/FileTracker}"
 
 if [ $# -eq 1 ]; then
     # Single database provided

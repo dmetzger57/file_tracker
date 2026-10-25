@@ -194,16 +194,16 @@ Anchored patterns are relative to the scanned directory. When you scan a whole d
 
 Each drive has its own database, `~/db/FileTracker/<drive name>.db`, plus one shared `~/db/FileTracker/drives.db`.
 
-### Database Folder (`DB_FOLDER`)
+### Database Folder (`File_Tracker_DB_PATH`)
 
-The databases are kept in `~/db/FileTracker` unless the `DB_FOLDER` environment variable is set, in which case its value is used as the folder (it is created if needed; a relative path is taken from the current directory). The application, the `file_tracker` CLI and the `migrate_*.sh` scripts all honor it, and the application shows the folder in use at the right of the page header on every section.
+The databases are kept in `~/db/FileTracker` unless the `File_Tracker_DB_PATH` environment variable is set, in which case its value is used as the folder (it is created if needed; a relative path is taken from the current directory). The application, the `file_tracker` CLI and the `migrate_*.sh` scripts all honor it, and the application shows the folder in use at the right of the page header on every section.
 
 ```bash
-DB_FOLDER=/Volumes/Archive/FileTracker ./file_tracker_unified
-DB_FOLDER=/Volumes/Archive/FileTracker ./file_tracker -s /Volumes/Photos -u
+File_Tracker_DB_PATH=/Volumes/Archive/FileTracker ./file_tracker_unified
+File_Tracker_DB_PATH=/Volumes/Archive/FileTracker ./file_tracker -s /Volumes/Photos -u
 ```
 
-Apps opened from Finder or the Dock do not see variables set in your shell profile. To use `DB_FOLDER` there, run `launchctl setenv DB_FOLDER /path/to/folder` (lasts until logout) before opening the app, or start the app from Terminal with `DB_FOLDER=... open "/Applications/File Tracker Unified.app"`.
+Apps opened from Finder or the Dock do not see variables set in your shell profile. To use `File_Tracker_DB_PATH` there, run `launchctl setenv File_Tracker_DB_PATH /path/to/folder` (lasts until logout) before opening the app, or start the app from Terminal with `File_Tracker_DB_PATH=... open "/Applications/File Tracker Unified.app"`.
 
 **files:** one row per file
 - `id, file_name, full_path (UNIQUE), size, created, last_modified, owner, checksum, keywords, status`
@@ -219,7 +219,7 @@ Apps opened from Finder or the Dock do not see variables set in your shell profi
 - `drive_id, drive_name (UNIQUE), capacity, space_available, space_used, description, last_updated, last_verified, storage_container`
 - `storage_container` is the Location shown in the Drives tab
 
-Missing columns (such as `files.status`) are added automatically to older databases on their next scan. The `migrate_*.sh` scripts upgrade databases created by much older versions (adding `run_logs`, `meta.note` and `run_logs.checksum`). They are safe to run more than once, and with no arguments they migrate every database in the database folder (`$DB_FOLDER`, or `~/db/FileTracker/`).
+Missing columns (such as `files.status`) are added automatically to older databases on their next scan. The `migrate_*.sh` scripts upgrade databases created by much older versions (adding `run_logs`, `meta.note` and `run_logs.checksum`). They are safe to run more than once, and with no arguments they migrate every database in the database folder (`$File_Tracker_DB_PATH`, or `~/db/FileTracker/`).
 
 ## Building
 

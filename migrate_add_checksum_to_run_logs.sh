@@ -5,7 +5,7 @@
 # Migration script to add checksum column to run_logs table
 # This is idempotent - safe to run multiple times
 
-DB_DIR="${DB_FOLDER:-$HOME/db/FileTracker}"
+DB_DIR="${File_Tracker_DB_PATH:-$HOME/db/FileTracker}"
 
 if [ ! -d "$DB_DIR" ]; then
     echo "Database directory not found: $DB_DIR"

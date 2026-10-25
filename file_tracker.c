@@ -44,7 +44,7 @@ static int ignore_dir_only[MAX_IGNORES];  // pattern had a trailing '/': matches
 static int ignore_anchored[MAX_IGNORES];  // pattern contains a '/': matched against the path below the scan root
 static int ignore_count = 0;
 static volatile sig_atomic_t should_stop = 0;
-static char db_dir[MAX_PATH];  // folder holding the databases: $DB_FOLDER, or ~/db/FileTracker
+static char db_dir[MAX_PATH];  // folder holding the databases: $File_Tracker_DB_PATH, or ~/db/FileTracker
 
 // ============================================================================
 // Utilities (same behavior as file_tracker_unified)
@@ -535,7 +535,7 @@ static void usage(const char *prog) {
             "  -v  Verify via SHA-256 checksum (default: compare size and modification time)\n"
             "  -u  Update file details in the database (default: the scan is recorded but file details are not updated)\n"
             "  -n  Note to store with the scan run\n"
-            "Databases are kept in $DB_FOLDER if it is set, otherwise in ~/db/FileTracker\n",
+            "Databases are kept in $File_Tracker_DB_PATH if it is set, otherwise in ~/db/FileTracker\n",
             prog);
 }
 
@@ -544,17 +544,17 @@ static void on_signal(int sig) {
     should_stop = 1;
 }
 
-// Sets db_dir to $DB_FOLDER when it is set and not empty, otherwise to ~/db/FileTracker.
-// A relative $DB_FOLDER is taken from the current directory. Returns 0, or -1 with a message
+// Sets db_dir to $File_Tracker_DB_PATH when it is set and not empty, otherwise to ~/db/FileTracker.
+// A relative $File_Tracker_DB_PATH is taken from the current directory. Returns 0, or -1 with a message
 static int set_db_dir(void) {
-    const char *folder = getenv("DB_FOLDER");
+    const char *folder = getenv("File_Tracker_DB_PATH");
     if (folder && folder[0]) {
         if (folder[0] == '/') {
             snprintf(db_dir, sizeof(db_dir), "%s", folder);
         } else {
             char cwd[MAX_PATH];
             if (!getcwd(cwd, sizeof(cwd))) {
-                fprintf(stderr, "Error: cannot resolve DB_FOLDER %s: %s\n", folder, strerror(errno));
+                fprintf(stderr, "Error: cannot resolve File_Tracker_DB_PATH %s: %s\n", folder, strerror(errno));
                 return -1;
             }
             snprintf(db_dir, sizeof(db_dir), "%s/%s", cwd, folder);

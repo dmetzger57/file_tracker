@@ -37,7 +37,7 @@ void macos_watch_appearance(void (*callback)(int dark));
 // GLOBAL UI AND STATE
 // ============================================================================
 
-char db_dir_path[MAX_PATH];  // folder holding the databases: $DB_FOLDER, or ~/db/FileTracker
+char db_dir_path[MAX_PATH];  // folder holding the databases: $File_Tracker_DB_PATH, or ~/db/FileTracker
 
 typedef struct ScannerContext ScannerContext;
 
@@ -4940,8 +4940,8 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
     gtk_widget_set_hexpand(w->db_folder_label, TRUE);
     gtk_widget_set_valign(w->db_folder_label, GTK_ALIGN_BASELINE_CENTER);
     gtk_widget_set_tooltip_text(w->db_folder_label,
-                                getenv("DB_FOLDER") && getenv("DB_FOLDER")[0] ? "Set by the DB_FOLDER environment variable"
-                                                                             : "Default folder (DB_FOLDER is not set)");
+                                getenv("File_Tracker_DB_PATH") && getenv("File_Tracker_DB_PATH")[0] ? "Set by the File_Tracker_DB_PATH environment variable"
+                                                                             : "Default folder (File_Tracker_DB_PATH is not set)");
     gtk_box_append(GTK_BOX(header_box), w->db_folder_label);
     GtkWidget *header = gtk_window_handle_new();  // drag the window by its header, as with a title bar
     gtk_window_handle_set_child(GTK_WINDOW_HANDLE(header), header_box);
@@ -5088,9 +5088,9 @@ int main(int argc, char *argv[]) {
     use_bundled_gtk_data();
 #endif
 
-    // Databases live in $DB_FOLDER when it is set (a relative path is taken from the current
+    // Databases live in $File_Tracker_DB_PATH when it is set (a relative path is taken from the current
     // directory), otherwise in ~/db/FileTracker
-    const char *db_folder = getenv("DB_FOLDER");
+    const char *db_folder = getenv("File_Tracker_DB_PATH");
     if (db_folder && db_folder[0]) {
         char *abs_folder = g_canonicalize_filename(db_folder, NULL);
         snprintf(db_dir_path, sizeof(db_dir_path), "%s", abs_folder);

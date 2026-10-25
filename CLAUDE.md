@@ -34,7 +34,7 @@ file_tracker_unified → SQLite DB (~/db/FileTracker/*.db)
 - **run_logs:** `id, run_id (FK to meta.id), status, full_path` (indexed on run_id, status)
 
 ### Storage Locations
-- Databases: `$DB_FOLDER/*.db` when the `DB_FOLDER` environment variable is set, otherwise `~/db/FileTracker/*.db`
+- Databases: `$File_Tracker_DB_PATH/*.db` when the `File_Tracker_DB_PATH` environment variable is set, otherwise `~/db/FileTracker/*.db`
 - Drive tracking: `drives.db` in the same folder
 - Code: always build paths from `db_dir_path` (GUI) / `db_dir` (CLI), never from `$HOME`; the GUI shows the folder in the page header (`w->db_folder_label`)
 - Ignore list: `~/.rsync-ignore`
