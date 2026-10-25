@@ -37,7 +37,7 @@ void macos_watch_appearance(void (*callback)(int dark));
 // GLOBAL UI AND STATE
 // ============================================================================
 
-char db_dir_path[MAX_PATH];
+char db_dir_path[MAX_PATH];  // folder holding the databases: $DB_FOLDER, or ~/db/FileTracker
 
 typedef struct ScannerContext ScannerContext;
 
@@ -48,6 +48,7 @@ typedef struct {
     GtkWidget *main_stack;        // one page per sidebar item
     GtkWidget *page_title;        // header above the page: name of the selected sidebar item
     GtkWidget *page_subtitle;
+    GtkWidget *db_folder_label;   // right end of the page header: the database folder in use
     int number;                   // 1 for the first window opened, 2 for the next, ...
     gboolean close_prompt_open;   // "A scan is running" prompt is showing
     gboolean close_after_scan;    // close was confirmed while a scan was running
@@ -311,13 +312,12 @@ int get_drive_stats(const char *path, long long *capacity, long long *available,
 // Opens drives.db. It is shared by every running copy of the app and by the CLI, so wait up to
 // 30 seconds (as the CLI does) when another process is writing to it instead of failing
 static int open_drives_db(sqlite3 **db, char *err, size_t err_size) {
-    const char *home = getenv("HOME");
     char drives_db_path[MAX_PATH];
-    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home ? home : "");
+    snprintf(drives_db_path, sizeof(drives_db_path), "%s/drives.db", db_dir_path);
 
     *db = NULL;
-    if (!home || sqlite3_open(drives_db_path, db) != SQLITE_OK) {
-        snprintf(err, err_size, "cannot open %s: %s", drives_db_path, *db ? sqlite3_errmsg(*db) : "HOME not set");
+    if (sqlite3_open(drives_db_path, db) != SQLITE_OK) {
+        snprintf(err, err_size, "cannot open %s: %s", drives_db_path, *db ? sqlite3_errmsg(*db) : "out of memory");
         if (*db) sqlite3_close(*db);
         *db = NULL;
         return 0;
@@ -439,7 +439,7 @@ int update_drive_stats(const char *drive_name, const char *source_path, char *er
 // 0 on failure (message in err)
 int auto_add_or_update_drive(const char *db_path, const char *source_path, char *err, size_t err_size) {
     // Extract drive name from db_path
-    // db_path format: ~/db/FileTracker/DriveName.db
+    // db_path format: <db_dir_path>/DriveName.db
     char *last_slash = strrchr(db_path, '/');
     if (!last_slash) return 1;
 
@@ -4929,6 +4929,20 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
     gtk_widget_set_valign(w->page_subtitle, GTK_ALIGN_BASELINE_CENTER);
     gtk_box_append(GTK_BOX(header_box), w->page_title);
     gtk_box_append(GTK_BOX(header_box), w->page_subtitle);
+    // Shown on every page so it is clear which databases the window works with
+    char *db_folder_text = g_strdup_printf("Databases: %s", db_dir_path);
+    w->db_folder_label = gtk_label_new(db_folder_text);
+    g_free(db_folder_text);
+    gtk_widget_add_css_class(w->db_folder_label, "ft-page-subtitle");
+    gtk_label_set_ellipsize(GTK_LABEL(w->db_folder_label), PANGO_ELLIPSIZE_START);
+    gtk_label_set_xalign(GTK_LABEL(w->db_folder_label), 1);
+    gtk_label_set_selectable(GTK_LABEL(w->db_folder_label), TRUE);
+    gtk_widget_set_hexpand(w->db_folder_label, TRUE);
+    gtk_widget_set_valign(w->db_folder_label, GTK_ALIGN_BASELINE_CENTER);
+    gtk_widget_set_tooltip_text(w->db_folder_label,
+                                getenv("DB_FOLDER") && getenv("DB_FOLDER")[0] ? "Set by the DB_FOLDER environment variable"
+                                                                             : "Default folder (DB_FOLDER is not set)");
+    gtk_box_append(GTK_BOX(header_box), w->db_folder_label);
     GtkWidget *header = gtk_window_handle_new();  // drag the window by its header, as with a title bar
     gtk_window_handle_set_child(GTK_WINDOW_HANDLE(header), header_box);
     gtk_box_append(GTK_BOX(content), header);
@@ -5074,18 +5088,26 @@ int main(int argc, char *argv[]) {
     use_bundled_gtk_data();
 #endif
 
-    const char *home = getenv("HOME");
-    if (!home) {
-        fprintf(stderr, "Error: HOME not set\n");
-        return 1;
+    // Databases live in $DB_FOLDER when it is set (a relative path is taken from the current
+    // directory), otherwise in ~/db/FileTracker
+    const char *db_folder = getenv("DB_FOLDER");
+    if (db_folder && db_folder[0]) {
+        char *abs_folder = g_canonicalize_filename(db_folder, NULL);
+        snprintf(db_dir_path, sizeof(db_dir_path), "%s", abs_folder);
+        g_free(abs_folder);
+    } else {
+        const char *home = getenv("HOME");
+        if (!home) {
+            fprintf(stderr, "Error: HOME not set\n");
+            return 1;
+        }
+        snprintf(db_dir_path, sizeof(db_dir_path), "%s/db/FileTracker", home);
     }
 
-    snprintf(db_dir_path, sizeof(db_dir_path), "%s/db/FileTracker", home);
-
     // Create directory if it doesn't exist
-    char mkdir_cmd[MAX_PATH + 20];
-    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", db_dir_path);
-    system(mkdir_cmd);
+    if (g_mkdir_with_parents(db_dir_path, 0755) != 0) {
+        fprintf(stderr, "Warning: cannot create %s: %s\n", db_dir_path, g_strerror(errno));
+    }
 
     load_ignore_list();
 

@@ -44,6 +44,7 @@ static int ignore_dir_only[MAX_IGNORES];  // pattern had a trailing '/': matches
 static int ignore_anchored[MAX_IGNORES];  // pattern contains a '/': matched against the path below the scan root
 static int ignore_count = 0;
 static volatile sig_atomic_t should_stop = 0;
+static char db_dir[MAX_PATH];  // folder holding the databases: $DB_FOLDER, or ~/db/FileTracker
 
 // ============================================================================
 // Utilities (same behavior as file_tracker_unified)
@@ -165,11 +166,8 @@ static int compute_sha256(const char *path, char *output_buffer) {
 // ============================================================================
 
 static void auto_add_or_update_drive(const char *drive_name, const char *source_path) {
-    const char *home = getenv("HOME");
-    if (!home) return;
-
     char drives_db_path[MAX_PATH];
-    snprintf(drives_db_path, sizeof(drives_db_path), "%s/db/FileTracker/drives.db", home);
+    snprintf(drives_db_path, sizeof(drives_db_path), "%s/drives.db", db_dir);
 
     sqlite3 *drives_db = NULL;
     if (sqlite3_open(drives_db_path, &drives_db) != SQLITE_OK) {
@@ -536,7 +534,8 @@ static void usage(const char *prog) {
             "  -s  Source path to scan (required)\n"
             "  -v  Verify via SHA-256 checksum (default: compare size and modification time)\n"
             "  -u  Update file details in the database (default: the scan is recorded but file details are not updated)\n"
-            "  -n  Note to store with the scan run\n",
+            "  -n  Note to store with the scan run\n"
+            "Databases are kept in $DB_FOLDER if it is set, otherwise in ~/db/FileTracker\n",
             prog);
 }
 
@@ -545,15 +544,45 @@ static void on_signal(int sig) {
     should_stop = 1;
 }
 
-static int make_db_dir(const char *db_dir) {
-    char parent[MAX_PATH];
-    snprintf(parent, sizeof(parent), "%s", db_dir);
-    char *slash = strrchr(parent, '/');
-    if (slash) {
-        *slash = '\0';
-        mkdir(parent, 0755);
+// Sets db_dir to $DB_FOLDER when it is set and not empty, otherwise to ~/db/FileTracker.
+// A relative $DB_FOLDER is taken from the current directory. Returns 0, or -1 with a message
+static int set_db_dir(void) {
+    const char *folder = getenv("DB_FOLDER");
+    if (folder && folder[0]) {
+        if (folder[0] == '/') {
+            snprintf(db_dir, sizeof(db_dir), "%s", folder);
+        } else {
+            char cwd[MAX_PATH];
+            if (!getcwd(cwd, sizeof(cwd))) {
+                fprintf(stderr, "Error: cannot resolve DB_FOLDER %s: %s\n", folder, strerror(errno));
+                return -1;
+            }
+            snprintf(db_dir, sizeof(db_dir), "%s/%s", cwd, folder);
+        }
+    } else {
+        const char *home = getenv("HOME");
+        if (!home) {
+            fprintf(stderr, "Error: HOME not set\n");
+            return -1;
+        }
+        snprintf(db_dir, sizeof(db_dir), "%s/db/FileTracker", home);
     }
-    return (mkdir(db_dir, 0755) == 0 || errno == EEXIST) ? 0 : -1;
+    size_t len = strlen(db_dir);
+    while (len > 1 && db_dir[len - 1] == '/') db_dir[--len] = '\0';
+    return 0;
+}
+
+// Creates db_dir and any missing parent folders (mkdir -p)
+static int make_db_dir(void) {
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s", db_dir);
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(path, 0755) != 0 && errno != EEXIST) return -1;
+        *p = '/';
+    }
+    return (mkdir(path, 0755) == 0 || errno == EEXIST) ? 0 : -1;
 }
 
 static int open_database(Ctx *c) {
@@ -605,11 +634,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    const char *home = getenv("HOME");
-    if (!home) {
-        fprintf(stderr, "Error: HOME not set\n");
-        return 1;
-    }
+    if (set_db_dir() != 0) return 1;
 
     // Relative paths are made absolute so stored paths match those from the GUI
     if (source[0] == '/') {
@@ -634,9 +659,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    char db_dir[MAX_PATH];
-    snprintf(db_dir, sizeof(db_dir), "%s/db/FileTracker", home);
-    if (make_db_dir(db_dir) != 0) {
+    if (make_db_dir() != 0) {
         fprintf(stderr, "Error: cannot create %s: %s\n", db_dir, strerror(errno));
         return 1;
     }
