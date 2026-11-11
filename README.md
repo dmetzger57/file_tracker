@@ -58,7 +58,7 @@ With *Update Database* on (`-u` on the command line), changed files have their s
 
 ## Desktop Application
 
-The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are, in order: File Locator, DupeFinder, Drives, Summary, Logs, Compare, File Scanner, About. The window follows the macOS Light/Dark appearance.
+The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Compare, Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on File Locator. The window follows the macOS Light/Dark appearance.
 
 ### Multiple Windows
 
@@ -85,6 +85,17 @@ Scans one directory tree and saves the results as a run.
 - **Start Scan / Stop:** progress, the file being processed, and a summary when the scan finishes.
 
 The scanned drive is registered in the drives database automatically, and its capacity and free space are recorded.
+
+### TreeView
+
+Browse one database's file index like Finder's list view, whether or not the drive is mounted.
+
+- **Database:** pick a database. The tree starts at the folder that holds all of its files (shown above the tree with the file count and total size). Above the tree, **Location** shows where the drive is stored, as set on the Drives tab. **Refresh** reloads the database list and the tree.
+- **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the last run below it, e.g. *2 changed, 1 missing*.
+- **Columns:** Name, Date Modified, Size, Files, Status, all sortable. Missing and error entries are red, changed orange, new blue. Type to search the names of the visible rows.
+- **Show Missing Files:** untick to hide files the last scan could not find.
+- **Info:** the selected file's size, dates, owner, status and SHA-256, or the folder's totals. **Show in Finder** (or double-clicking a file) reveals the item when its drive is mounted.
+- **Collapse All:** close every open folder.
 
 ### Summary
 

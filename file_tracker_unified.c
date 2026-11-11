@@ -138,6 +138,18 @@ typedef struct {
     GtkWidget *dupe_db_check_box;     // Holds one check button per database
     GtkWidget *dupe_results_tree;
     GtkWidget *dupe_status_label;
+
+    // TreeView
+    GtkWidget *treeview_db_combo;
+    GtkWidget *treeview_missing_check;
+    GtkWidget *treeview_root_label;
+    GtkWidget *treeview_location_label;  // where the drive is stored (Drives tab's Location)
+    GtkWidget *treeview_tree;
+    GtkWidget *treeview_details_text;
+    GtkWidget *treeview_reveal_button;
+    char treeview_db_path[MAX_PATH];  // "" when no database is loaded
+    char treeview_root[MAX_PATH];     // common folder of every file in the database ("" for "/")
+    gboolean treeview_has_status;     // files.status exists (older databases lack it)
 } AppWindow;
 
 // Open main windows, oldest first
@@ -4605,6 +4617,644 @@ GtkWidget *create_about_tab() {
 }
 
 // ============================================================================
+// TAB: TREEVIEW (Finder-like browser of one database's file index)
+// ============================================================================
+
+// Folders are loaded lazily: each folder row gets a placeholder child, replaced by the
+// folder's contents the first time it is expanded. A folder's size, item count, date and
+// status summarize every file below it.
+enum {
+    TV_COL_NAME,
+    TV_COL_ICON,
+    TV_COL_IS_DIR,
+    TV_COL_SIZE,         // bytes; for folders the total of all files below
+    TV_COL_MTIME,        // epoch seconds; for folders the newest file below
+    TV_COL_COUNT,        // files below a folder (1 for a file)
+    TV_COL_STATUS,       // file status, or a folder's summary such as "2 changed, 1 missing"
+    TV_COL_STATUS_RANK,  // 0 = fine, 1 = new, 2 = changed, 3 = missing/error: for color and sorting
+    TV_COL_PATH,         // full path (folders without a trailing '/')
+    TV_COL_PLACEHOLDER,  // TRUE for the "Loading..." child of a folder not yet expanded
+    TV_COL_ID,           // files.id, 0 for folders
+    TV_N_COLS
+};
+
+static int treeview_open_db(AppWindow *w, sqlite3 **db) {
+    char err[512];
+    if (!w->treeview_db_path[0] || !file_list_open(w->treeview_db_path, db, err, sizeof(err))) return 0;
+    return 1;
+}
+
+// Status column expression; databases from before the status column have none
+static const char *treeview_status_expr(AppWindow *w) {
+    return w->treeview_has_status ? "COALESCE(status, '')" : "''";
+}
+
+static int treeview_status_rank(const char *status) {
+    if (!status || !status[0] || strcmp(status, "UNCHANGED") == 0 || strcmp(status, "IGNORED") == 0) return 0;
+    if (strcmp(status, "NEW") == 0) return 1;
+    if (strcmp(status, "CHANGED") == 0) return 2;
+    return 3;  // MISSING, ERROR
+}
+
+// Adds the files and folders directly inside dir (a full path without trailing '/', "" for the
+// filesystem root) below parent (NULL for the top level). Returns the number of rows added.
+static int treeview_add_children(AppWindow *w, sqlite3 *db, GtkTreeStore *store, GtkTreeIter *parent, const char *dir) {
+    char *lo = g_strdup_printf("%s/", dir);
+    char *hi = g_strdup_printf("%s0", dir);  // '0' follows '/', so [lo, hi) is everything below dir
+    gboolean hide_missing = !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check));
+
+    char *sql = g_strdup_printf(
+        "SELECT CASE WHEN p > 0 THEN substr(rest, 1, p - 1) ELSE rest END AS name, p > 0 AS is_dir, "
+        "  SUM(COALESCE(size, 0)), COUNT(*), MAX(last_modified), "
+        "  SUM(st = 'NEW'), SUM(st = 'CHANGED'), SUM(st = 'MISSING'), SUM(st = 'ERROR'), MAX(id), MAX(st) "
+        "FROM (SELECT id, size, last_modified, st, rest, instr(rest, '/') AS p "
+        "      FROM (SELECT id, size, last_modified, %s AS st, substr(full_path, ?1) AS rest "
+        "            FROM files WHERE full_path >= ?2 AND full_path < ?3 %s)) "
+        "WHERE name <> '' "
+        "GROUP BY name, is_dir ORDER BY name COLLATE NOCASE",
+        treeview_status_expr(w), hide_missing && w->treeview_has_status ? "AND status IS NOT 'MISSING'" : "");
+
+    int added = 0;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, g_utf8_strlen(lo, -1) + 1);  // substr() counts characters
+        sqlite3_bind_text(stmt, 2, lo, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, hi, -1, SQLITE_STATIC);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *name = (const char *)sqlite3_column_text(stmt, 0);
+            gboolean is_dir = sqlite3_column_int(stmt, 1);
+            long long n_new = sqlite3_column_int64(stmt, 5), n_changed = sqlite3_column_int64(stmt, 6);
+            long long n_missing = sqlite3_column_int64(stmt, 7), n_error = sqlite3_column_int64(stmt, 8);
+            char *path = g_strdup_printf("%s%s", lo, name ? name : "");
+
+            char status[160] = "";
+            int rank;
+            if (is_dir) {
+                const long long counts[] = {n_changed, n_new, n_missing, n_error};
+                const char *labels[] = {"changed", "new", "missing", "error"};
+                size_t len = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (counts[i] <= 0) continue;
+                    char num[32];
+                    len += snprintf(status + len, sizeof(status) - len, "%s%s %s", len ? ", " : "",
+                                    format_count(counts[i], num, sizeof(num)), labels[i]);
+                    if (len >= sizeof(status)) break;
+                }
+                rank = (n_missing || n_error) ? 3 : n_changed ? 2 : n_new ? 1 : 0;
+            } else {
+                const char *st = (const char *)sqlite3_column_text(stmt, 10);
+                snprintf(status, sizeof(status), "%s", st ? st : "");
+                rank = treeview_status_rank(st);
+            }
+
+            GtkTreeIter iter;
+            gtk_tree_store_insert_with_values(store, &iter, parent, -1,
+                                              TV_COL_NAME, name,
+                                              TV_COL_ICON, is_dir ? "folder" : "text-x-generic",
+                                              TV_COL_IS_DIR, is_dir,
+                                              TV_COL_SIZE, (gint64)sqlite3_column_int64(stmt, 2),
+                                              TV_COL_MTIME, (gint64)sqlite3_column_int64(stmt, 4),
+                                              TV_COL_COUNT, (gint64)sqlite3_column_int64(stmt, 3),
+                                              TV_COL_STATUS, status,
+                                              TV_COL_STATUS_RANK, rank,
+                                              TV_COL_PATH, path,
+                                              TV_COL_PLACEHOLDER, FALSE,
+                                              TV_COL_ID, (gint64)(is_dir ? 0 : sqlite3_column_int64(stmt, 9)),
+                                              -1);
+            if (is_dir) {
+                GtkTreeIter child;
+                gtk_tree_store_insert_with_values(store, &child, &iter, -1,
+                                                  TV_COL_NAME, "Loading…", TV_COL_PLACEHOLDER, TRUE, -1);
+            }
+            g_free(path);
+            added++;
+        }
+        sqlite3_finalize(stmt);
+    }
+    g_free(sql);
+    g_free(lo);
+    g_free(hi);
+    return added;
+}
+
+// Fills the store with the folders and files directly inside the scanned root
+static int treeview_populate(AppWindow *w, sqlite3 *db, GtkTreeStore *store, GtkTreeIter *parent, const char *dir) {
+    // Insert unsorted, then let the view sort once
+    GtkTreeSortable *sortable = GTK_TREE_SORTABLE(store);
+    int sort_id;
+    GtkSortType order;
+    gboolean sorted = gtk_tree_sortable_get_sort_column_id(sortable, &sort_id, &order);
+    if (sorted) gtk_tree_sortable_set_sort_column_id(sortable, GTK_TREE_SORTABLE_UNSORTED_SORT_COLUMN_ID, order);
+    int added = treeview_add_children(w, db, store, parent, dir);
+    if (sorted) gtk_tree_sortable_set_sort_column_id(sortable, sort_id, order);
+    return added;
+}
+
+static gboolean on_treeview_test_expand_row(GtkTreeView *view, GtkTreeIter *iter, GtkTreePath *path, gpointer user_data) {
+    (void)path;
+    AppWindow *w = user_data;
+    GtkTreeModel *model = gtk_tree_view_get_model(view);
+    GtkTreeIter child;
+    if (!gtk_tree_model_iter_children(model, &child, iter)) return FALSE;
+    gboolean placeholder = FALSE;
+    gtk_tree_model_get(model, &child, TV_COL_PLACEHOLDER, &placeholder, -1);
+    if (!placeholder) return FALSE;  // already loaded
+
+    char *dir = NULL;
+    gtk_tree_model_get(model, iter, TV_COL_PATH, &dir, -1);
+    sqlite3 *db;
+    if (dir && treeview_open_db(w, &db)) {
+        treeview_populate(w, db, GTK_TREE_STORE(model), iter, dir);
+        sqlite3_close(db);
+    }
+    g_free(dir);
+    // The placeholder is the first child (rows are inserted unsorted after it, then sorted;
+    // find it again rather than trusting its position)
+    if (gtk_tree_model_iter_children(model, &child, iter)) {
+        do {
+            gtk_tree_model_get(model, &child, TV_COL_PLACEHOLDER, &placeholder, -1);
+            if (placeholder) {
+                gtk_tree_store_remove(GTK_TREE_STORE(model), &child);
+                break;
+            }
+        } while (gtk_tree_model_iter_next(model, &child));
+    }
+    return FALSE;  // allow expanding
+}
+
+// Longest common directory of all paths in the database: the common prefix of the smallest and
+// largest path, cut back to a '/'. Returns "" when the files share only "/".
+static char *treeview_find_root(AppWindow *w, sqlite3 *db, long long *n_files, long long *total_size) {
+    char *sql = g_strdup_printf("SELECT MIN(full_path), MAX(full_path), COUNT(*), SUM(COALESCE(size, 0)) FROM files %s",
+                                !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check)) && w->treeview_has_status
+                                    ? "WHERE status IS NOT 'MISSING'" : "");
+    char *root = NULL;
+    *n_files = 0;
+    *total_size = 0;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+            const char *a = (const char *)sqlite3_column_text(stmt, 0);
+            const char *b = (const char *)sqlite3_column_text(stmt, 1);
+            size_t n = 0;
+            while (a[n] && a[n] == b[n]) n++;
+            // A lone file, or paths sharing a whole name: the root is the folder holding it
+            if (a[n] == '\0' && b[n] == '\0') n = strlen(a);
+            while (n > 0 && a[n - 1] != '/') n--;
+            if (n > 0) n--;  // drop the '/' itself
+            root = g_strndup(a, n);
+            *n_files = sqlite3_column_int64(stmt, 2);
+            *total_size = sqlite3_column_int64(stmt, 3);
+        }
+        sqlite3_finalize(stmt);
+    }
+    g_free(sql);
+    return root;
+}
+
+static void treeview_set_details(AppWindow *w, const char *text) {
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->treeview_details_text)), text, -1);
+}
+
+static void treeview_format_time(gint64 t, char *buf, size_t size) {
+    time_t tt = (time_t)t;
+    struct tm *tm_info = t > 0 ? localtime(&tt) : NULL;
+    if (!tm_info || !strftime(buf, size, "%Y-%m-%d %H:%M:%S", tm_info)) snprintf(buf, size, "--");
+}
+
+// Shows where the drive is kept: the Location of the drive with the database's name in drives.db
+static void treeview_show_location(AppWindow *w, const char *db_file) {
+    char *text = NULL;
+    if (db_file && db_file[0]) {
+        size_t len = strlen(db_file);
+        char *drive_name = g_strndup(db_file, len > 3 && strcmp(db_file + len - 3, ".db") == 0 ? len - 3 : len);
+        char err[512];
+        sqlite3 *db;
+        if (open_drives_db(&db, err, sizeof(err))) {
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(db, "SELECT storage_container FROM drives WHERE drive_name = ?", -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, drive_name, -1, SQLITE_STATIC);
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char *loc = (const char *)sqlite3_column_text(stmt, 0);
+                    text = g_strdup_printf("Location: %s", loc && loc[0] ? loc : "not set (Drives tab)");
+                } else {
+                    text = g_strdup("Location: drive not tracked on the Drives tab");
+                }
+                sqlite3_finalize(stmt);
+            }
+            sqlite3_close(db);
+        }
+        g_free(drive_name);
+    }
+    gtk_label_set_text(GTK_LABEL(w->treeview_location_label), text ? text : "");
+    g_free(text);
+}
+
+void treeview_load(AppWindow *w) {
+    GtkTreeStore *store = GTK_TREE_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->treeview_tree)));
+    gtk_tree_store_clear(store);
+    treeview_set_details(w, "");
+    gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
+    w->treeview_db_path[0] = '\0';
+
+    char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->treeview_db_combo));
+    treeview_show_location(w, db_name);
+    if (!db_name || !db_name[0]) {
+        gtk_label_set_text(GTK_LABEL(w->treeview_root_label), "No database selected");
+        g_free(db_name);
+        return;
+    }
+    snprintf(w->treeview_db_path, sizeof(w->treeview_db_path), "%s/%s", db_dir_path, db_name);
+    g_free(db_name);
+
+    sqlite3 *db;
+    if (!treeview_open_db(w, &db)) {
+        gtk_label_set_text(GTK_LABEL(w->treeview_root_label), "Could not open the database");
+        w->treeview_db_path[0] = '\0';
+        return;
+    }
+    if (!table_has_column(db, "files", "full_path")) {
+        gtk_label_set_text(GTK_LABEL(w->treeview_root_label), "This database has no file index yet");
+        sqlite3_close(db);
+        return;
+    }
+    w->treeview_has_status = table_has_column(db, "files", "status");
+
+    long long n_files, total_size;
+    char *root = treeview_find_root(w, db, &n_files, &total_size);
+    if (!root) {
+        gtk_label_set_text(GTK_LABEL(w->treeview_root_label), "No files in this database");
+        sqlite3_close(db);
+        return;
+    }
+    snprintf(w->treeview_root, sizeof(w->treeview_root), "%s", root);
+    g_free(root);
+
+    gtk_widget_set_cursor_from_name(w->window, "wait");
+    treeview_populate(w, db, store, NULL, w->treeview_root);
+    gtk_widget_set_cursor(w->window, NULL);
+    sqlite3_close(db);
+
+    char count[32], size[32];
+    format_size(total_size, size, sizeof(size));
+    char *text = g_strdup_printf("%s — %s files, %s", w->treeview_root[0] ? w->treeview_root : "/",
+                                 format_count(n_files, count, sizeof(count)), size);
+    gtk_label_set_text(GTK_LABEL(w->treeview_root_label), text);
+    g_free(text);
+}
+
+void treeview_refresh_databases(AppWindow *w) {
+    GPtrArray *files = list_database_files();
+    if (!files) return;
+    refill_database_combo(w->treeview_db_combo, files, NULL, FALSE);
+    g_ptr_array_unref(files);
+}
+
+static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer user_data) {
+    AppWindow *w = user_data;
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    if (!gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        treeview_set_details(w, "");
+        gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
+        return;
+    }
+
+    char *name = NULL, *path = NULL, *status = NULL;
+    gboolean is_dir = FALSE, placeholder = FALSE;
+    gint64 size = 0, mtime = 0, count = 0, id = 0;
+    gtk_tree_model_get(model, &iter, TV_COL_NAME, &name, TV_COL_PATH, &path, TV_COL_STATUS, &status,
+                       TV_COL_IS_DIR, &is_dir, TV_COL_PLACEHOLDER, &placeholder, TV_COL_SIZE, &size,
+                       TV_COL_MTIME, &mtime, TV_COL_COUNT, &count, TV_COL_ID, &id, -1);
+    if (placeholder || !path) {
+        treeview_set_details(w, "");
+        gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
+        g_free(name); g_free(path); g_free(status);
+        return;
+    }
+
+    GString *text = g_string_new(NULL);
+    char size_str[32], bytes[32], date[64], num[32];
+    format_size(size, size_str, sizeof(size_str));
+    format_count(size, bytes, sizeof(bytes));
+
+    if (is_dir) {
+        treeview_format_time(mtime, date, sizeof(date));
+        g_string_append_printf(text, "Folder:        %s\nPath:          %s\n\n", name, path);
+        g_string_append_printf(text, "Files:         %s\n", format_count(count, num, sizeof(num)));
+        g_string_append_printf(text, "Total Size:    %s (%s bytes)\n", size_str, bytes);
+        g_string_append_printf(text, "Newest File:   %s\n", date);
+        g_string_append_printf(text, "Last Run:      %s\n", status && status[0] ? status : "all unchanged");
+    } else {
+        g_string_append_printf(text, "File:          %s\nPath:          %s\n\n", name, path);
+        sqlite3 *db;
+        if (treeview_open_db(w, &db)) {
+            char *sql = g_strdup_printf("SELECT size, created, last_modified, owner, checksum, keywords, %s "
+                                        "FROM files WHERE id = ?", treeview_status_expr(w));
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, id);
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const char *owner = (const char *)sqlite3_column_text(stmt, 3);
+                    const char *checksum = (const char *)sqlite3_column_text(stmt, 4);
+                    const char *keywords = (const char *)sqlite3_column_text(stmt, 5);
+                    const char *st = (const char *)sqlite3_column_text(stmt, 6);
+                    char created[64];
+                    treeview_format_time(sqlite3_column_int64(stmt, 1), created, sizeof(created));
+                    treeview_format_time(sqlite3_column_int64(stmt, 2), date, sizeof(date));
+                    g_string_append_printf(text, "Size:          %s (%s bytes)\n", size_str, bytes);
+                    g_string_append_printf(text, "Created:       %s\n", created);
+                    g_string_append_printf(text, "Modified:      %s\n", date);
+                    g_string_append_printf(text, "Owner:         %s\n", owner && owner[0] ? owner : "--");
+                    g_string_append_printf(text, "Status:        %s\n", st && st[0] ? st : "--");
+                    g_string_append_printf(text, "SHA-256:       %s\n", checksum && checksum[0] ? checksum : "--");
+                    if (keywords && keywords[0]) g_string_append_printf(text, "Keywords:      %s\n", keywords);
+                }
+                sqlite3_finalize(stmt);
+            }
+            g_free(sql);
+            sqlite3_close(db);
+        }
+    }
+
+    gboolean on_disk = g_file_test(path, G_FILE_TEST_EXISTS);
+    g_string_append_printf(text, "\nOn disk:       %s\n", on_disk ? "yes" : "no (drive not mounted, or the item is gone)");
+    treeview_set_details(w, text->str);
+    gtk_widget_set_sensitive(w->treeview_reveal_button, on_disk);
+
+    g_string_free(text, TRUE);
+    g_free(name); g_free(path); g_free(status);
+}
+
+static void treeview_reveal_path(const char *path) {
+#ifdef __APPLE__
+    char *argv[] = {"/usr/bin/open", "-R", (char *)path, NULL};
+    g_spawn_async(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL);
+#else
+    char *dir = g_path_get_dirname(path);
+    char *uri = g_filename_to_uri(dir, NULL, NULL);
+    if (uri) g_app_info_launch_default_for_uri(uri, NULL, NULL);
+    g_free(uri);
+    g_free(dir);
+#endif
+}
+
+static void on_treeview_reveal_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    AppWindow *w = user_data;
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(w->treeview_tree));
+    if (!gtk_tree_selection_get_selected(selection, &model, &iter)) return;
+    char *path = NULL;
+    gtk_tree_model_get(model, &iter, TV_COL_PATH, &path, -1);
+    if (path && g_file_test(path, G_FILE_TEST_EXISTS)) treeview_reveal_path(path);
+    g_free(path);
+}
+
+// Double-click: open or close a folder, reveal a file in Finder
+static void on_treeview_row_activated(GtkTreeView *view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
+    (void)column;
+    AppWindow *w = user_data;
+    GtkTreeModel *model = gtk_tree_view_get_model(view);
+    GtkTreeIter iter;
+    if (!gtk_tree_model_get_iter(model, &iter, path)) return;
+    gboolean is_dir = FALSE;
+    gtk_tree_model_get(model, &iter, TV_COL_IS_DIR, &is_dir, -1);
+    if (is_dir) {
+        if (gtk_tree_view_row_expanded(view, path)) gtk_tree_view_collapse_row(view, path);
+        else gtk_tree_view_expand_row(view, path, FALSE);
+    } else {
+        on_treeview_reveal_clicked(NULL, w);
+    }
+}
+
+static void on_treeview_collapse_all_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    AppWindow *w = user_data;
+    gtk_tree_view_collapse_all(GTK_TREE_VIEW(w->treeview_tree));
+}
+
+static void treeview_size_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
+                               GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    gboolean placeholder;
+    gint64 size;
+    gtk_tree_model_get(model, iter, TV_COL_PLACEHOLDER, &placeholder, TV_COL_SIZE, &size, -1);
+    char buf[32] = "";
+    if (!placeholder) format_size(size, buf, sizeof(buf));
+    g_object_set(renderer, "text", buf, NULL);
+}
+
+static void treeview_items_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
+                                GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    gboolean placeholder, is_dir;
+    gint64 count;
+    gtk_tree_model_get(model, iter, TV_COL_PLACEHOLDER, &placeholder, TV_COL_IS_DIR, &is_dir, TV_COL_COUNT, &count, -1);
+    char buf[32] = "";
+    if (!placeholder) {
+        if (is_dir) format_count(count, buf, sizeof(buf));
+        else snprintf(buf, sizeof(buf), "--");
+    }
+    g_object_set(renderer, "text", buf, NULL);
+}
+
+static void treeview_date_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
+                               GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    gboolean placeholder;
+    gint64 mtime;
+    gtk_tree_model_get(model, iter, TV_COL_PLACEHOLDER, &placeholder, TV_COL_MTIME, &mtime, -1);
+    char buf[64] = "";
+    if (!placeholder) treeview_format_time(mtime, buf, sizeof(buf));
+    g_object_set(renderer, "text", buf, NULL);
+}
+
+// Problems stand out: missing/error red, changed orange, new blue (macOS system colors)
+static void treeview_status_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
+                                 GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    char *status = NULL;
+    int rank = 0;
+    gtk_tree_model_get(model, iter, TV_COL_STATUS, &status, TV_COL_STATUS_RANK, &rank, -1);
+    static const char *colors[] = {NULL, "#007aff", "#ff9500", "#ff3b30"};
+    g_object_set(renderer, "text", status ? status : "", "foreground", colors[rank],
+                 "foreground-set", rank > 0, NULL);
+    g_free(status);
+}
+
+static gint treeview_sort_name(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b, gpointer data) {
+    (void)data;
+    char *na = NULL, *nb = NULL;
+    gtk_tree_model_get(model, a, TV_COL_NAME, &na, -1);
+    gtk_tree_model_get(model, b, TV_COL_NAME, &nb, -1);
+    char *ka = g_utf8_collate_key_for_filename(na ? na : "", -1);
+    char *kb = g_utf8_collate_key_for_filename(nb ? nb : "", -1);
+    gint result = strcmp(ka, kb);
+    g_free(ka); g_free(kb); g_free(na); g_free(nb);
+    return result;
+}
+
+static gint treeview_sort_int64(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b, gpointer data) {
+    int col = GPOINTER_TO_INT(data);
+    gint64 va = 0, vb = 0;
+    gtk_tree_model_get(model, a, col, &va, -1);
+    gtk_tree_model_get(model, b, col, &vb, -1);
+    return va < vb ? -1 : va > vb;
+}
+
+GtkWidget *create_treeview_tab(AppWindow *w) {
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
+    gtk_paned_set_resize_end_child(GTK_PANED(paned), FALSE);
+
+    // Left: database picker and the folder tree
+    GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_size_request(left_box, 700, -1);
+    gtk_widget_set_margin_start(left_box, 8);
+    gtk_widget_set_margin_end(left_box, 8);
+    gtk_widget_set_margin_top(left_box, 8);
+    gtk_widget_set_margin_bottom(left_box, 8);
+
+    GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(db_box), gtk_label_new("Database:"));
+    w->treeview_db_combo = gtk_combo_box_text_new();
+    gtk_widget_set_hexpand(w->treeview_db_combo, TRUE);
+    g_signal_connect_swapped(w->treeview_db_combo, "changed", G_CALLBACK(treeview_load), w);
+    gtk_box_append(GTK_BOX(db_box), w->treeview_db_combo);
+
+    w->treeview_missing_check = gtk_check_button_new_with_label("Show Missing Files");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->treeview_missing_check), TRUE);
+    gtk_widget_set_tooltip_text(w->treeview_missing_check, "Include files the last scan could not find");
+    g_signal_connect_swapped(w->treeview_missing_check, "toggled", G_CALLBACK(treeview_load), w);
+    gtk_box_append(GTK_BOX(db_box), w->treeview_missing_check);
+
+    GtkWidget *collapse_btn = gtk_button_new_with_label("Collapse All");
+    g_signal_connect(collapse_btn, "clicked", G_CALLBACK(on_treeview_collapse_all_clicked), w);
+    gtk_box_append(GTK_BOX(db_box), collapse_btn);
+
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list and the selected database");
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(treeview_refresh_databases), w);
+    gtk_box_append(GTK_BOX(db_box), refresh_btn);
+    gtk_box_append(GTK_BOX(left_box), db_box);
+
+    // Where the drive is kept, then the scanned folder with its totals
+    GtkWidget *info_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+    w->treeview_location_label = gtk_label_new("");
+    gtk_widget_add_css_class(w->treeview_location_label, "heading");
+    gtk_label_set_xalign(GTK_LABEL(w->treeview_location_label), 0);
+    gtk_label_set_selectable(GTK_LABEL(w->treeview_location_label), TRUE);
+    gtk_widget_set_tooltip_text(w->treeview_location_label, "Where the drive is stored, as set on the Drives tab");
+    gtk_box_append(GTK_BOX(info_box), w->treeview_location_label);
+
+    w->treeview_root_label = gtk_label_new("");
+    gtk_widget_add_css_class(w->treeview_root_label, "dim-label");
+    gtk_label_set_xalign(GTK_LABEL(w->treeview_root_label), 0);
+    gtk_label_set_ellipsize(GTK_LABEL(w->treeview_root_label), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_selectable(GTK_LABEL(w->treeview_root_label), TRUE);
+    gtk_widget_set_hexpand(w->treeview_root_label, TRUE);
+    gtk_box_append(GTK_BOX(info_box), w->treeview_root_label);
+    gtk_box_append(GTK_BOX(left_box), info_box);
+
+    GtkTreeStore *store = gtk_tree_store_new(TV_N_COLS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_BOOLEAN,
+                                             G_TYPE_INT64, G_TYPE_INT64, G_TYPE_INT64, G_TYPE_STRING,
+                                             G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_INT64);
+    GtkTreeSortable *sortable = GTK_TREE_SORTABLE(store);
+    gtk_tree_sortable_set_sort_func(sortable, TV_COL_NAME, treeview_sort_name, NULL, NULL);
+    gtk_tree_sortable_set_sort_func(sortable, TV_COL_SIZE, treeview_sort_int64, GINT_TO_POINTER(TV_COL_SIZE), NULL);
+    gtk_tree_sortable_set_sort_func(sortable, TV_COL_MTIME, treeview_sort_int64, GINT_TO_POINTER(TV_COL_MTIME), NULL);
+    gtk_tree_sortable_set_sort_func(sortable, TV_COL_COUNT, treeview_sort_int64, GINT_TO_POINTER(TV_COL_COUNT), NULL);
+    gtk_tree_sortable_set_sort_column_id(sortable, TV_COL_NAME, GTK_SORT_ASCENDING);
+
+    w->treeview_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    g_object_unref(store);
+    gtk_tree_view_set_enable_tree_lines(GTK_TREE_VIEW(w->treeview_tree), FALSE);
+    gtk_tree_view_set_search_column(GTK_TREE_VIEW(w->treeview_tree), TV_COL_NAME);
+
+    // Name: icon + text, like Finder's list view
+    GtkTreeViewColumn *name_col = gtk_tree_view_column_new();
+    gtk_tree_view_column_set_title(name_col, "Name");
+    GtkCellRenderer *icon_renderer = gtk_cell_renderer_pixbuf_new();
+    gtk_tree_view_column_pack_start(name_col, icon_renderer, FALSE);
+    gtk_tree_view_column_add_attribute(name_col, icon_renderer, "icon-name", TV_COL_ICON);
+    GtkCellRenderer *name_renderer = gtk_cell_renderer_text_new();
+    g_object_set(name_renderer, "ellipsize", PANGO_ELLIPSIZE_MIDDLE, NULL);
+    gtk_tree_view_column_pack_start(name_col, name_renderer, TRUE);
+    gtk_tree_view_column_add_attribute(name_col, name_renderer, "text", TV_COL_NAME);
+    gtk_tree_view_column_set_resizable(name_col, TRUE);
+    gtk_tree_view_column_set_expand(name_col, TRUE);
+    gtk_tree_view_column_set_min_width(name_col, 260);
+    gtk_tree_view_column_set_sort_column_id(name_col, TV_COL_NAME);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(w->treeview_tree), name_col);
+    gtk_tree_view_set_expander_column(GTK_TREE_VIEW(w->treeview_tree), name_col);
+
+    struct { const char *title; GtkTreeCellDataFunc func; int sort_col; float xalign; } cols[] = {
+        {"Date Modified", treeview_date_cell,   TV_COL_MTIME,       0.0f},
+        {"Size",          treeview_size_cell,   TV_COL_SIZE,        1.0f},
+        {"Files",         treeview_items_cell,  TV_COL_COUNT,       1.0f},
+        {"Status",        treeview_status_cell, TV_COL_STATUS_RANK, 0.0f},
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(cols); i++) {
+        GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+        g_object_set(renderer, "xalign", cols[i].xalign, NULL);
+        GtkTreeViewColumn *column = gtk_tree_view_column_new();
+        gtk_tree_view_column_set_title(column, cols[i].title);
+        gtk_tree_view_column_pack_start(column, renderer, TRUE);
+        gtk_tree_view_column_set_cell_data_func(column, renderer, cols[i].func, NULL, NULL);
+        gtk_tree_view_column_set_resizable(column, TRUE);
+        gtk_tree_view_column_set_sort_column_id(column, cols[i].sort_col);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(w->treeview_tree), column);
+    }
+
+    g_signal_connect(w->treeview_tree, "test-expand-row", G_CALLBACK(on_treeview_test_expand_row), w);
+    g_signal_connect(w->treeview_tree, "row-activated", G_CALLBACK(on_treeview_row_activated), w);
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(w->treeview_tree));
+    g_signal_connect(selection, "changed", G_CALLBACK(on_treeview_selection_changed), w);
+
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->treeview_tree);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_box_append(GTK_BOX(left_box), scroll);
+    gtk_paned_set_start_child(GTK_PANED(paned), left_box);
+
+    // Right: details of the selected file or folder
+    GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_size_request(right_box, 320, -1);
+    gtk_widget_set_margin_start(right_box, 8);
+    gtk_widget_set_margin_end(right_box, 8);
+    gtk_widget_set_margin_top(right_box, 8);
+    gtk_widget_set_margin_bottom(right_box, 8);
+
+    GtkWidget *details_label = gtk_label_new("Info");
+    gtk_widget_add_css_class(details_label, "heading");
+    gtk_label_set_xalign(GTK_LABEL(details_label), 0.0);
+    gtk_box_append(GTK_BOX(right_box), details_label);
+
+    w->treeview_details_text = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(w->treeview_details_text), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->treeview_details_text), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(w->treeview_details_text), GTK_WRAP_CHAR);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(w->treeview_details_text), 6);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(w->treeview_details_text), 6);
+    GtkWidget *details_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(details_scroll), w->treeview_details_text);
+    gtk_widget_set_vexpand(details_scroll, TRUE);
+    gtk_box_append(GTK_BOX(right_box), details_scroll);
+
+    w->treeview_reveal_button = gtk_button_new_with_label("Show in Finder");
+    gtk_widget_set_tooltip_text(w->treeview_reveal_button, "Reveal the selected item in Finder (its drive must be mounted)");
+    gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
+    gtk_widget_set_halign(w->treeview_reveal_button, GTK_ALIGN_END);
+    g_signal_connect(w->treeview_reveal_button, "clicked", G_CALLBACK(on_treeview_reveal_clicked), w);
+    gtk_box_append(GTK_BOX(right_box), w->treeview_reveal_button);
+
+    gtk_paned_set_end_child(GTK_PANED(paned), right_box);
+    return paned;
+}
+
+// ============================================================================
 // MAIN WINDOW SETUP
 // ============================================================================
 
@@ -4651,6 +5301,7 @@ void refresh_all_database_combos(AppWindow *w) {
     dupe_refresh_databases(w);
     summary_refresh_databases(w);
     compare_refresh_databases(w);
+    treeview_refresh_databases(w);
 }
 
 // After a drive database is deleted or renamed, every open window drops or renames it in its lists
@@ -4752,14 +5403,16 @@ typedef struct {
 
 static GtkWidget *create_about_page(AppWindow *w) { (void)w; return create_about_tab(); }
 
+// Sidebar order: alphabetical by title, with About last. Keep it sorted when adding a section.
 static const AppPage app_pages[] = {
-    { "locator",  "File Locator", "Search for files across drive databases",     "system-search-symbolic",        create_locator_tab },
-    { "dupes",    "DupeFinder",   "Find duplicate files by name or checksum",    "edit-copy-symbolic",            create_dupefinder_tab },
-    { "drives",   "Drives",       "Storage drives and their capacity",           "drive-harddisk-symbolic",       create_drives_tab },
-    { "summary",  "Summary",      "Scan history and statistics",                 "x-office-spreadsheet-symbolic", create_summary_tab },
-    { "logs",     "Logs",         "Per-file results of each scan run",           "document-open-recent-symbolic", create_logs_tab },
     { "compare",  "Compare",      "Differences between two scan runs",           "view-dual-symbolic",            create_compare_tab },
+    { "drives",   "Drives",       "Storage drives and their capacity",           "drive-harddisk-symbolic",       create_drives_tab },
+    { "dupes",    "DupeFinder",   "Find duplicate files by name or checksum",    "edit-copy-symbolic",            create_dupefinder_tab },
+    { "locator",  "File Locator", "Search for files across drive databases",     "system-search-symbolic",        create_locator_tab },
     { "scanner",  "File Scanner", "Scan a volume and verify its checksums",      "media-playback-start-symbolic", create_scanner_tab },
+    { "logs",     "Logs",         "Per-file results of each scan run",           "document-open-recent-symbolic", create_logs_tab },
+    { "summary",  "Summary",      "Scan history and statistics",                 "x-office-spreadsheet-symbolic", create_summary_tab },
+    { "treeview", "TreeView",     "Browse a database's files like Finder",       "view-list-symbolic",            create_treeview_tab },
     { "about",    "About",        "File Tracker Unified",                        "help-about-symbolic",           create_about_page },
 };
 
@@ -4970,7 +5623,12 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
     }
 
     g_signal_connect(nav, "row-selected", G_CALLBACK(on_sidebar_row_selected), w);
-    gtk_list_box_select_row(GTK_LIST_BOX(nav), gtk_list_box_get_row_at_index(GTK_LIST_BOX(nav), 0));
+    // Open on the File Locator, wherever it sits in the sorted list
+    int start_page = 0;
+    for (size_t i = 0; i < G_N_ELEMENTS(app_pages); i++) {
+        if (strcmp(app_pages[i].id, "locator") == 0) start_page = (int)i;
+    }
+    gtk_list_box_select_row(GTK_LIST_BOX(nav), gtk_list_box_get_row_at_index(GTK_LIST_BOX(nav), start_page));
 
     gtk_box_append(GTK_BOX(root), sidebar);
     gtk_box_append(GTK_BOX(root), divider);
