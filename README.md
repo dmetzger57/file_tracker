@@ -106,6 +106,7 @@ Browse one database's file index like Finder's list view, whether or not the dri
 - **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the files below it, e.g. *1 corrupt, 2 missing*.
 - **Columns:** Name, Date Modified, Size, Files, Status, all sortable. CORRUPT files are highlighted across the whole row (red tint, warning icon, bold red name), and folders containing one show their name in red. Corrupt, missing and error entries are red, changed orange, new blue. Type to search the names of the visible rows.
 - **Show Missing Files:** untick to hide files the last scan could not find.
+- **Corrupt count / Only Corrupt:** the toolbar shows how many files on the drive are marked CORRUPT (in red when there are any). **Only Corrupt** limits the tree to CORRUPT files and the folders that contain them; the totals above the tree then cover only those files. Accepting a file's current contents removes it from the filtered tree.
 - **Info:** the selected file's size, dates, owner, status and SHA-256, or the folder's totals. For a CORRUPT file the SHA-256 is the original checksum. **Show in Finder** (or double-clicking a file) reveals the item when its drive is mounted.
 - **Accept Current Contents:** for a CORRUPT file on a mounted drive, store the checksum of its current contents and clear the mark (after confirming). See [Bit Rot](#bit-rot).
 - **Collapse All:** close every open folder.

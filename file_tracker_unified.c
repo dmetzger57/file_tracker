@@ -151,6 +151,8 @@ typedef struct {
     GtkWidget *treeview_drive_list;      // Finder-style list of drive databases
     GtkWidget *treeview_drives_box;      // column holding it; widens while the sidebar is collapsed
     GtkWidget *treeview_missing_check;
+    GtkWidget *treeview_corrupt_toggle;  // Only Corrupt: show just CORRUPT files and their folders
+    GtkWidget *treeview_corrupt_label;   // count of CORRUPT files on the drive
     GtkWidget *treeview_root_label;
     GtkWidget *treeview_location_label;  // where the drive is stored (Drives tab's Location)
     GtkWidget *treeview_tree;
@@ -4730,6 +4732,15 @@ static const char *treeview_status_expr(AppWindow *w) {
     return w->treeview_has_status ? "COALESCE(status, '')" : "''";
 }
 
+// Extra condition on the files the tree shows: only CORRUPT files, or everything but MISSING
+// ones when Show Missing Files is off. Starts with "AND " (or is empty).
+static const char *treeview_filter_sql(AppWindow *w) {
+    if (!w->treeview_has_status) return "";
+    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_corrupt_toggle))) return "AND status = 'CORRUPT'";
+    if (!gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check))) return "AND status IS NOT 'MISSING'";
+    return "";
+}
+
 static int treeview_status_rank(const char *status) {
     if (!status || !status[0] || strcmp(status, "UNCHANGED") == 0 || strcmp(status, "IGNORED") == 0) return 0;
     if (strcmp(status, "NEW") == 0) return 1;
@@ -4757,8 +4768,6 @@ static int treeview_folder_status(const long long counts[5], char *status, size_
 static int treeview_add_children(AppWindow *w, sqlite3 *db, GtkTreeStore *store, GtkTreeIter *parent, const char *dir) {
     char *lo = g_strdup_printf("%s/", dir);
     char *hi = g_strdup_printf("%s0", dir);  // '0' follows '/', so [lo, hi) is everything below dir
-    gboolean hide_missing = !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check));
-
     char *sql = g_strdup_printf(
         "SELECT CASE WHEN p > 0 THEN substr(rest, 1, p - 1) ELSE rest END AS name, p > 0 AS is_dir, "
         "  SUM(COALESCE(size, 0)), COUNT(*), MAX(last_modified), "
@@ -4769,7 +4778,7 @@ static int treeview_add_children(AppWindow *w, sqlite3 *db, GtkTreeStore *store,
         "            FROM files WHERE full_path >= ?2 AND full_path < ?3 %s)) "
         "WHERE name <> '' "
         "GROUP BY name, is_dir ORDER BY name COLLATE NOCASE",
-        treeview_status_expr(w), hide_missing && w->treeview_has_status ? "AND status IS NOT 'MISSING'" : "");
+        treeview_status_expr(w), treeview_filter_sql(w));
 
     int added = 0;
     sqlite3_stmt *stmt;
@@ -4873,9 +4882,8 @@ static gboolean on_treeview_test_expand_row(GtkTreeView *view, GtkTreeIter *iter
 // Longest common directory of all paths in the database: the common prefix of the smallest and
 // largest path, cut back to a '/'. Returns "" when the files share only "/".
 static char *treeview_find_root(AppWindow *w, sqlite3 *db, long long *n_files, long long *total_size) {
-    char *sql = g_strdup_printf("SELECT MIN(full_path), MAX(full_path), COUNT(*), SUM(COALESCE(size, 0)) FROM files %s",
-                                !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check)) && w->treeview_has_status
-                                    ? "WHERE status IS NOT 'MISSING'" : "");
+    char *sql = g_strdup_printf("SELECT MIN(full_path), MAX(full_path), COUNT(*), SUM(COALESCE(size, 0)) FROM files WHERE 1 %s",
+                                treeview_filter_sql(w));
     char *root = NULL;
     *n_files = 0;
     *total_size = 0;
@@ -4938,6 +4946,30 @@ static void treeview_show_location(AppWindow *w, const char *db_file) {
     g_free(text);
 }
 
+// Shows how many files on the drive are marked CORRUPT (regardless of the filters)
+static void treeview_update_corrupt_count(AppWindow *w, sqlite3 *db) {
+    long long n = 0;
+    sqlite3_stmt *stmt;
+    if (db && w->treeview_has_status &&
+        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM files WHERE status = 'CORRUPT'", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) n = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    char num[32];
+    char *text = !db ? g_strdup("")
+               : n == 0 ? g_strdup("No corrupt files")
+               : g_strdup_printf("%s corrupt file%s", format_count(n, num, sizeof(num)), n == 1 ? "" : "s");
+    gtk_label_set_text(GTK_LABEL(w->treeview_corrupt_label), text);
+    g_free(text);
+    if (n > 0) {
+        gtk_widget_add_css_class(w->treeview_corrupt_label, "ft-corrupt-count");
+        gtk_widget_remove_css_class(w->treeview_corrupt_label, "dim-label");
+    } else {
+        gtk_widget_remove_css_class(w->treeview_corrupt_label, "ft-corrupt-count");
+        gtk_widget_add_css_class(w->treeview_corrupt_label, "dim-label");
+    }
+}
+
 void treeview_load(AppWindow *w) {
     GtkTreeStore *store = GTK_TREE_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->treeview_tree)));
     gtk_tree_store_clear(store);
@@ -4945,6 +4977,9 @@ void treeview_load(AppWindow *w) {
     gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
     gtk_widget_set_sensitive(w->treeview_accept_button, FALSE);
     w->treeview_db_path[0] = '\0';
+    treeview_update_corrupt_count(w, NULL);
+    gboolean only_corrupt = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_corrupt_toggle));
+    gtk_widget_set_sensitive(w->treeview_missing_check, !only_corrupt);  // the filter shows no MISSING files
 
     const char *db_name = w->treeview_db_file;
     treeview_show_location(w, db_name);
@@ -4966,11 +5001,13 @@ void treeview_load(AppWindow *w) {
         return;
     }
     w->treeview_has_status = table_has_column(db, "files", "status");
+    treeview_update_corrupt_count(w, db);
 
     long long n_files, total_size;
     char *root = treeview_find_root(w, db, &n_files, &total_size);
     if (!root) {
-        gtk_label_set_text(GTK_LABEL(w->treeview_root_label), "No files in this database");
+        gtk_label_set_text(GTK_LABEL(w->treeview_root_label),
+                           only_corrupt ? "No files on this drive are marked CORRUPT" : "No files in this database");
         sqlite3_close(db);
         return;
     }
@@ -4992,8 +5029,9 @@ void treeview_load(AppWindow *w) {
 
     char count[32], size[32];
     format_size(total_size, size, sizeof(size));
-    char *text = g_strdup_printf("%s — %s files, %s", w->treeview_root[0] ? w->treeview_root : "/",
-                                 format_count(n_files, count, sizeof(count)), size);
+    char *text = g_strdup_printf("%s — %s %sfile%s, %s", w->treeview_root[0] ? w->treeview_root : "/",
+                                 format_count(n_files, count, sizeof(count)), only_corrupt ? "corrupt " : "",
+                                 n_files == 1 ? "" : "s", size);
     gtk_label_set_text(GTK_LABEL(w->treeview_root_label), text);
     g_free(text);
 }
@@ -5200,12 +5238,11 @@ static void treeview_refresh_ancestors(AppWindow *w, GtkTreeIter *iter) {
     GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->treeview_tree));
     sqlite3 *db;
     if (!treeview_open_db(w, &db)) return;
-    gboolean hide_missing = !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check));
     char *sql = g_strdup_printf(
         "SELECT SUM(COALESCE(size, 0)), COUNT(*), MAX(last_modified), SUM(st = 'CORRUPT'), SUM(st = 'CHANGED'), "
         "  SUM(st = 'NEW'), SUM(st = 'MISSING'), SUM(st = 'ERROR') "
         "FROM (SELECT size, last_modified, %s AS st FROM files WHERE full_path >= ?1 AND full_path < ?2 %s)",
-        treeview_status_expr(w), hide_missing && w->treeview_has_status ? "AND status IS NOT 'MISSING'" : "");
+        treeview_status_expr(w), treeview_filter_sql(w));
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         GtkTreeIter child = *iter, parent;
@@ -5264,7 +5301,15 @@ static void on_treeview_accept_done(GObject *source, GAsyncResult *result, gpoin
             gtk_alert_dialog_set_detail(alert, req->error);
             gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
             g_object_unref(alert);
+        } else if (strcmp(req->db_path, w->treeview_db_path) == 0 &&
+                   gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_corrupt_toggle))) {
+            treeview_load(w);  // the file is no longer CORRUPT, so it leaves the filtered tree
         } else if (strcmp(req->db_path, w->treeview_db_path) == 0) {
+            sqlite3 *db;
+            if (treeview_open_db(w, &db)) {
+                treeview_update_corrupt_count(w, db);
+                sqlite3_close(db);
+            }
             GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->treeview_tree));
             GtkTreeIter iter;
             if (treeview_find_file(model, NULL, req->id, &iter)) {
@@ -5547,6 +5592,16 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     gtk_widget_set_hexpand(w->treeview_missing_check, TRUE);
     g_signal_connect_swapped(w->treeview_missing_check, "toggled", G_CALLBACK(treeview_load), w);
     gtk_box_append(GTK_BOX(db_box), w->treeview_missing_check);
+
+    w->treeview_corrupt_label = gtk_label_new("");
+    gtk_widget_set_tooltip_text(w->treeview_corrupt_label,
+        "Files on this drive marked CORRUPT: checksum changed although size and date did not (possible bit rot)");
+    gtk_box_append(GTK_BOX(db_box), w->treeview_corrupt_label);
+
+    w->treeview_corrupt_toggle = gtk_toggle_button_new_with_label("Only Corrupt");
+    gtk_widget_set_tooltip_text(w->treeview_corrupt_toggle, "Show only files marked CORRUPT and the folders that contain them");
+    g_signal_connect_swapped(w->treeview_corrupt_toggle, "toggled", G_CALLBACK(treeview_load), w);
+    gtk_box_append(GTK_BOX(db_box), w->treeview_corrupt_toggle);
 
     GtkWidget *collapse_btn = gtk_button_new_with_label("Collapse All");
     g_signal_connect(collapse_btn, "clicked", G_CALLBACK(on_treeview_collapse_all_clicked), w);
@@ -5890,6 +5945,7 @@ static const char *app_css =
     ".ft-sidebar .ft-sidebar-heading { font-size: 11px; font-weight: 600; color: @ft_secondary; margin: 0 18px 4px 18px; }\n"
     ".ft-drive-list .ft-sidebar-heading { margin-top: 14px; }\n"
     ".ft-sidebar-collapsed list { padding: 0 6px; }\n"
+    ".ft-corrupt-count { color: #ff3b30; font-weight: bold; }\n"
     ".ft-sidebar-collapsed headerbar { min-width: 0; padding: 0; }\n"
     ".ft-sidebar .ft-sidebar-footer { font-size: 11px; color: @ft_secondary; margin: 12px 18px; }\n"
     ".ft-divider { background: @ft_separator; min-width: 1px; min-height: 1px; }\n"
