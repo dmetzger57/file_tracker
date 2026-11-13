@@ -48,13 +48,25 @@ A quick verification compares only size and modification time. A deep verificati
 | Status | Meaning |
 |--------|---------|
 | **UNCHANGED** | File matches its database record |
-| **CHANGED** | Size, modification time or checksum differs. The log says which (e.g. `CHANGED: CheckSum, Date-Time`) |
+| **CHANGED** | Size or modification time differs (the file was written). The log says what differs (e.g. `CHANGED: CheckSum, Date-Time`) |
+| **CORRUPT** | A checksum scan found contents that no longer match the stored checksum although size and modification time are unchanged: possible bit rot. See [Bit Rot](#bit-rot) |
 | **NEW** | On disk but not in the database, or back on disk after being marked MISSING |
 | **MISSING** | In the database but no longer on disk |
 | **IGNORED** | Matches a pattern in `~/.rsync-ignore` (see [Ignore Patterns](#ignore-patterns)) |
 | **ERROR** | Could not be processed (permission denied, path too long, unreadable) |
 
 With *Update Database* on (`-u` on the command line), changed files have their stored size, time and checksum updated, new files are added, and missing files are marked `status = 'MISSING'` so they are reported only once. Without it, the run and its log are still saved but the `files` table is left alone.
+
+### Bit Rot
+
+When a checksum scan finds a file whose contents changed while its size and modification time did not, nothing wrote to the file, so the change is treated as corruption rather than an edit:
+
+- The file is logged as **CORRUPT** (counted in the run's Changed total, which the scan results list separately as Corrupt) and the scan ends with a warning.
+- With *Update Database* on, the file is marked `status = 'CORRUPT'` in the `files` table and its **original checksum is kept**, so the damage stays visible. Later scans keep reporting it as CORRUPT, including quick (mtime-only) scans, which cannot re-check it.
+- The mark clears by itself when the file is fixed: a checksum scan finds the contents match the original checksum again (restored from a backup with its original date), or the file is rewritten (its date or size changes, which stores the new checksum).
+- If the current contents are known to be good, select the file in the TreeView and click **Accept Current Contents**: its checksum is recomputed and stored, and the mark is cleared.
+
+A read-only checksum scan reports CORRUPT files in its log but does not mark them.
 
 ## Desktop Application
 
@@ -91,10 +103,11 @@ The scanned drive is registered in the drives database automatically, and its ca
 Browse one database's file index like Finder's list view, whether or not the drive is mounted.
 
 - **Drives:** the list beside the sidebar shows every drive database, like Finder's Locations. Click a drive to browse it. The tree starts at the root of the drive (`/Volumes/<name>` for an external drive, `/` for the startup disk), shown above the tree with the file count and total size. Above the tree, **Location** shows where the drive is stored, as set on the Drives tab. **Refresh** reloads the drive list and the tree.
-- **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the last run below it, e.g. *2 changed, 1 missing*.
-- **Columns:** Name, Date Modified, Size, Files, Status, all sortable. Missing and error entries are red, changed orange, new blue. Type to search the names of the visible rows.
+- **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the files below it, e.g. *1 corrupt, 2 missing*.
+- **Columns:** Name, Date Modified, Size, Files, Status, all sortable. CORRUPT files are highlighted across the whole row (red tint, warning icon, bold red name), and folders containing one show their name in red. Corrupt, missing and error entries are red, changed orange, new blue. Type to search the names of the visible rows.
 - **Show Missing Files:** untick to hide files the last scan could not find.
-- **Info:** the selected file's size, dates, owner, status and SHA-256, or the folder's totals. **Show in Finder** (or double-clicking a file) reveals the item when its drive is mounted.
+- **Info:** the selected file's size, dates, owner, status and SHA-256, or the folder's totals. For a CORRUPT file the SHA-256 is the original checksum. **Show in Finder** (or double-clicking a file) reveals the item when its drive is mounted.
+- **Accept Current Contents:** for a CORRUPT file on a mounted drive, store the checksum of its current contents and clear the mark (after confirming). See [Bit Rot](#bit-rot).
 - **Collapse All:** close every open folder.
 
 ### Summary
@@ -106,7 +119,7 @@ Pick a database to see its 10 most recent runs, with counts of unchanged, change
 The detailed, per-file log of any run.
 
 - **Database / Scan Runs:** pick a database, then a run. **Refresh** reloads the database list and runs.
-- **Filters:** All, New, Changed, Missing, Unchanged, Ignored, Errors.
+- **Filters:** All, New, Changed, Corrupt, Missing, Unchanged, Ignored, Errors. The run details show the Corrupt count when there is one.
 - **Note / Save Note:** view or edit the run's note.
 - **Export:** save the files matching the current filter as CSV (`Status,Full Path`).
 - **Export Contents:** save the files matching the current filter with their details, in the same format as the Drives tab's Export Contents, sorted by path: `Full Path,File Name,Size (bytes),Last Modified,Created,Owner,Checksum,Status`. Size, Last Modified and Checksum are the values the run recorded; for Missing, Ignored and Error entries (which the run logs without them) they are the file's last recorded values, or empty. Created and Owner are the file's current database values.
@@ -183,7 +196,7 @@ file_tracker -s /Volumes/Archive -u -v                  # deep verification (SHA
 | `-u` | Update file details in the database; without it the run is still recorded but the `files` table is not changed |
 | `-n note` | Note stored with the run |
 
-Output is one line: `Total: X - Processed: X - New: X - Changed: X - Unchanged: X - Missing: X - Errors: X`. Status rules, missing-file handling, ignore patterns and drive registration are the same as in the File Scanner tab. The run then shows up in the application's Summary, Logs and Compare tabs after a **Refresh**.
+Output is one line: `Total: X - Processed: X - New: X - Changed: X - Corrupt: X - Unchanged: X - Missing: X - Errors: X`, followed by a warning when files are CORRUPT. Status rules, missing-file handling, ignore patterns and drive registration are the same as in the File Scanner tab. The run then shows up in the application's Summary, Logs and Compare tabs after a **Refresh**.
 
 ## Ignore Patterns
 

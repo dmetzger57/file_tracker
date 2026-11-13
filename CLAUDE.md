@@ -30,8 +30,8 @@ file_tracker_unified → SQLite DB (~/db/FileTracker/*.db)
 
 ### Primary Tables
 - **files:** `id, file_name, full_path (UNIQUE), size, created, last_modified, owner, checksum, keywords, status`
-  - status: UNCHANGED, CHANGED, NEW, MISSING, IGNORED, ERROR
-- **meta:** `id, last_checksum_verify_date, last_date_verify, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note`
+  - status: UNCHANGED, CHANGED, CORRUPT, NEW, MISSING, IGNORED, ERROR (run_logs). `files.status` stores only MISSING and CORRUPT (NULL otherwise)
+- **meta:** `id, last_checksum_verify_date, last_date_verify, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note` (num_changed includes CORRUPT files; count them from run_logs)
 - **run_logs:** `id, run_id (FK to meta.id), status, full_path` (indexed on run_id, status)
 
 ### Storage Locations
@@ -123,7 +123,8 @@ gcc -Wall -Wextra -O2 \
 
 ### Status Values
 - **UNCHANGED:** File matches database record
-- **CHANGED:** Metadata or checksum differs
+- **CHANGED:** Size or mtime differs (file was written)
+- **CORRUPT:** Checksum differs but size and mtime do not (bit rot). Update scans set `files.status='CORRUPT'` and keep the original checksum; cleared when a checksum scan matches again, the file is rewritten, or TreeView "Accept Current Contents". Both scanners (`file_tracker_unified.c` and `file_tracker.c`) implement this
 - **NEW:** File found on disk, not in database
 - **MISSING:** In database, not found on disk
 - **IGNORED:** Matched `.rsync-ignore` pattern

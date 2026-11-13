@@ -92,6 +92,7 @@ typedef struct {
     GtkWidget *logs_filter_unchanged_check;
     GtkWidget *logs_filter_ignored_check;
     GtkWidget *logs_filter_errors_check;
+    GtkWidget *logs_filter_corrupt_check;
     GtkWidget *logs_filter_all_check;
     char logs_current_db_path[MAX_PATH];
     sqlite3_int64 logs_selected_run_id;
@@ -155,6 +156,7 @@ typedef struct {
     GtkWidget *treeview_tree;
     GtkWidget *treeview_details_text;
     GtkWidget *treeview_reveal_button;
+    GtkWidget *treeview_accept_button;   // Accept Current Contents: clears a CORRUPT mark
     char treeview_db_path[MAX_PATH];  // "" when no database is loaded
     char treeview_db_file[256];       // selected drive database file name ("Name.db"), "" for none
     char treeview_root[MAX_PATH];     // common folder of every file in the database ("" for "/")
@@ -1998,7 +2000,18 @@ void logs_load_details(AppWindow *w) {
         const char *note = (const char *)sqlite3_column_text(stmt, 9);
         const char *checksum_date = (const char *)sqlite3_column_text(stmt, 10);
 
-        char info[512];
+        // Corrupt files are counted in num_changed; run_logs tells them apart
+        int corrupt = 0;
+        sqlite3_stmt *cs;
+        if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM run_logs WHERE run_id = ? AND status = 'CORRUPT'", -1, &cs, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(cs, 1, w->logs_selected_run_id);
+            if (sqlite3_step(cs) == SQLITE_ROW) corrupt = sqlite3_column_int(cs, 0);
+            sqlite3_finalize(cs);
+        }
+        char corrupt_line[96] = "";
+        if (corrupt > 0) snprintf(corrupt_line, sizeof(corrupt_line), "  Corrupt: %'d (possible bit rot)\n", corrupt);
+
+        char info[640];
         snprintf(info, sizeof(info),
                 "Run Date: %s\n"
                 "Machine: %s\n"
@@ -2007,6 +2020,7 @@ void logs_load_details(AppWindow *w) {
                 "Legend: U/C/N/M/I/E\n\n"
                 "Unchanged: %'d\n"
                 "Changed:   %'d\n"
+                "%s"
                 "New:       %'d\n"
                 "Missing:   %'d\n"
                 "Ignored:   %'d\n"
@@ -2015,7 +2029,7 @@ void logs_load_details(AppWindow *w) {
                 machine ? machine : "N/A",
                 update_mode ? update_mode : "N/A",
                 checksum_date ? "Verified" : "Not Verified",
-                unchanged, changed, new, missing, ignored, errors);
+                unchanged, changed, corrupt_line, new, missing, ignored, errors);
 
         GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text));
         gtk_text_buffer_set_text(info_buffer, info, -1);
@@ -2046,6 +2060,12 @@ static int logs_build_status_filter(AppWindow *w, char *status_filter) {
         if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_changed_check))) {
             if (!first) strcat(status_filter, " OR ");
             strcat(status_filter, "status LIKE 'CHANGED%'");
+            first = 0;
+            any_filter = 1;
+        }
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_corrupt_check))) {
+            if (!first) strcat(status_filter, " OR ");
+            strcat(status_filter, "status = 'CORRUPT'");
             first = 0;
             any_filter = 1;
         }
@@ -2334,6 +2354,7 @@ void on_logs_filter_toggled(GtkCheckButton *button, gpointer user_data) {
         gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_all_check))) {
         gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_new_check), FALSE);
         gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_changed_check), FALSE);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_corrupt_check), FALSE);
         gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_missing_check), FALSE);
         gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_unchanged_check), FALSE);
         gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_ignored_check), FALSE);
@@ -2613,6 +2634,10 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     w->logs_filter_changed_check = gtk_check_button_new_with_label("Changed");
     g_signal_connect(w->logs_filter_changed_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
+    w->logs_filter_corrupt_check = gtk_check_button_new_with_label("Corrupt");
+    gtk_widget_set_tooltip_text(w->logs_filter_corrupt_check, "Checksum changed although size and date did not (possible bit rot)");
+    g_signal_connect(w->logs_filter_corrupt_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
+
     w->logs_filter_missing_check = gtk_check_button_new_with_label("Missing");
     g_signal_connect(w->logs_filter_missing_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
@@ -2629,6 +2654,7 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_all_check);
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_new_check);
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_changed_check);
+    gtk_box_append(GTK_BOX(filter_box), w->logs_filter_corrupt_check);
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_missing_check);
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_unchanged_check);
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_ignored_check);
@@ -2690,6 +2716,7 @@ struct ScannerContext {
     sqlite3 *db;
     sqlite3_int64 run_id;
     int unchanged, changed, new_files, missing, ignored, errors;
+    int corrupt;  // checksum differs, size and date do not (bit rot); counted in meta.num_changed
     int total_files;
     int should_stop;
     ScanLogEntry *log_buffer;
@@ -2727,17 +2754,18 @@ void scanner_log_message(ScannerContext *ctx, const char *status, const char *pa
 gboolean scanner_update_progress(gpointer data) {
     ScannerContext *ctx = (ScannerContext *)data;
     AppWindow *w = ctx->win;
-    int processed = ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors;
+    int processed = ctx->unchanged + ctx->changed + ctx->corrupt + ctx->new_files + ctx->missing + ctx->errors;
 
     if (ctx->total_files > 0) {
         gtk_progress_bar_set_fraction(w->scanner_progress_bar, (double)processed / ctx->total_files);
     }
 
-    char status[512], n[8][32];
+    char status[512], n[9][32];
     snprintf(status, sizeof(status),
-             "Processed: %s/%s | Unch: %s | Chg: %s | New: %s | Miss: %s | Ign: %s | Err: %s",
+             "Processed: %s/%s | Unch: %s | Chg: %s | Corrupt: %s | New: %s | Miss: %s | Ign: %s | Err: %s",
              format_count(processed, n[0], sizeof(n[0])), format_count(ctx->total_files, n[1], sizeof(n[1])),
              format_count(ctx->unchanged, n[2], sizeof(n[2])), format_count(ctx->changed, n[3], sizeof(n[3])),
+             format_count(ctx->corrupt, n[8], sizeof(n[8])),
              format_count(ctx->new_files, n[4], sizeof(n[4])), format_count(ctx->missing, n[5], sizeof(n[5])),
              format_count(ctx->ignored, n[6], sizeof(n[6])), format_count(ctx->errors, n[7], sizeof(n[7])));
     gtk_label_set_text(GTK_LABEL(w->scanner_status_label), status);
@@ -2874,11 +2902,24 @@ void scanner_process_ignored_file(ScannerContext *ctx, const char *filepath, con
 
 static void scanner_update_file_row(ScannerContext *ctx, const char *filepath, const struct stat *sb, const char *checksum) {
     sqlite3_stmt *up;
-    sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?", -1, &up, NULL);
+    // New contents were written (the date or size changed), so an earlier CORRUPT mark no longer applies
+    sqlite3_prepare_v2(ctx->db, "UPDATE files SET size=?, last_modified=?, checksum=?, "
+                       "status = CASE WHEN status = 'CORRUPT' THEN NULL ELSE status END WHERE full_path=?", -1, &up, NULL);
     sqlite3_bind_int64(up, 1, sb->st_size);
     sqlite3_bind_int64(up, 2, sb->st_mtime);
     sqlite3_bind_text(up, 3, checksum, -1, SQLITE_STATIC);
     sqlite3_bind_text(up, 4, filepath, -1, SQLITE_STATIC);
+    sqlite3_step(up);
+    sqlite3_finalize(up);
+}
+
+// Caller holds ctx->lock. status NULL clears the mark.
+static void scanner_set_file_status(ScannerContext *ctx, const char *filepath, const char *status) {
+    sqlite3_stmt *up;
+    if (sqlite3_prepare_v2(ctx->db, "UPDATE files SET status = ? WHERE full_path = ?", -1, &up, NULL) != SQLITE_OK) return;
+    if (status) sqlite3_bind_text(up, 1, status, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(up, 1);
+    sqlite3_bind_text(up, 2, filepath, -1, SQLITE_STATIC);
     sqlite3_step(up);
     sqlite3_finalize(up);
 }
@@ -2897,7 +2938,7 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
 
     long long db_size = 0, db_mtime = 0;
     char db_checksum[HASH_SIZE] = "";
-    int found, reappeared = 0;
+    int found, reappeared = 0, was_corrupt = 0;
 
     g_mutex_lock(&ctx->lock);
     sqlite3_stmt *stmt;
@@ -2908,6 +2949,7 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
         const char *db_status = (const char *)sqlite3_column_text(stmt, 3);
         // A file previously marked MISSING that is back on disk is treated as new
         reappeared = db_status && strcmp(db_status, "MISSING") == 0;
+        was_corrupt = db_status && strcmp(db_status, "CORRUPT") == 0;
         db_size = sqlite3_column_int64(stmt, 0);
         db_mtime = sqlite3_column_int64(stmt, 1);
         const char *c = (const char *)sqlite3_column_text(stmt, 2);
@@ -2923,7 +2965,26 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
             has_checksum = compute_sha256(filepath, checksum);
         }
 
-        if (ctx->enable_checksum && has_checksum && strlen(db_checksum) > 0 && strcmp(db_checksum, checksum) != 0) {
+        int same_metadata = db_size == sb.st_size && db_mtime == sb.st_mtime;
+        int verified = ctx->enable_checksum && has_checksum && strlen(db_checksum) > 0;
+
+        if (verified && same_metadata && strcmp(db_checksum, checksum) != 0) {
+            // The contents changed but nothing wrote to the file: bit rot or silent corruption.
+            // Keep the stored (original) checksum so the damage stays detectable, and mark the file.
+            g_mutex_lock(&ctx->lock);
+            ctx->corrupt++;
+            scanner_log_message(ctx, "CORRUPT", filepath, checksum, sb.st_size, sb.st_mtime);
+            if (ctx->update_mode && !was_corrupt) scanner_set_file_status(ctx, filepath, "CORRUPT");
+            g_mutex_unlock(&ctx->lock);
+
+        } else if (!verified && same_metadata && was_corrupt) {
+            // Marked CORRUPT earlier and not re-checked now (mtime-only scan): still corrupt
+            g_mutex_lock(&ctx->lock);
+            ctx->corrupt++;
+            scanner_log_message(ctx, "CORRUPT", filepath, db_checksum, sb.st_size, sb.st_mtime);
+            g_mutex_unlock(&ctx->lock);
+
+        } else if (verified && strcmp(db_checksum, checksum) != 0) {
             if ((db_size != sb.st_size) && (db_mtime != sb.st_mtime)) {
 	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, Date-Time, File-Size");
             }
@@ -2973,6 +3034,8 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
             g_mutex_lock(&ctx->lock);
             ctx->unchanged++;
             scanner_log_message(ctx, "UNCHANGED", filepath, db_checksum, sb.st_size, sb.st_mtime);
+            // A CORRUPT file whose contents match the original checksum again was restored
+            if (ctx->update_mode && was_corrupt) scanner_set_file_status(ctx, filepath, NULL);
             g_mutex_unlock(&ctx->lock);
         }
     } else {
@@ -3133,7 +3196,7 @@ gpointer scanner_thread_func(gpointer data) {
     sqlite3_bind_text(stmt, 2, timestamp, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, hostname, -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 4, ctx->unchanged);
-    sqlite3_bind_int(stmt, 5, ctx->changed);
+    sqlite3_bind_int(stmt, 5, ctx->changed + ctx->corrupt);  // meta has no corrupt column; run_logs has the CORRUPT rows
     sqlite3_bind_int(stmt, 6, ctx->new_files);
     sqlite3_bind_int(stmt, 7, ctx->missing);
     sqlite3_bind_int(stmt, 8, ctx->ignored);
@@ -3185,20 +3248,29 @@ gboolean scanner_scan_completed(gpointer data) {
     gtk_widget_set_sensitive(w->scanner_workers_spin, TRUE);
     gtk_progress_bar_set_fraction(w->scanner_progress_bar, 1.0);
 
-    char results[3072], n[7][32];
+    char results[3072], n[8][32];
     int len = snprintf(results, sizeof(results),
              "Scan Complete!\n\nPath: %s\nDatabase: %s\nMode: %s\nChecksum: %s\nWorkers: %d\n\n"
-             "Unchanged: %s\nChanged: %s\nNew: %s\nMissing: %s\nIgnored: %s\nErrors: %s\n\n"
+             "Unchanged: %s\nChanged: %s\nCorrupt: %s\nNew: %s\nMissing: %s\nIgnored: %s\nErrors: %s\n\n"
              "Total: %s files",
              ctx->scan_path, ctx->db_name,
              ctx->update_mode ? "Update" : "Read-only",
              ctx->enable_checksum ? "Enabled" : "Disabled",
              ctx->num_workers,
              format_count(ctx->unchanged, n[0], sizeof(n[0])), format_count(ctx->changed, n[1], sizeof(n[1])),
+             format_count(ctx->corrupt, n[7], sizeof(n[7])),
              format_count(ctx->new_files, n[2], sizeof(n[2])), format_count(ctx->missing, n[3], sizeof(n[3])),
              format_count(ctx->ignored, n[4], sizeof(n[4])), format_count(ctx->errors, n[5], sizeof(n[5])),
-             format_count((long long)ctx->unchanged + ctx->changed + ctx->new_files + ctx->missing + ctx->errors,
+             format_count((long long)ctx->unchanged + ctx->changed + ctx->corrupt + ctx->new_files + ctx->missing + ctx->errors,
                           n[6], sizeof(n[6])));
+    if (ctx->corrupt > 0 && len >= 0 && (size_t)len < sizeof(results)) {
+        len += snprintf(results + len, sizeof(results) - len,
+                 "\n\nWARNING: %s file%s no longer match%s the stored checksum although size and date are "
+                 "unchanged (possible bit rot). %s",
+                 format_count(ctx->corrupt, n[7], sizeof(n[7])), ctx->corrupt == 1 ? "" : "s", ctx->corrupt == 1 ? "es" : "",
+                 ctx->update_mode ? "They are marked CORRUPT and their original checksums are kept."
+                                  : "Run an update scan to mark them CORRUPT in the database.");
+    }
     if (ctx->open_error[0] && len >= 0 && (size_t)len < sizeof(results)) {
         len += snprintf(results + len, sizeof(results) - len,
                  "\n\nError: could not read %s (%s). No files were scanned.%s",
@@ -4662,7 +4734,22 @@ static int treeview_status_rank(const char *status) {
     if (!status || !status[0] || strcmp(status, "UNCHANGED") == 0 || strcmp(status, "IGNORED") == 0) return 0;
     if (strcmp(status, "NEW") == 0) return 1;
     if (strcmp(status, "CHANGED") == 0) return 2;
-    return 3;  // MISSING, ERROR
+    return 3;  // CORRUPT, MISSING, ERROR
+}
+
+// Folder Status text (e.g. "1 corrupt, 2 missing") and its color rank
+static int treeview_folder_status(const long long counts[5], char *status, size_t size) {
+    static const char *labels[] = {"corrupt", "changed", "new", "missing", "error"};  // order of counts
+    size_t len = 0;
+    status[0] = '\0';
+    for (int i = 0; i < 5; i++) {
+        if (counts[i] <= 0) continue;
+        char num[32];
+        len += snprintf(status + len, size - len, "%s%s %s", len ? ", " : "",
+                        format_count(counts[i], num, sizeof(num)), labels[i]);
+        if (len >= size) break;
+    }
+    return (counts[0] || counts[3] || counts[4]) ? 3 : counts[1] ? 2 : counts[2] ? 1 : 0;
 }
 
 // Adds the files and folders directly inside dir (a full path without trailing '/', "" for the
@@ -4675,7 +4762,8 @@ static int treeview_add_children(AppWindow *w, sqlite3 *db, GtkTreeStore *store,
     char *sql = g_strdup_printf(
         "SELECT CASE WHEN p > 0 THEN substr(rest, 1, p - 1) ELSE rest END AS name, p > 0 AS is_dir, "
         "  SUM(COALESCE(size, 0)), COUNT(*), MAX(last_modified), "
-        "  SUM(st = 'NEW'), SUM(st = 'CHANGED'), SUM(st = 'MISSING'), SUM(st = 'ERROR'), MAX(id), MAX(st) "
+        "  SUM(st = 'NEW'), SUM(st = 'CHANGED'), SUM(st = 'MISSING'), SUM(st = 'ERROR'), MAX(id), MAX(st), "
+        "  SUM(st = 'CORRUPT') "
         "FROM (SELECT id, size, last_modified, st, rest, instr(rest, '/') AS p "
         "      FROM (SELECT id, size, last_modified, %s AS st, substr(full_path, ?1) AS rest "
         "            FROM files WHERE full_path >= ?2 AND full_path < ?3 %s)) "
@@ -4699,17 +4787,8 @@ static int treeview_add_children(AppWindow *w, sqlite3 *db, GtkTreeStore *store,
             char status[160] = "";
             int rank;
             if (is_dir) {
-                const long long counts[] = {n_changed, n_new, n_missing, n_error};
-                const char *labels[] = {"changed", "new", "missing", "error"};
-                size_t len = 0;
-                for (int i = 0; i < 4; i++) {
-                    if (counts[i] <= 0) continue;
-                    char num[32];
-                    len += snprintf(status + len, sizeof(status) - len, "%s%s %s", len ? ", " : "",
-                                    format_count(counts[i], num, sizeof(num)), labels[i]);
-                    if (len >= sizeof(status)) break;
-                }
-                rank = (n_missing || n_error) ? 3 : n_changed ? 2 : n_new ? 1 : 0;
+                const long long counts[5] = {sqlite3_column_int64(stmt, 11), n_changed, n_new, n_missing, n_error};
+                rank = treeview_folder_status(counts, status, sizeof(status));
             } else {
                 const char *st = (const char *)sqlite3_column_text(stmt, 10);
                 snprintf(status, sizeof(status), "%s", st ? st : "");
@@ -4864,6 +4943,7 @@ void treeview_load(AppWindow *w) {
     gtk_tree_store_clear(store);
     treeview_set_details(w, "");
     gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
+    gtk_widget_set_sensitive(w->treeview_accept_button, FALSE);
     w->treeview_db_path[0] = '\0';
 
     const char *db_name = w->treeview_db_file;
@@ -4977,6 +5057,7 @@ static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer 
     AppWindow *w = user_data;
     GtkTreeModel *model;
     GtkTreeIter iter;
+    gtk_widget_set_sensitive(w->treeview_accept_button, FALSE);
     if (!gtk_tree_selection_get_selected(selection, &model, &iter)) {
         treeview_set_details(w, "");
         gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
@@ -4997,6 +5078,7 @@ static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer 
     }
 
     GString *text = g_string_new(NULL);
+    gboolean corrupt = FALSE;
     char size_str[32], bytes[32], date[64], num[32];
     format_size(size, size_str, sizeof(size_str));
     format_count(size, bytes, sizeof(bytes));
@@ -5032,6 +5114,16 @@ static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer 
                     g_string_append_printf(text, "Status:        %s\n", st && st[0] ? st : "--");
                     g_string_append_printf(text, "SHA-256:       %s\n", checksum && checksum[0] ? checksum : "--");
                     if (keywords && keywords[0]) g_string_append_printf(text, "Keywords:      %s\n", keywords);
+                    corrupt = st && strcmp(st, "CORRUPT") == 0;
+                    if (corrupt) {
+                        g_string_append(text,
+                            "\nCORRUPT: a checksum scan found contents that no longer match\n"
+                            "this SHA-256 (the original), although the file's size and\n"
+                            "date did not change - possible bit rot. Restore the file\n"
+                            "from a backup; the next checksum scan clears the mark when\n"
+                            "the contents match again. If the current contents are\n"
+                            "good, use Accept Current Contents.\n");
+                    }
                 }
                 sqlite3_finalize(stmt);
             }
@@ -5044,9 +5136,196 @@ static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer 
     g_string_append_printf(text, "\nOn disk:       %s\n", on_disk ? "yes" : "no (drive not mounted, or the item is gone)");
     treeview_set_details(w, text->str);
     gtk_widget_set_sensitive(w->treeview_reveal_button, on_disk);
+    gtk_widget_set_sensitive(w->treeview_accept_button, corrupt && on_disk);
 
     g_string_free(text, TRUE);
     g_free(name); g_free(path); g_free(status);
+}
+
+// ---- Accept Current Contents: store the file's present checksum and clear its CORRUPT mark ----
+
+typedef struct {
+    AppWindow *w;          // kept alive by the window reference below
+    GtkWidget *window;
+    char *db_path;
+    char *path;
+    gint64 id;
+    char error[512];
+} TreeviewAccept;
+
+static void treeview_accept_free(TreeviewAccept *req) {
+    g_object_unref(req->window);
+    g_free(req->db_path);
+    g_free(req->path);
+    g_free(req);
+}
+
+// Worker thread: hash the file (it can be large) and update its row
+static void treeview_accept_thread(GTask *task, gpointer source, gpointer task_data, GCancellable *cancellable) {
+    (void)source; (void)cancellable;
+    TreeviewAccept *req = task_data;
+    struct stat sb;
+    char checksum[HASH_SIZE] = "";
+    if (stat(req->path, &sb) != 0 || !compute_sha256(req->path, checksum)) {
+        snprintf(req->error, sizeof(req->error), "Could not read %s: %s", req->path, g_strerror(errno));
+        g_task_return_boolean(task, FALSE);
+        return;
+    }
+    sqlite3 *db;
+    if (sqlite3_open_v2(req->db_path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        snprintf(req->error, sizeof(req->error), "Could not open %s: %s", req->db_path, db ? sqlite3_errmsg(db) : "out of memory");
+        if (db) sqlite3_close(db);
+        g_task_return_boolean(task, FALSE);
+        return;
+    }
+    sqlite3_busy_timeout(db, 30000);  // a scan may be writing
+    sqlite3_stmt *up;
+    int ok = sqlite3_prepare_v2(db, "UPDATE files SET checksum = ?, size = ?, last_modified = ?, status = NULL "
+                                    "WHERE id = ? AND status = 'CORRUPT'", -1, &up, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_text(up, 1, checksum, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(up, 2, sb.st_size);
+        sqlite3_bind_int64(up, 3, sb.st_mtime);
+        sqlite3_bind_int64(up, 4, req->id);
+        ok = sqlite3_step(up) == SQLITE_DONE;
+        sqlite3_finalize(up);
+    }
+    if (!ok) snprintf(req->error, sizeof(req->error), "Could not update the database: %s", sqlite3_errmsg(db));
+    sqlite3_close(db);
+    g_task_return_boolean(task, ok);
+}
+
+// Recomputes the totals and Status of every folder above iter
+static void treeview_refresh_ancestors(AppWindow *w, GtkTreeIter *iter) {
+    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->treeview_tree));
+    sqlite3 *db;
+    if (!treeview_open_db(w, &db)) return;
+    gboolean hide_missing = !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check));
+    char *sql = g_strdup_printf(
+        "SELECT SUM(COALESCE(size, 0)), COUNT(*), MAX(last_modified), SUM(st = 'CORRUPT'), SUM(st = 'CHANGED'), "
+        "  SUM(st = 'NEW'), SUM(st = 'MISSING'), SUM(st = 'ERROR') "
+        "FROM (SELECT size, last_modified, %s AS st FROM files WHERE full_path >= ?1 AND full_path < ?2 %s)",
+        treeview_status_expr(w), hide_missing && w->treeview_has_status ? "AND status IS NOT 'MISSING'" : "");
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        GtkTreeIter child = *iter, parent;
+        while (gtk_tree_model_iter_parent(model, &parent, &child)) {
+            char *dir = NULL;
+            gtk_tree_model_get(model, &parent, TV_COL_PATH, &dir, -1);
+            char *lo = g_strdup_printf("%s/", dir), *hi = g_strdup_printf("%s0", dir);
+            sqlite3_bind_text(stmt, 1, lo, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, hi, -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                long long counts[5];
+                for (int i = 0; i < 5; i++) counts[i] = sqlite3_column_int64(stmt, 3 + i);
+                char status[160];
+                int rank = treeview_folder_status(counts, status, sizeof(status));
+                gtk_tree_store_set(GTK_TREE_STORE(model), &parent,
+                                   TV_COL_SIZE, (gint64)sqlite3_column_int64(stmt, 0),
+                                   TV_COL_COUNT, (gint64)sqlite3_column_int64(stmt, 1),
+                                   TV_COL_MTIME, (gint64)sqlite3_column_int64(stmt, 2),
+                                   TV_COL_STATUS, status, TV_COL_STATUS_RANK, rank, -1);
+            }
+            sqlite3_reset(stmt);
+            g_free(lo); g_free(hi); g_free(dir);
+            child = parent;
+        }
+        sqlite3_finalize(stmt);
+    }
+    g_free(sql);
+    sqlite3_close(db);
+}
+
+// Finds the row of the file with this id among the loaded rows
+static gboolean treeview_find_file(GtkTreeModel *model, GtkTreeIter *parent, gint64 id, GtkTreeIter *found) {
+    GtkTreeIter it;
+    if (!gtk_tree_model_iter_children(model, &it, parent)) return FALSE;
+    do {
+        gint64 row_id = 0;
+        gboolean is_dir = FALSE;
+        gtk_tree_model_get(model, &it, TV_COL_ID, &row_id, TV_COL_IS_DIR, &is_dir, -1);
+        if (!is_dir && row_id == id) { *found = it; return TRUE; }
+        if (is_dir && treeview_find_file(model, &it, id, found)) return TRUE;
+    } while (gtk_tree_model_iter_next(model, &it));
+    return FALSE;
+}
+
+static void on_treeview_accept_done(GObject *source, GAsyncResult *result, gpointer user_data) {
+    (void)source; (void)user_data;
+    TreeviewAccept *req = g_task_get_task_data(G_TASK(result));
+    AppWindow *w = req->w;
+    gboolean ok = g_task_propagate_boolean(G_TASK(result), NULL);
+
+    // The window may have been closed while hashing; only touch it while it is open
+    if (g_list_find(app_windows, w)) {
+        gtk_widget_set_cursor(w->window, NULL);
+        if (!ok) {
+            GtkAlertDialog *alert = gtk_alert_dialog_new("Could not accept the current contents");
+            gtk_alert_dialog_set_detail(alert, req->error);
+            gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
+            g_object_unref(alert);
+        } else if (strcmp(req->db_path, w->treeview_db_path) == 0) {
+            GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->treeview_tree));
+            GtkTreeIter iter;
+            if (treeview_find_file(model, NULL, req->id, &iter)) {
+                struct stat sb;
+                if (stat(req->path, &sb) == 0) {
+                    gtk_tree_store_set(GTK_TREE_STORE(model), &iter, TV_COL_SIZE, (gint64)sb.st_size,
+                                       TV_COL_MTIME, (gint64)sb.st_mtime, -1);
+                }
+                gtk_tree_store_set(GTK_TREE_STORE(model), &iter, TV_COL_STATUS, "", TV_COL_STATUS_RANK, 0, -1);
+                treeview_refresh_ancestors(w, &iter);
+            }
+            on_treeview_selection_changed(gtk_tree_view_get_selection(GTK_TREE_VIEW(w->treeview_tree)), w);
+        }
+    }
+    treeview_accept_free(req);
+}
+
+static void on_treeview_accept_confirmed(GObject *source, GAsyncResult *result, gpointer user_data) {
+    TreeviewAccept *req = user_data;
+    int button = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, NULL);
+    if (button != 1 || !g_list_find(app_windows, req->w)) {
+        treeview_accept_free(req);
+        return;
+    }
+    gtk_widget_set_cursor_from_name(req->w->window, "wait");
+    gtk_widget_set_sensitive(req->w->treeview_accept_button, FALSE);
+    GTask *task = g_task_new(NULL, NULL, on_treeview_accept_done, NULL);
+    g_task_set_task_data(task, req, NULL);
+    g_task_run_in_thread(task, treeview_accept_thread);
+    g_object_unref(task);  // the running task keeps itself alive until on_treeview_accept_done
+}
+
+static void on_treeview_accept_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    AppWindow *w = user_data;
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(w->treeview_tree));
+    if (!gtk_tree_selection_get_selected(selection, &model, &iter) || !w->treeview_db_path[0]) return;
+
+    TreeviewAccept *req = g_new0(TreeviewAccept, 1);
+    req->w = w;
+    req->window = g_object_ref(w->window);  // keeps w valid until the request is freed
+    req->db_path = g_strdup(w->treeview_db_path);
+    gtk_tree_model_get(model, &iter, TV_COL_PATH, &req->path, TV_COL_ID, &req->id, -1);
+
+    char *name = g_path_get_basename(req->path);
+    char *message = g_strdup_printf("Accept the current contents of “%s”?", name);
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("%s", message);
+    gtk_alert_dialog_set_detail(dialog,
+        "The original checksum is replaced by the checksum of the file as it is now, and the CORRUPT mark "
+        "is cleared. Do this only if you know the current contents are good; to undo bit rot, restore the "
+        "file from a backup instead.");
+    const char *buttons[] = {"Cancel", "Accept", NULL};
+    gtk_alert_dialog_set_buttons(dialog, buttons);
+    gtk_alert_dialog_set_cancel_button(dialog, 0);
+    gtk_alert_dialog_set_default_button(dialog, 0);
+    gtk_alert_dialog_choose(dialog, GTK_WINDOW(w->window), NULL, on_treeview_accept_confirmed, req);
+    g_object_unref(dialog);
+    g_free(message);
+    g_free(name);
 }
 
 static void treeview_reveal_path(const char *path) {
@@ -5098,6 +5377,52 @@ static void on_treeview_collapse_all_clicked(GtkButton *button, gpointer user_da
     gtk_tree_view_collapse_all(GTK_TREE_VIEW(w->treeview_tree));
 }
 
+// CORRUPT files are highlighted across the whole row (tinted background, warning icon, bold red
+// name); folders holding one show their name in red so the way to it is easy to follow
+typedef enum { TV_HL_NONE, TV_HL_FOLDER, TV_HL_FILE } TreeviewHighlight;
+
+static TreeviewHighlight treeview_row_highlight(GtkTreeModel *model, GtkTreeIter *iter) {
+    char *status = NULL;
+    gboolean is_dir = FALSE, placeholder = FALSE;
+    gtk_tree_model_get(model, iter, TV_COL_STATUS, &status, TV_COL_IS_DIR, &is_dir, TV_COL_PLACEHOLDER, &placeholder, -1);
+    TreeviewHighlight hl = TV_HL_NONE;
+    if (!placeholder && status) {
+        if (!is_dir && strcmp(status, "CORRUPT") == 0) hl = TV_HL_FILE;
+        else if (is_dir && strstr(status, " corrupt")) hl = TV_HL_FOLDER;
+    }
+    g_free(status);
+    return hl;
+}
+
+static void treeview_set_row_background(GtkCellRenderer *renderer, TreeviewHighlight hl) {
+    static const GdkRGBA corrupt_bg = {1.0f, 0.231f, 0.188f, 0.22f};  // #ff3b30, translucent for light and dark
+    g_object_set(renderer, "cell-background-rgba", &corrupt_bg, "cell-background-set", hl == TV_HL_FILE, NULL);
+}
+
+static void treeview_name_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
+                               GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    char *name = NULL;
+    gtk_tree_model_get(model, iter, TV_COL_NAME, &name, -1);
+    TreeviewHighlight hl = treeview_row_highlight(model, iter);
+    g_object_set(renderer, "text", name ? name : "",
+                 "weight", hl == TV_HL_FILE ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL,
+                 "foreground", "#ff3b30", "foreground-set", hl != TV_HL_NONE, NULL);
+    treeview_set_row_background(renderer, hl);
+    g_free(name);
+}
+
+static void treeview_icon_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
+                               GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    char *icon = NULL;
+    gtk_tree_model_get(model, iter, TV_COL_ICON, &icon, -1);
+    TreeviewHighlight hl = treeview_row_highlight(model, iter);
+    g_object_set(renderer, "icon-name", hl == TV_HL_FILE ? "dialog-warning-symbolic" : icon, NULL);
+    treeview_set_row_background(renderer, hl);
+    g_free(icon);
+}
+
 static void treeview_size_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
                                GtkTreeIter *iter, gpointer data) {
     (void)column; (void)data;
@@ -5107,6 +5432,7 @@ static void treeview_size_cell(GtkTreeViewColumn *column, GtkCellRenderer *rende
     char buf[32] = "";
     if (!placeholder) format_size(size, buf, sizeof(buf));
     g_object_set(renderer, "text", buf, NULL);
+    treeview_set_row_background(renderer, treeview_row_highlight(model, iter));
 }
 
 static void treeview_items_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
@@ -5121,6 +5447,7 @@ static void treeview_items_cell(GtkTreeViewColumn *column, GtkCellRenderer *rend
         else snprintf(buf, sizeof(buf), "--");
     }
     g_object_set(renderer, "text", buf, NULL);
+    treeview_set_row_background(renderer, treeview_row_highlight(model, iter));
 }
 
 static void treeview_date_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
@@ -5132,6 +5459,7 @@ static void treeview_date_cell(GtkTreeViewColumn *column, GtkCellRenderer *rende
     char buf[64] = "";
     if (!placeholder) treeview_format_time(mtime, buf, sizeof(buf));
     g_object_set(renderer, "text", buf, NULL);
+    treeview_set_row_background(renderer, treeview_row_highlight(model, iter));
 }
 
 // Problems stand out: missing/error red, changed orange, new blue (macOS system colors)
@@ -5142,8 +5470,10 @@ static void treeview_status_cell(GtkTreeViewColumn *column, GtkCellRenderer *ren
     int rank = 0;
     gtk_tree_model_get(model, iter, TV_COL_STATUS, &status, TV_COL_STATUS_RANK, &rank, -1);
     static const char *colors[] = {NULL, "#007aff", "#ff9500", "#ff3b30"};
+    TreeviewHighlight hl = treeview_row_highlight(model, iter);
     g_object_set(renderer, "text", status ? status : "", "foreground", colors[rank],
-                 "foreground-set", rank > 0, NULL);
+                 "foreground-set", rank > 0, "weight", hl == TV_HL_FILE ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL, NULL);
+    treeview_set_row_background(renderer, hl);
     g_free(status);
 }
 
@@ -5266,11 +5596,11 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     gtk_tree_view_column_set_title(name_col, "Name");
     GtkCellRenderer *icon_renderer = gtk_cell_renderer_pixbuf_new();
     gtk_tree_view_column_pack_start(name_col, icon_renderer, FALSE);
-    gtk_tree_view_column_add_attribute(name_col, icon_renderer, "icon-name", TV_COL_ICON);
+    gtk_tree_view_column_set_cell_data_func(name_col, icon_renderer, treeview_icon_cell, NULL, NULL);
     GtkCellRenderer *name_renderer = gtk_cell_renderer_text_new();
     g_object_set(name_renderer, "ellipsize", PANGO_ELLIPSIZE_MIDDLE, NULL);
     gtk_tree_view_column_pack_start(name_col, name_renderer, TRUE);
-    gtk_tree_view_column_add_attribute(name_col, name_renderer, "text", TV_COL_NAME);
+    gtk_tree_view_column_set_cell_data_func(name_col, name_renderer, treeview_name_cell, NULL, NULL);
     gtk_tree_view_column_set_resizable(name_col, TRUE);
     gtk_tree_view_column_set_expand(name_col, TRUE);
     gtk_tree_view_column_set_min_width(name_col, 260);
@@ -5336,7 +5666,18 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
     gtk_widget_set_halign(w->treeview_reveal_button, GTK_ALIGN_END);
     g_signal_connect(w->treeview_reveal_button, "clicked", G_CALLBACK(on_treeview_reveal_clicked), w);
-    gtk_box_append(GTK_BOX(right_box), w->treeview_reveal_button);
+
+    w->treeview_accept_button = gtk_button_new_with_label("Accept Current Contents");
+    gtk_widget_set_tooltip_text(w->treeview_accept_button,
+        "For a CORRUPT file: store the checksum of its current contents and clear the mark");
+    gtk_widget_set_sensitive(w->treeview_accept_button, FALSE);
+    g_signal_connect(w->treeview_accept_button, "clicked", G_CALLBACK(on_treeview_accept_clicked), w);
+
+    GtkWidget *action_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(action_box, GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(action_box), w->treeview_accept_button);
+    gtk_box_append(GTK_BOX(action_box), w->treeview_reveal_button);
+    gtk_box_append(GTK_BOX(right_box), action_box);
 
     gtk_paned_set_end_child(GTK_PANED(paned), right_box);
     return tab;

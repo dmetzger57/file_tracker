@@ -37,6 +37,7 @@ typedef struct {
     sqlite3_int64 run_id;
     long total, processed;
     long unchanged, changed, new_files, missing, ignored, errors;
+    long corrupt;  // checksum differs, size and date do not (bit rot); counted in meta.num_changed
 } Ctx;
 
 static char *ignore_list[MAX_IGNORES];
@@ -321,11 +322,22 @@ static void process_error(Ctx *c, const char *filepath) {
     log_entry(c, "ERROR", filepath, "", 0, 0);
 }
 
+// status NULL clears the mark
+static void set_status(Ctx *c, const char *filepath, const char *status) {
+    sqlite3_stmt *up;
+    if (sqlite3_prepare_v2(c->db, "UPDATE files SET status = ? WHERE full_path = ?", -1, &up, NULL) != SQLITE_OK) return;
+    if (status) sqlite3_bind_text(up, 1, status, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(up, 1);
+    sqlite3_bind_text(up, 2, filepath, -1, SQLITE_STATIC);
+    sqlite3_step(up);
+    sqlite3_finalize(up);
+}
+
 static void process_file(Ctx *c, const char *filepath, const char *filename, const struct stat *sb) {
     char checksum[HASH_SIZE] = "";
     long long db_size = 0, db_mtime = 0;
     char db_checksum[HASH_SIZE] = "";
-    int in_db = 0, reappeared = 0;
+    int in_db = 0, reappeared = 0, was_corrupt = 0;
 
     if (c->find_stmt) {
         sqlite3_bind_text(c->find_stmt, 1, filepath, -1, SQLITE_STATIC);
@@ -337,6 +349,7 @@ static void process_file(Ctx *c, const char *filepath, const char *filename, con
             if (t) snprintf(db_checksum, sizeof(db_checksum), "%s", t);
             // A file previously marked MISSING that is back on disk is treated as new
             const char *st = (const char *)sqlite3_column_text(c->find_stmt, 3);
+            was_corrupt = st && strcmp(st, "CORRUPT") == 0;
             if (st && strcmp(st, "MISSING") == 0) {
                 in_db = 0;
                 reappeared = 1;
@@ -378,9 +391,26 @@ static void process_file(Ctx *c, const char *filepath, const char *filename, con
     int size_diff = db_size != sb->st_size;
     int time_diff = db_mtime != sb->st_mtime;
 
+    if (sum_diff && !size_diff && !time_diff) {
+        // The contents changed but nothing wrote to the file: bit rot or silent corruption.
+        // Keep the stored (original) checksum so the damage stays detectable, and mark the file.
+        c->corrupt++;
+        log_entry(c, "CORRUPT", filepath, checksum, sb->st_size, sb->st_mtime);
+        if (c->update_mode && !was_corrupt) set_status(c, filepath, "CORRUPT");
+        return;
+    }
+
     if (!sum_diff && !size_diff && !time_diff) {
+        if (was_corrupt && !(have_checksum && db_checksum[0])) {
+            // Marked CORRUPT earlier and not re-checked now (no -v): still corrupt
+            c->corrupt++;
+            log_entry(c, "CORRUPT", filepath, db_checksum, sb->st_size, sb->st_mtime);
+            return;
+        }
         c->unchanged++;
         log_entry(c, "UNCHANGED", filepath, db_checksum, sb->st_size, sb->st_mtime);
+        // A CORRUPT file whose contents match the original checksum again was restored
+        if (c->update_mode && was_corrupt) set_status(c, filepath, NULL);
         return;
     }
 
@@ -396,7 +426,9 @@ static void process_file(Ctx *c, const char *filepath, const char *filename, con
         // Store a checksum matching the new content so a later -v scan has a valid baseline
         if (!have_checksum) compute_sha256(filepath, checksum);
         sqlite3_stmt *up;
-        if (sqlite3_prepare_v2(c->db, "UPDATE files SET size=?, last_modified=?, checksum=? WHERE full_path=?",
+        // New contents were written (the date or size changed), so an earlier CORRUPT mark no longer applies
+        if (sqlite3_prepare_v2(c->db, "UPDATE files SET size=?, last_modified=?, checksum=?, "
+                               "status = CASE WHEN status = 'CORRUPT' THEN NULL ELSE status END WHERE full_path=?",
                                -1, &up, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(up, 1, sb->st_size);
             sqlite3_bind_int64(up, 2, sb->st_mtime);
@@ -703,7 +735,7 @@ int main(int argc, char *argv[]) {
         sqlite3_stmt *stmt;
         sqlite3_prepare_v2(ctx.db, "UPDATE meta SET num_unchanged=?, num_changed=?, num_new=?, num_missing=?, num_ignored=?, num_errors=? WHERE id=?", -1, &stmt, 0);
         sqlite3_bind_int64(stmt, 1, ctx.unchanged);
-        sqlite3_bind_int64(stmt, 2, ctx.changed);
+        sqlite3_bind_int64(stmt, 2, ctx.changed + ctx.corrupt);  // meta has no corrupt column
         sqlite3_bind_int64(stmt, 3, ctx.new_files);
         sqlite3_bind_int64(stmt, 4, ctx.missing);
         sqlite3_bind_int64(stmt, 5, ctx.ignored);
@@ -719,8 +751,14 @@ int main(int argc, char *argv[]) {
 
     if (ctx.update_mode) auto_add_or_update_drive(db_name, ctx.scan_path);
 
-    printf("Total: %ld - Processed: %ld - New: %ld - Changed: %ld - Unchanged: %ld - Missing: %ld - Errors: %ld\n",
-           ctx.total, ctx.processed, ctx.new_files, ctx.changed, ctx.unchanged, ctx.missing, ctx.errors);
+    printf("Total: %ld - Processed: %ld - New: %ld - Changed: %ld - Corrupt: %ld - Unchanged: %ld - Missing: %ld - Errors: %ld\n",
+           ctx.total, ctx.processed, ctx.new_files, ctx.changed, ctx.corrupt, ctx.unchanged, ctx.missing, ctx.errors);
+    if (ctx.corrupt > 0) {
+        printf("WARNING: %ld file(s) no longer match the stored checksum although size and date are unchanged "
+               "(possible bit rot).%s\n", ctx.corrupt,
+               ctx.update_mode ? " They are marked CORRUPT and their original checksums are kept."
+                               : " Run with -u to mark them CORRUPT in the database.");
+    }
 
     for (int i = 0; i < ignore_count; i++) free(ignore_list[i]);
     return should_stop ? 130 : 0;
