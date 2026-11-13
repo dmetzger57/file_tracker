@@ -2,6 +2,8 @@
 
 File Tracker detects bit-rot and silent corruption on archival storage. It records every file's size, modification time and SHA-256 checksum in a SQLite database, then re-scans the drive later and reports what changed, what is new, and what has gone missing.
 
+![File Tracker's TreeView: a drive's files in a Finder-like list, with the drive list on the left and file details on the right](docs/screenshots/treeview.png)
+
 The repository contains two programs that share the same databases:
 
 | Program | Source | What it is |
@@ -17,6 +19,8 @@ Download **FileTracker-<version>.dmg** from the [latest release](https://github.
 > `xattr -dr com.apple.quarantine "/Applications/File Tracker Unified.app"`.
 
 The disk image also contains the license (`LICENSE.txt`). The download contains the desktop application only. To use the command-line `file_tracker`, build from source.
+
+![About page showing the version](docs/screenshots/about.png)
 
 ## Quick Start (build from source)
 
@@ -72,6 +76,8 @@ A read-only checksum scan reports CORRUPT files in its log but does not mark the
 
 The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Compare, Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on TreeView. The sidebar button at the left of the page header (or View > Toggle Sidebar, ⌃⌘S) collapses the sidebar to a narrow column of its icons (the window buttons move into the page header); the TreeView's drive list uses the room to show longer drive names. The window follows the macOS Light/Dark appearance.
 
+![TreeView with the sidebar collapsed to its icons, giving the drive list room for longer names](docs/screenshots/treeview-collapsed-sidebar.png)
+
 ### Multiple Windows
 
 Open another window with **File → New Window** (⌘N) or by right-clicking the Dock icon and choosing **New Window**. All windows belong to one running application with a single Dock icon, like Terminal. Each window has its own tabs and selections, so you can, for example, scan one drive while browsing logs or scanning another drive in a second window.
@@ -88,6 +94,8 @@ Avoid scanning the same database from two windows at once: the second scan waits
 
 Scans one directory tree and saves the results as a run.
 
+![File Scanner: mounted volumes on the left, scan options and results on the right](docs/screenshots/file-scanner.png)
+
 - **Volumes:** drives mounted under `/Volumes`. Time Machine volumes, `mbp_backup` and `Macintosh HD` are hidden (see `is_excluded_volume()`). Clicking a volume fills in Path and Database. **Refresh** reloads the list.
 - **Path / Database:** the directory to scan and the database name (stored as `~/db/FileTracker/<name>.db`). Both can be typed in.
 - **Verify Checksums:** recompute SHA-256 for every file (deep verification). Off: compare size and modification time only.
@@ -101,6 +109,8 @@ The scanned drive is registered in the drives database automatically, and its ca
 ### TreeView
 
 Browse one database's file index like Finder's list view, whether or not the drive is mounted.
+
+![TreeView: Show only filters above a drive's folder tree, with the selected file's details on the right](docs/screenshots/treeview.png)
 
 - **Drives:** the list beside the sidebar shows every drive database, like Finder's Locations. Click a drive to browse it. The tree starts at the root of the drive (`/Volumes/<name>` for an external drive, `/` for the startup disk), shown above the tree with the file count and total size. Above the tree, **Location** shows where the drive is stored, as set on the Drives tab. **Refresh** reloads the drive list and the tree.
 - **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the files below it, e.g. *1 corrupt, 2 missing*. A file's Status is its MISSING or CORRUPT mark, otherwise its status in the drive's most recent scan (NEW or CHANGED).
@@ -124,6 +134,8 @@ Pick a database to see its 10 most recent runs, with counts of unchanged, change
 
 The detailed, per-file log of any run.
 
+![Logs: a database's scan runs, the selected run's totals, and its per-file log with status filters](docs/screenshots/logs.png)
+
 - **Database / Scan Runs:** pick a database, then a run. **Refresh** reloads the database list and runs.
 - **Filters:** All, New, Changed, Corrupt, Missing, Unchanged, Ignored, Errors. The run details show the Corrupt count when there is one.
 - **Note / Save Note:** view or edit the run's note.
@@ -135,6 +147,8 @@ The detailed, per-file log of any run.
 
 Compares two runs, from the same database or from two different ones (for example a drive and its backup).
 
+![Compare: two runs picked from two drives, with View By options](docs/screenshots/compare.png)
+
 - Pick a drive and run for Run 1 and Run 2, then click **Compare Runs**. **Refresh** reloads the drive and run lists and keeps the selected runs.
 - **View By:** Only in Run 1, Only in Run 2, Different Checksum, All Diffs, Missing in Run 1, Missing in Run 2, All Files in Run 1, All Files in Run 2, Date/Time Difference, Size Difference.
 - **Export to CSV:** `File Path,Status Run 1,Status Run 2,Checksum Run 1,Checksum Run 2`.
@@ -142,6 +156,8 @@ Compares two runs, from the same database or from two different ones (for exampl
 ### Drives
 
 Tracks the drives you have databases for, in `~/db/FileTracker/drives.db`.
+
+![Drives: tracked drives with location, free space, description, last checksum scan and file count](docs/screenshots/drives.png)
 
 | Column | Meaning |
 |--------|---------|
@@ -164,6 +180,8 @@ All columns are sortable; Available and Files (Last Run) sort numerically.
 
 Find a file across databases.
 
+![File Locator: one file name found on eight drives](docs/screenshots/file-locator.png)
+
 - **Search by:** File Name (exact, or tick **Partial** to match part of the name) or Checksum.
 - **Database:** one database or All Databases. **Refresh** reloads the list.
 - **Results:** database, path, size, modified date, owner and checksum. The ✓ column shows ✓ when a result's checksum matches the first result, and ⚠ when it differs, so copies that have diverged stand out.
@@ -171,6 +189,8 @@ Find a file across databases.
 ### DupeFinder
 
 Find every copy of a file, or list every set of duplicates, within one drive, a chosen set of drives, or all drives.
+
+![DupeFinder: copies of one file with matching checksums across drives](docs/screenshots/dupefinder.png)
 
 **Modes:**
 - **Search By File Name / Checksum:** find every copy of one file name or checksum. In names, `*` matches any run of characters (e.g. `*File*should*`); other characters, including `?` and `[`, match literally. Matching is case-sensitive. Checksum search is an exact SHA-256 match, case-insensitive.
@@ -312,6 +332,7 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 | `launcher.c`, `launcher.m` | Legacy `.app` launchers. Not used: the bundle now runs the real binary directly |
 | `CLAUDE.md` | Notes for AI-assisted development |
 | `LICENSE` | MIT License |
+| `docs/screenshots/` | Screenshots used in this README |
 
 ## License
 
