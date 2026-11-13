@@ -1899,12 +1899,14 @@ static void refill_database_combo(GtkWidget *combo, GPtrArray *files, const char
 }
 
 // ---- Status colors, shared by the TreeView and the Logs list ----
-// Red: CORRUPT and ERROR. Yellow: CHANGED (written, not corrupt) and MISSING. Blue: NEW (Status column only).
+// Red: CORRUPT and ERROR. Yellow: CHANGED (written, not corrupt) and MISSING. Green: NEW.
 static int app_dark_mode;  // the system appearance, kept by app_apply_color_scheme()
 #define FT_RED  "#ff3b30"
-#define FT_BLUE "#007aff"
 static const char *ft_yellow(void) {
     return app_dark_mode ? "#ffd60a" : "#9a7300";  // system yellow is unreadable on white; use a dark gold there
+}
+static const char *ft_green(void) {
+    return app_dark_mode ? "#30d158" : "#248a3d";  // macOS system green (dark) / its darker, readable variant
 }
 
 // Color for a file's status (run_logs or TreeView status: "CHANGED: ..." counts as CHANGED), or NULL
@@ -1912,6 +1914,7 @@ static const char *ft_status_color(const char *status) {
     if (!status || !status[0]) return NULL;
     if (strcmp(status, "CORRUPT") == 0 || g_str_has_prefix(status, "ERROR")) return FT_RED;
     if (g_str_has_prefix(status, "CHANGED") || strcmp(status, "MISSING") == 0) return ft_yellow();
+    if (strcmp(status, "NEW") == 0) return ft_green();
     return NULL;
 }
 
@@ -2235,17 +2238,18 @@ void logs_load_logs(AppWindow *w) {
 
     sqlite3_bind_int64(stmt, 1, w->logs_selected_run_id);
 
-    // Lines are colored like the TreeView: red for CORRUPT/ERROR, yellow for CHANGED/MISSING.
+    // Lines are colored like the TreeView: red for CORRUPT/ERROR, yellow for CHANGED/MISSING, green for NEW.
     // Remember which lines need a color and tag them after the text is in (one set_text is fast).
     GString *text = g_string_new("");
     GArray *red = g_array_new(FALSE, FALSE, sizeof(int)), *yellow = g_array_new(FALSE, FALSE, sizeof(int));
+    GArray *green = g_array_new(FALSE, FALSE, sizeof(int));
     int line = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *status = (const char *)sqlite3_column_text(stmt, 0);
         const char *path = (const char *)sqlite3_column_text(stmt, 1);
         g_string_append_printf(text, "[%-18s] %s\n", status ? status : "", path ? path : "");
         const char *color = ft_status_color(status);
-        if (color) g_array_append_val(strcmp(color, FT_RED) == 0 ? red : yellow, line);
+        if (color) g_array_append_val(strcmp(color, FT_RED) == 0 ? red : strcmp(color, ft_yellow()) == 0 ? yellow : green, line);
         line++;
     }
 
@@ -2258,11 +2262,14 @@ void logs_load_logs(AppWindow *w) {
     GtkTextTag *yellow_tag = gtk_text_tag_table_lookup(tags, "ft-yellow");
     if (!red_tag) red_tag = gtk_text_buffer_create_tag(logs_buffer, "ft-red", NULL);
     if (!yellow_tag) yellow_tag = gtk_text_buffer_create_tag(logs_buffer, "ft-yellow", NULL);
+    GtkTextTag *green_tag = gtk_text_tag_table_lookup(tags, "ft-green");
+    if (!green_tag) green_tag = gtk_text_buffer_create_tag(logs_buffer, "ft-green", NULL);
     g_object_set(red_tag, "foreground", FT_RED, NULL);
     g_object_set(yellow_tag, "foreground", ft_yellow(), NULL);  // follows the current appearance
-    GArray *lines[2] = {red, yellow};
-    GtkTextTag *line_tags[2] = {red_tag, yellow_tag};
-    for (int k = 0; k < 2; k++) {
+    g_object_set(green_tag, "foreground", ft_green(), NULL);
+    GArray *lines[3] = {red, yellow, green};
+    GtkTextTag *line_tags[3] = {red_tag, yellow_tag, green_tag};
+    for (int k = 0; k < 3; k++) {
         for (guint i = 0; i < lines[k]->len; i++) {
             GtkTextIter start, end;
             gtk_text_buffer_get_iter_at_line(logs_buffer, &start, g_array_index(lines[k], int, i));
@@ -5843,7 +5850,8 @@ static void treeview_name_cell(GtkTreeViewColumn *column, GtkCellRenderer *rende
     gtk_tree_model_get(model, iter, TV_COL_NAME, &name, TV_COL_STATUS, &status, TV_COL_IS_DIR, &is_dir,
                        TV_COL_PLACEHOLDER, &placeholder, -1);
     TreeviewHighlight hl = treeview_row_highlight(model, iter);
-    // Files: red when corrupt or in error, yellow when changed or missing. Folders: red when they hold a corrupt file.
+    // Files: red when corrupt or in error, yellow when changed or missing, green when new.
+    // Folders: red when they hold a corrupt file.
     const char *color = placeholder ? NULL : is_dir ? (hl == TV_HL_FOLDER ? FT_RED : NULL) : ft_status_color(status);
     g_object_set(renderer, "text", name ? name : "",
                  "weight", hl == TV_HL_FILE ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL,
@@ -5903,7 +5911,7 @@ static void treeview_date_cell(GtkTreeViewColumn *column, GtkCellRenderer *rende
     treeview_set_row_background(renderer, treeview_row_highlight(model, iter));
 }
 
-// Problems stand out: corrupt/error red, changed/missing yellow, new blue (ft_status_color). A folder's
+// Problems stand out: corrupt/error red, changed/missing yellow, new green (ft_status_color). A folder's
 // summary ("1 corrupt, 2 missing") takes the color of its worst part.
 static void treeview_status_cell(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
                                  GtkTreeIter *iter, gpointer data) {
@@ -5915,9 +5923,9 @@ static void treeview_status_cell(GtkTreeViewColumn *column, GtkCellRenderer *ren
     if (status && is_dir) {
         color = strstr(status, " corrupt") || strstr(status, " error") ? FT_RED
               : strstr(status, " changed") || strstr(status, " missing") ? ft_yellow()
-              : strstr(status, " new") ? FT_BLUE : NULL;
+              : strstr(status, " new") ? ft_green() : NULL;
     } else if (status) {
-        color = strcmp(status, "NEW") == 0 ? FT_BLUE : ft_status_color(status);
+        color = ft_status_color(status);
     }
     TreeviewHighlight hl = treeview_row_highlight(model, iter);
     g_object_set(renderer, "text", status ? status : "", "foreground", color,
