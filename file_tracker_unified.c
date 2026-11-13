@@ -2354,23 +2354,11 @@ void on_logs_run_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_dat
     logs_load_logs(w);
 }
 
+// The filters are one radio group (All, New, Changed, ...): selecting one clears the others.
+// "toggled" fires for the button turned off too, so reload only for the one turned on.
 void on_logs_filter_toggled(GtkCheckButton *button, gpointer user_data) {
     AppWindow *w = user_data;
-
-    if (button == GTK_CHECK_BUTTON(w->logs_filter_all_check) &&
-        gtk_check_button_get_active(GTK_CHECK_BUTTON(w->logs_filter_all_check))) {
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_new_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_changed_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_corrupt_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_missing_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_unchanged_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_ignored_check), FALSE);
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_errors_check), FALSE);
-    } else if (button != GTK_CHECK_BUTTON(w->logs_filter_all_check) &&
-               gtk_check_button_get_active(button)) {
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(w->logs_filter_all_check), FALSE);
-    }
-
+    if (!gtk_check_button_get_active(button)) return;
     logs_load_logs(w);
 }
 
@@ -2656,6 +2644,15 @@ GtkWidget *create_logs_tab(AppWindow *w) {
 
     w->logs_filter_errors_check = gtk_check_button_new_with_label("Errors");
     g_signal_connect(w->logs_filter_errors_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
+
+    // One filter at a time: grouping turns the check buttons into radio buttons
+    GtkWidget *logs_filter_others[] = {
+        w->logs_filter_new_check, w->logs_filter_changed_check, w->logs_filter_corrupt_check,
+        w->logs_filter_missing_check, w->logs_filter_unchanged_check, w->logs_filter_ignored_check,
+        w->logs_filter_errors_check,
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(logs_filter_others); i++)
+        gtk_check_button_set_group(GTK_CHECK_BUTTON(logs_filter_others[i]), GTK_CHECK_BUTTON(w->logs_filter_all_check));
 
     gtk_box_append(GTK_BOX(filter_box), filter_label);
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_all_check);
