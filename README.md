@@ -136,7 +136,7 @@ The detailed, per-file log of any run.
 
 ![Logs: a database's scan runs, the selected run's totals, and its per-file log with status filters](docs/screenshots/logs.png)
 
-- **Database / Scan Runs:** pick a database, then a run. **Refresh** reloads the database list and runs.
+- **Drives / Scan Runs:** pick a drive in the Drives column (as in the TreeView), then a run. **Refresh** reloads the drive list and the selected drive's runs.
 - **Filters:** All, New, Changed, Corrupt, Missing, Unchanged, Ignored, Errors. One is selected at a time: choosing a filter clears the previous one. The run details show the Corrupt count when there is one.
 - **Note / Save Note:** view or edit the run's note.
 - **Export:** save the files matching the current filter as CSV (`Status,Full Path`).

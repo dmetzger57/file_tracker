@@ -72,7 +72,7 @@ gcc -Wall -Wextra -O2 \
 - `file_tracker_unified.c` (~120KB): All-in-one GTK4 application; sidebar sections ("tabs") in a `GtkStack`
   - Scanner tab: SHA-256 / mtime scanner with an adjustable worker pool (Workers setting)
   - Summary tab: Run history and statistics viewer
-  - Logs tab: Per-run detailed log viewer with filters
+  - Logs tab: Per-run detailed log viewer with filters (one at a time: a check-button radio group); drives are picked from the same Finder-style drive column as the TreeView (`w->logs_drive_list`). The column is shared code: `drive_column_new()`, `drive_list_fill()` (rows carry `db-file`), `drive_columns_set_width()`
   - Drives tab: Drive metadata tracking with auto-capacity detection
   - Locator tab: Search by filename across databases, checksum comparison
   - Compare tab: Compare two scan runs to see changes

@@ -81,7 +81,8 @@ typedef struct {
     GtkWidget *summary_details_text;
 
     // Logs
-    GtkWidget *logs_db_combo;
+    GtkWidget *logs_drive_list;          // Finder-style list of drive databases (as in TreeView)
+    GtkWidget *logs_drives_box;          // column holding it; widens while the sidebar is collapsed
     GtkWidget *logs_runs_list;
     GtkWidget *logs_run_info_text;
     GtkWidget *logs_note_text;
@@ -1891,30 +1892,108 @@ static void refill_database_combo(GtkWidget *combo, GPtrArray *files, const char
     g_free(previous);
 }
 
-void logs_refresh_databases(AppWindow *w) {
-    GPtrArray *files = list_database_files();
-    if (!files) return;
-    refill_database_combo(w->logs_db_combo, files, NULL, TRUE);
-    g_ptr_array_unref(files);
+// ---- Drive column: a Finder-style list of the drive databases, beside the app's sidebar ----
+// Used by the Logs and TreeView tabs. Each row carries its database file name ("Name.db") as "db-file".
+
+// The drive columns take over the room the tab list gives up when it collapses
+#define DRIVE_COLUMN_WIDTH 190
+#define SIDEBAR_WIDTH 210
+#define SIDEBAR_COLLAPSED_WIDTH 44  // one icon plus row and list padding (.ft-sidebar-collapsed)
+void drive_columns_set_width(AppWindow *w) {
+    int width = DRIVE_COLUMN_WIDTH + (w->sidebar_collapsed ? SIDEBAR_WIDTH - SIDEBAR_COLLAPSED_WIDTH : 0);
+    if (w->logs_drives_box) gtk_widget_set_size_request(w->logs_drives_box, width, -1);
+    if (w->treeview_drives_box) gtk_widget_set_size_request(w->treeview_drives_box, width, -1);
 }
 
-void logs_load_runs(AppWindow *w, const char *db_name) {
-    if (!db_name || strlen(db_name) == 0) return;
+// Builds the column ("Drives" heading over the list); *list_out gets the GtkListBox
+static GtkWidget *drive_column_new(GtkWidget **list_out, GCallback on_selected, AppWindow *w) {
+    GtkWidget *drives = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(drives, "ft-sidebar");
+    gtk_widget_add_css_class(drives, "ft-drive-list");
+    GtkWidget *heading = gtk_label_new("Drives");
+    gtk_widget_add_css_class(heading, "ft-sidebar-heading");
+    gtk_label_set_xalign(GTK_LABEL(heading), 0);
+    gtk_box_append(GTK_BOX(drives), heading);
 
-    snprintf(w->logs_current_db_path, sizeof(w->logs_current_db_path), "%s/%s.db", db_dir_path, db_name);
+    GtkWidget *list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_BROWSE);
+    g_signal_connect(list, "row-selected", on_selected, w);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_box_append(GTK_BOX(drives), scroll);
+    *list_out = list;
+    return drives;
+}
 
+// Refills the list with the drive databases. Returns the row for selected_file, else the first
+// row (NULL when there are none); the caller selects it.
+static GtkListBoxRow *drive_list_fill(GtkListBox *list, const char *selected_file) {
+    GPtrArray *files = list_database_files();
+    gtk_list_box_remove_all(list);
+
+    GtkListBoxRow *select = NULL;
+    for (guint i = 0; files && i < files->len; i++) {
+        const char *file = g_ptr_array_index(files, i);
+        char *name = g_strndup(file, strlen(file) - 3);  // drop ".db"
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(box), gtk_image_new_from_icon_name("drive-harddisk-symbolic"));
+        GtkWidget *label = gtk_label_new(name);
+        gtk_label_set_xalign(GTK_LABEL(label), 0);
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_MIDDLE);
+        gtk_label_set_max_width_chars(GTK_LABEL(label), 1);  // the column's width decides, not the name
+        gtk_widget_set_hexpand(label, TRUE);
+        gtk_widget_set_tooltip_text(label, name);
+        gtk_box_append(GTK_BOX(box), label);
+        g_free(name);
+
+        GtkWidget *row = gtk_list_box_row_new();
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+        g_object_set_data_full(G_OBJECT(row), "db-file", g_strdup(file), g_free);
+        gtk_list_box_append(list, row);
+        if (!select || (selected_file && strcmp(file, selected_file) == 0)) select = GTK_LIST_BOX_ROW(row);
+    }
+    if (files) g_ptr_array_unref(files);
+    return select;
+}
+
+static void logs_clear(AppWindow *w);
+
+// Refills the drive list, keeping the selected drive when it still exists (otherwise the
+// first drive), and reloads its runs
+void logs_refresh_databases(AppWindow *w) {
+    const char *slash = strrchr(w->logs_current_db_path, '/');
+    char *selected = g_strdup(slash ? slash + 1 : "");
+    GtkListBoxRow *select = drive_list_fill(GTK_LIST_BOX(w->logs_drive_list), selected);
+    g_free(selected);
+
+    // Clear first so selecting the row (same drive or not) always reloads the runs
+    w->logs_current_db_path[0] = '\0';
+    if (select) gtk_list_box_select_row(GTK_LIST_BOX(w->logs_drive_list), select);
+    else logs_clear(w);
+}
+
+// Empties the runs list, run details, note and log
+static void logs_clear(AppWindow *w) {
+    w->logs_selected_run_id = 0;
     GtkListBox *list = GTK_LIST_BOX(w->logs_runs_list);
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(GTK_WIDGET(list))) != NULL) {
         gtk_list_box_remove(list, child);
     }
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text)), "", -1);
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text)), "", -1);
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_text)), "", -1);
+}
 
-    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text));
-    gtk_text_buffer_set_text(info_buffer, "", -1);
-    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text));
-    gtk_text_buffer_set_text(note_buffer, "", -1);
-    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_text));
-    gtk_text_buffer_set_text(logs_buffer, "", -1);
+// db_file is the drive database's file name ("Name.db")
+void logs_load_runs(AppWindow *w, const char *db_file) {
+    if (!db_file || strlen(db_file) == 0) return;
+
+    snprintf(w->logs_current_db_path, sizeof(w->logs_current_db_path), "%s/%s", db_dir_path, db_file);
+    logs_clear(w);
+    GtkListBox *list = GTK_LIST_BOX(w->logs_runs_list);
 
     if (access(w->logs_current_db_path, F_OK) != 0) return;
 
@@ -2333,13 +2412,15 @@ void on_logs_export_contents_clicked(GtkButton *button, gpointer user_data) {
     g_object_unref(dialog);
 }
 
-void on_logs_db_changed(GtkComboBox *combo, gpointer user_data) {
+static void on_logs_drive_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
+    (void)box;
     AppWindow *w = user_data;
-    char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
-    if (db_name) {
-        logs_load_runs(w, db_name);
-        g_free(db_name);
-    }
+    if (!row) return;  // the list is being refilled
+    const char *file = g_object_get_data(G_OBJECT(row), "db-file");
+    if (!file) return;
+    const char *slash = strrchr(w->logs_current_db_path, '/');
+    if (slash && strcmp(slash + 1, file) == 0) return;  // already showing this drive
+    logs_load_runs(w, file);
 }
 
 void on_logs_run_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
@@ -2508,22 +2589,12 @@ void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer us
 
     sqlite3_close(db);
 
-    // Clear selection and refresh
-    w->logs_selected_run_id = 0;
-
-    // Clear text buffers
-    GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text));
-    gtk_text_buffer_set_text(info_buffer, "", -1);
-    GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text));
-    gtk_text_buffer_set_text(note_buffer, "", -1);
-    GtkTextBuffer *logs_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_text));
-    gtk_text_buffer_set_text(logs_buffer, "", -1);
-
-    // Reload runs list
-    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->logs_db_combo));
-    if (db_name) {
-        logs_load_runs(w, db_name);
-        g_free((void *)db_name);
+    // Reload the drive's runs (clears the selection, details and log)
+    const char *slash = strrchr(w->logs_current_db_path, '/');
+    if (slash) {
+        char *db_file = g_strdup(slash + 1);
+        logs_load_runs(w, db_file);
+        g_free(db_file);
     }
 
     GtkAlertDialog *alert = gtk_alert_dialog_new("Run deleted successfully");
@@ -2532,10 +2603,22 @@ void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer us
 }
 
 GtkWidget *create_logs_tab(AppWindow *w) {
+    // Far left, beside the app's sidebar: the drives, as in the TreeView
+    w->logs_drives_box = drive_column_new(&w->logs_drive_list, G_CALLBACK(on_logs_drive_selected), w);
+    drive_columns_set_width(w);
+    GtkWidget *drives_divider = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(drives_divider, "ft-divider");
+
+    GtkWidget *tab = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_append(GTK_BOX(tab), w->logs_drives_box);
+    gtk_box_append(GTK_BOX(tab), drives_divider);
+
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_hexpand(paned, TRUE);
+    gtk_box_append(GTK_BOX(tab), paned);
     gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
 
-    // Left: Database and runs list
+    // Middle: the drive's runs
     GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_set_size_request(left_box, 350, -1);
     gtk_widget_set_margin_start(left_box, 8);
@@ -2543,22 +2626,16 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     gtk_widget_set_margin_top(left_box, 8);
     gtk_widget_set_margin_bottom(left_box, 8);
 
-    GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *db_label = gtk_label_new("Database:");
-    w->logs_db_combo = gtk_combo_box_text_new();
-    g_signal_connect(w->logs_db_combo, "changed", G_CALLBACK(on_logs_db_changed), w);
-    gtk_widget_set_hexpand(w->logs_db_combo, TRUE);
-    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
-    gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list and scan runs");
-    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(logs_refresh_databases), w);
-    gtk_box_append(GTK_BOX(db_box), db_label);
-    gtk_box_append(GTK_BOX(db_box), w->logs_db_combo);
-    gtk_box_append(GTK_BOX(db_box), refresh_btn);
-    gtk_box_append(GTK_BOX(left_box), db_box);
-
+    GtkWidget *runs_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *runs_label = gtk_label_new("Scan Runs:");
     gtk_label_set_xalign(GTK_LABEL(runs_label), 0.0);
-    gtk_box_append(GTK_BOX(left_box), runs_label);
+    gtk_widget_set_hexpand(runs_label, TRUE);
+    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the drive list and the selected drive's scan runs");
+    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(logs_refresh_databases), w);
+    gtk_box_append(GTK_BOX(runs_box), runs_label);
+    gtk_box_append(GTK_BOX(runs_box), refresh_btn);
+    gtk_box_append(GTK_BOX(left_box), runs_box);
 
     w->logs_runs_list = gtk_list_box_new();
     g_signal_connect(w->logs_runs_list, "row-activated", G_CALLBACK(on_logs_run_selected), w);
@@ -2694,7 +2771,7 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     gtk_paned_set_end_child(GTK_PANED(paned), right_box);
     gtk_paned_set_position(GTK_PANED(paned), 370);
 
-    return paned;
+    return tab;
 }
 
 // ============================================================================
@@ -5171,15 +5248,6 @@ void treeview_load(AppWindow *w) {
     g_free(text);
 }
 
-// The drive column takes over the room the tab list gives up when it collapses
-#define TREEVIEW_DRIVES_WIDTH 190
-#define SIDEBAR_WIDTH 210
-#define SIDEBAR_COLLAPSED_WIDTH 44  // one icon plus row and list padding (.ft-sidebar-collapsed)
-void treeview_set_drives_width(AppWindow *w) {
-    int width = TREEVIEW_DRIVES_WIDTH + (w->sidebar_collapsed ? SIDEBAR_WIDTH - SIDEBAR_COLLAPSED_WIDTH : 0);
-    gtk_widget_set_size_request(w->treeview_drives_box, width, -1);
-}
-
 static void on_treeview_drive_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
     (void)box;
     AppWindow *w = user_data;
@@ -5194,32 +5262,8 @@ static void on_treeview_drive_selected(GtkListBox *box, GtkListBoxRow *row, gpoi
 // Refills the drive list, keeping the selected drive when it still exists (otherwise the
 // first drive), and reloads the tree
 void treeview_refresh_databases(AppWindow *w) {
-    GPtrArray *files = list_database_files();
     GtkListBox *list = GTK_LIST_BOX(w->treeview_drive_list);
-    gtk_list_box_remove_all(list);
-
-    GtkListBoxRow *select = NULL;
-    for (guint i = 0; files && i < files->len; i++) {
-        const char *file = g_ptr_array_index(files, i);
-        char *name = g_strndup(file, strlen(file) - 3);  // drop ".db"
-        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-        gtk_box_append(GTK_BOX(box), gtk_image_new_from_icon_name("drive-harddisk-symbolic"));
-        GtkWidget *label = gtk_label_new(name);
-        gtk_label_set_xalign(GTK_LABEL(label), 0);
-        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_MIDDLE);
-        gtk_label_set_max_width_chars(GTK_LABEL(label), 1);  // the column's width decides, not the name
-        gtk_widget_set_hexpand(label, TRUE);
-        gtk_widget_set_tooltip_text(label, name);
-        gtk_box_append(GTK_BOX(box), label);
-        g_free(name);
-
-        GtkWidget *row = gtk_list_box_row_new();
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
-        g_object_set_data_full(G_OBJECT(row), "db-file", g_strdup(file), g_free);
-        gtk_list_box_append(list, row);
-        if (!select || strcmp(file, w->treeview_db_file) == 0) select = GTK_LIST_BOX_ROW(row);
-    }
-    if (files) g_ptr_array_unref(files);
+    GtkListBoxRow *select = drive_list_fill(list, w->treeview_db_file);
 
     // Clear first so selecting the row (same drive or not) always reloads the tree
     w->treeview_db_file[0] = '\0';
@@ -5679,24 +5723,9 @@ static gint treeview_sort_int64(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter
 
 GtkWidget *create_treeview_tab(AppWindow *w) {
     // Far left, beside the app's sidebar: the drives, like Finder's Locations
-    GtkWidget *drives = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(drives, "ft-sidebar");
-    gtk_widget_add_css_class(drives, "ft-drive-list");
+    GtkWidget *drives = drive_column_new(&w->treeview_drive_list, G_CALLBACK(on_treeview_drive_selected), w);
     w->treeview_drives_box = drives;
-    treeview_set_drives_width(w);
-    GtkWidget *drives_heading = gtk_label_new("Drives");
-    gtk_widget_add_css_class(drives_heading, "ft-sidebar-heading");
-    gtk_label_set_xalign(GTK_LABEL(drives_heading), 0);
-    gtk_box_append(GTK_BOX(drives), drives_heading);
-
-    w->treeview_drive_list = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(w->treeview_drive_list), GTK_SELECTION_BROWSE);
-    g_signal_connect(w->treeview_drive_list, "row-selected", G_CALLBACK(on_treeview_drive_selected), w);
-    GtkWidget *drives_scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(drives_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(drives_scroll), w->treeview_drive_list);
-    gtk_widget_set_vexpand(drives_scroll, TRUE);
-    gtk_box_append(GTK_BOX(drives), drives_scroll);
+    drive_columns_set_width(w);
 
     GtkWidget *drives_divider = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(drives_divider, "ft-divider");
@@ -6199,7 +6228,7 @@ static void app_window_set_sidebar_collapsed(AppWindow *w, gboolean collapsed) {
         gtk_widget_set_halign(box, collapsed ? GTK_ALIGN_CENTER : GTK_ALIGN_FILL);
         gtk_widget_set_visible(gtk_widget_get_last_child(box), !collapsed);  // the name
     }
-    treeview_set_drives_width(w);
+    drive_columns_set_width(w);
 }
 
 static void on_toggle_sidebar_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
