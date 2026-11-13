@@ -2123,12 +2123,26 @@ void logs_load_details(AppWindow *w) {
         char corrupt_line[96] = "";
         if (corrupt > 0) snprintf(corrupt_line, sizeof(corrupt_line), "  Corrupt: %'d (possible bit rot)\n", corrupt);
 
-        char info[640];
-        snprintf(info, sizeof(info),
+        // The run's note, its later lines indented under the first
+        GString *note_line = g_string_new("Note: ");
+        if (note && note[0]) {
+            for (const char *c = note; *c; c++) {
+                if (*c == '\n') g_string_append(note_line, "\n      ");
+                else g_string_append_c(note_line, *c);
+            }
+        } else {
+            g_string_append(note_line, "--");
+        }
+        g_string_append_c(note_line, '\n');
+
+        size_t info_size = 640 + note_line->len;
+        char *info = g_malloc(info_size);
+        snprintf(info, info_size,
                 "Run Date: %s\n"
                 "Machine: %s\n"
                 "Mode: %s\n"
                 "Checksum: %s\n"
+                "%s"
                 "Legend: U/C/N/M/I/E\n\n"
                 "Unchanged: %'d\n"
                 "Changed:   %'d\n"
@@ -2141,10 +2155,13 @@ void logs_load_details(AppWindow *w) {
                 machine ? machine : "N/A",
                 update_mode ? update_mode : "N/A",
                 checksum_date ? "Verified" : "Not Verified",
+                note_line->str,
                 unchanged, changed, corrupt_line, new, missing, ignored, errors);
+        g_string_free(note_line, TRUE);
 
         GtkTextBuffer *info_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_run_info_text));
         gtk_text_buffer_set_text(info_buffer, info, -1);
+        g_free(info);
 
         GtkTextBuffer *note_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->logs_note_text));
         gtk_text_buffer_set_text(note_buffer, note ? note : "", -1);
@@ -2555,6 +2572,7 @@ void on_logs_save_note_clicked(GtkButton *button, gpointer user_data) {
 
     sqlite3_close(db);
     g_free(note);
+    logs_load_details(w);  // Run Information shows the note too
 
     GtkAlertDialog *alert = gtk_alert_dialog_new("Note saved successfully");
     gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
@@ -2737,6 +2755,7 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     w->logs_run_info_text = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(w->logs_run_info_text), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->logs_run_info_text), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(w->logs_run_info_text), GTK_WRAP_WORD_CHAR);  // long notes
     GtkWidget *info_scroll = gtk_scrolled_window_new();
     gtk_widget_set_size_request(info_scroll, -1, 220);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(info_scroll), w->logs_run_info_text);
@@ -2747,7 +2766,11 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     GtkWidget *note_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *note_label = gtk_label_new("Note:");
     gtk_label_set_xalign(GTK_LABEL(note_label), 0.0);
-    gtk_widget_set_hexpand(note_label, TRUE);
+    GtkWidget *note_hint = gtk_label_new("Edit the selected run's note below, then Save Note");
+    gtk_widget_add_css_class(note_hint, "dim-label");
+    gtk_label_set_xalign(GTK_LABEL(note_hint), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(note_hint), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(note_hint, TRUE);
 
     GtkWidget *save_note_btn = gtk_button_new_with_label("Save Note");
     gtk_widget_add_css_class(save_note_btn, "suggested-action");
@@ -2755,12 +2778,16 @@ GtkWidget *create_logs_tab(AppWindow *w) {
 
     gtk_box_append(GTK_BOX(note_box), note_label);
     gtk_box_append(GTK_BOX(note_box), save_note_btn);
+    gtk_box_append(GTK_BOX(note_box), note_hint);
 
     w->logs_note_text = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(w->logs_note_text), TRUE);
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(w->logs_note_text), GTK_WRAP_WORD);
-    gtk_widget_set_size_request(w->logs_note_text, -1, 60);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(w->logs_note_text), 6);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(w->logs_note_text), 4);
     GtkWidget *note_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(note_scroll), TRUE);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(note_scroll), 60);  // ~3 lines
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(note_scroll), w->logs_note_text);
     gtk_box_append(GTK_BOX(right_box), note_box);
     gtk_box_append(GTK_BOX(right_box), note_scroll);
@@ -2814,28 +2841,30 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_ignored_check);
     gtk_box_append(GTK_BOX(filter_box), w->logs_filter_errors_check);
 
+    gtk_box_append(GTK_BOX(right_box), filter_box);
+
+    // Logs, with the run's actions on its heading row (the filter row alone is wide enough)
+    GtkWidget *logs_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     GtkWidget *export_btn = gtk_button_new_with_label("Export");
-    gtk_widget_set_hexpand(export_btn, TRUE);
-    gtk_widget_set_halign(export_btn, GTK_ALIGN_END);
     g_signal_connect(export_btn, "clicked", G_CALLBACK(on_logs_export_clicked), w);
     gtk_widget_set_tooltip_text(export_btn, "Save the status and path of the files matching the filter as CSV");
-    gtk_box_append(GTK_BOX(filter_box), export_btn);
+    gtk_box_append(GTK_BOX(logs_box), export_btn);
 
     GtkWidget *export_contents_btn = gtk_button_new_with_label("Export Contents");
     g_signal_connect(export_contents_btn, "clicked", G_CALLBACK(on_logs_export_contents_clicked), w);
     gtk_widget_set_tooltip_text(export_contents_btn,
         "Save the files matching the filter, with size, dates, owner and checksum, as CSV");
-    gtk_box_append(GTK_BOX(filter_box), export_contents_btn);
+    gtk_box_append(GTK_BOX(logs_box), export_contents_btn);
 
     GtkWidget *open_tree_btn = gtk_button_new_with_label("Open in TreeView");
     g_signal_connect(open_tree_btn, "clicked", G_CALLBACK(on_logs_open_treeview_clicked), w);
     gtk_widget_set_tooltip_text(open_tree_btn, "Browse the selected run's files in the TreeView, as that run found them");
-    gtk_box_append(GTK_BOX(filter_box), open_tree_btn);
-    gtk_box_append(GTK_BOX(right_box), filter_box);
+    gtk_box_append(GTK_BOX(logs_box), open_tree_btn);
 
-    // Logs
     GtkWidget *logs_label = gtk_label_new("Logs:");
     gtk_label_set_xalign(GTK_LABEL(logs_label), 0.0);
+    gtk_widget_set_hexpand(logs_label, TRUE);
+    gtk_box_prepend(GTK_BOX(logs_box), logs_label);
     w->logs_text = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(w->logs_text), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->logs_text), TRUE);
@@ -2843,10 +2872,11 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     GtkWidget *logs_scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(logs_scroll), w->logs_text);
     gtk_widget_set_vexpand(logs_scroll, TRUE);
-    gtk_box_append(GTK_BOX(right_box), logs_label);
+    gtk_box_append(GTK_BOX(right_box), logs_box);
     gtk_box_append(GTK_BOX(right_box), logs_scroll);
 
     gtk_paned_set_end_child(GTK_PANED(paned), right_box);
+    gtk_paned_set_shrink_end_child(GTK_PANED(paned), FALSE);  // never clip the controls off the right edge
     gtk_paned_set_position(GTK_PANED(paned), 370);
 
     return tab;

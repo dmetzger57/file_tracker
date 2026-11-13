@@ -139,8 +139,8 @@ The detailed, per-file log of any run.
 
 - **Drives / Scan Runs:** pick a drive in the Drives column (as in the TreeView), then a run. **Refresh** reloads the drive list and the selected drive's runs.
 - **Filters:** All, New, Changed, Corrupt, Missing, Unchanged, Ignored, Errors. One is selected at a time: choosing a filter clears the previous one. The run details show the Corrupt count when there is one.
-- **Note / Save Note:** view or edit the run's note.
-- **Export:** save the files matching the current filter as CSV (`Status,Full Path`).
+- **Note / Save Note:** select a run, edit its note in the Note box, and click **Save Note** (beside the Note label) — this works for any run, not just the latest. The note is also shown in Run Information, which updates when you save.
+- **Export** (on the Logs line, with Export Contents and Open in TreeView): save the files matching the current filter as CSV (`Status,Full Path`).
 - **Export Contents:** save the files matching the current filter with their details, in the same format as the Drives tab's Export Contents, sorted by path: `Full Path,File Name,Size (bytes),Last Modified,Created,Owner,Checksum,Status`. Size, Last Modified and Checksum are the values the run recorded; for Missing, Ignored and Error entries (which the run logs without them) they are the file's last recorded values, or empty. Created and Owner are the file's current database values.
 - **Colors:** log lines are colored like the TreeView: CORRUPT and ERROR red, CHANGED and MISSING yellow, NEW green.
 - **Open in TreeView:** browse the selected run's files in the TreeView, as that run found them (see TreeView › Run).
