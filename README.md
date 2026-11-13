@@ -98,7 +98,7 @@ Scans one directory tree and saves the results as a run.
 
 - **Volumes:** drives mounted under `/Volumes`. Time Machine volumes, `mbp_backup` and `Macintosh HD` are hidden (see `is_excluded_volume()`). Clicking a volume fills in Path and Database. **Refresh** reloads the list.
 - **Path / Database:** the directory to scan and the database name (stored as `~/db/FileTracker/<name>.db`). Both can be typed in.
-- **Verify Checksums:** recompute SHA-256 for every file (deep verification). Off: compare size and modification time only.
+- **Verify Checksums:** on by default; recompute SHA-256 for every file (deep verification). Off: compare size and modification time only.
 - **Update Database:** save file changes to the database (see above).
 - **Workers:** how many files are processed in parallel (1 to 2× CPU cores, default 1). Keep it at 1 for spinning hard drives, where parallel reads cause head seeking. Raise it for checksum scans on SSD/NVMe.
 - **Note:** text saved with the run, e.g. "Monthly deep scan".
@@ -312,7 +312,7 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 ## Recommended Workflow
 
 - **Initial baseline:** select the drive in File Scanner, enable *Update Database* and *Verify Checksums*, add a note such as "Initial baseline", and start the scan.
-- **Weekly quick check:** same, with *Verify Checksums* off.
+- **Weekly quick check:** same, with *Verify Checksums* turned off.
 - **Monthly deep check:** same, with *Verify Checksums* on. Only this catches content changes that leave the size and modification time untouched.
 - **Investigate:** Summary for the totals, Logs filtered to Changed / Missing / Errors for the files, Compare to diff two runs or a drive against its backup.
 

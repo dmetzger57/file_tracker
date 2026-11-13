@@ -3665,6 +3665,7 @@ GtkWidget *create_scanner_tab(AppWindow *w) {
     // Options
     GtkWidget *opts_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
     w->scanner_checksum_check = gtk_check_button_new_with_label("Verify Checksums");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->scanner_checksum_check), TRUE);  // on by default: only it catches bit rot
     w->scanner_update_check = gtk_check_button_new_with_label("Update Database");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(w->scanner_update_check), TRUE);
     gtk_box_append(GTK_BOX(opts_box), w->scanner_checksum_check);
