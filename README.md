@@ -113,6 +113,7 @@ Browse one database's file index like Finder's list view, whether or not the dri
 ![TreeView: Show only filters above a drive's folder tree, with the selected file's details on the right](docs/screenshots/treeview.png)
 
 - **Drives:** the list beside the sidebar shows every drive database, like Finder's Locations. Click a drive to browse it. The tree starts at the root of the drive (`/Volumes/<name>` for an external drive, `/` for the startup disk), shown above the tree with the file count and total size. Above the tree, **Location** shows where the drive is stored, as set on the Drives tab. **Refresh** reloads the drive list and the tree.
+- **Run:** **Current files** (the drive's file index now, the default) or one of the drive's scan runs, newest first. A run shows the files as that run found them: its size, date, checksum and status for each file (UNCHANGED, NEW, CHANGED, CORRUPT, MISSING, ERROR), with the Show only filters, totals and corrupt count applying to that run. Ignored entries are left out; missing and error entries show the file's last recorded size and date. A run that covered part of a drive, or was stopped, shows only what it reached. A run is read-only: Accept Current Contents works on Current files. Opening a drive shows its current files; **Open in TreeView** on the Logs tab opens a run directly.
 - **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the files below it, e.g. *1 corrupt, 2 missing*. A file's Status is its MISSING or CORRUPT mark, otherwise its status in the drive's most recent scan (NEW or CHANGED).
 - **Columns:** Name, Date Modified, Size, Files, Status, all sortable. CORRUPT files are highlighted across the whole row (red tint, warning icon, bold red name), and folders containing one show their name in red. Corrupt, missing and error entries are red, changed orange, new blue. Type to search the names of the visible rows.
 - **Show Missing Files:** untick to hide files the last scan could not find.
@@ -141,6 +142,7 @@ The detailed, per-file log of any run.
 - **Note / Save Note:** view or edit the run's note.
 - **Export:** save the files matching the current filter as CSV (`Status,Full Path`).
 - **Export Contents:** save the files matching the current filter with their details, in the same format as the Drives tab's Export Contents, sorted by path: `Full Path,File Name,Size (bytes),Last Modified,Created,Owner,Checksum,Status`. Size, Last Modified and Checksum are the values the run recorded; for Missing, Ignored and Error entries (which the run logs without them) they are the file's last recorded values, or empty. Created and Owner are the file's current database values.
+- **Open in TreeView:** browse the selected run's files in the TreeView, as that run found them (see TreeView › Run).
 - **Delete Selected Run:** remove a run and its log.
 
 ### Compare

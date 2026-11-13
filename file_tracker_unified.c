@@ -169,6 +169,10 @@ typedef struct {
     char treeview_db_file[256];       // selected drive database file name ("Name.db"), "" for none
     char treeview_root[MAX_PATH];     // common folder of every file in the database ("" for "/")
     gboolean treeview_has_status;     // files.status exists (older databases lack it)
+    GtkWidget *treeview_run_combo;    // Run: "Current files" (id "0") or a scan run (id = meta.id)
+    sqlite3_int64 treeview_run_id;    // 0: the files table (current files); else the run whose log is shown
+    gboolean treeview_run_updating;   // the Run list is being refilled: don't reload per change
+    char treeview_source[2048];       // what the tree's queries read: "files", or the run's log as a subquery
 } AppWindow;
 
 // Open main windows, oldest first
@@ -533,6 +537,8 @@ int update_all_mounted_drives(int *failed, char *err, size_t err_size) {
 void refresh_all_database_combos(AppWindow *w);
 void drives_refresh_list(AppWindow *w);
 void logs_refresh_databases(AppWindow *w);
+void treeview_show_run(AppWindow *w, const char *db_file, sqlite3_int64 run_id);
+void app_window_show_page(AppWindow *w, const char *id);
 void locator_refresh_databases(AppWindow *w);
 void dupe_refresh_databases(AppWindow *w);
 void summary_refresh_databases(AppWindow *w);
@@ -2443,6 +2449,22 @@ void on_logs_filter_toggled(GtkCheckButton *button, gpointer user_data) {
     logs_load_logs(w);
 }
 
+// Shows the selected run's files in the TreeView, as that run found them
+static void on_logs_open_treeview_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    AppWindow *w = user_data;
+    const char *slash = strrchr(w->logs_current_db_path, '/');
+    if (w->logs_selected_run_id == 0 || !slash) {
+        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select a run to open");
+        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
+        g_object_unref(alert);
+        return;
+    }
+    char *db_file = g_strdup(slash + 1);
+    treeview_show_run(w, db_file, w->logs_selected_run_id);
+    g_free(db_file);
+}
+
 void on_logs_save_note_clicked(GtkButton *button, gpointer user_data) {
     AppWindow *w = user_data;
     (void)button;
@@ -2753,6 +2775,11 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     gtk_widget_set_tooltip_text(export_contents_btn,
         "Save the files matching the filter, with size, dates, owner and checksum, as CSV");
     gtk_box_append(GTK_BOX(filter_box), export_contents_btn);
+
+    GtkWidget *open_tree_btn = gtk_button_new_with_label("Open in TreeView");
+    g_signal_connect(open_tree_btn, "clicked", G_CALLBACK(on_logs_open_treeview_clicked), w);
+    gtk_widget_set_tooltip_text(open_tree_btn, "Browse the selected run's files in the TreeView, as that run found them");
+    gtk_box_append(GTK_BOX(filter_box), open_tree_btn);
     gtk_box_append(GTK_BOX(right_box), filter_box);
 
     // Logs
@@ -4820,6 +4847,7 @@ static int treeview_open_db(AppWindow *w, sqlite3 **db) {
 // recent scan (NEW, CHANGED, or MISSING when that scan was read-only). Databases from before the
 // status column, or without any runs, lack one or both sources.
 static const char *treeview_status_expr(AppWindow *w) {
+    if (w->treeview_run_id) return "status";  // the run's log carries each file's status (treeview_build_source)
     if (w->treeview_has_status && w->treeview_has_runs)
         return "CASE WHEN COALESCE(status, '') <> '' THEN status WHEN " TV_RUN_NEW " THEN 'NEW' WHEN " TV_RUN_CHANGED
                " THEN 'CHANGED' WHEN " TV_RUN_MISSING " THEN 'MISSING' ELSE '' END";
@@ -4836,7 +4864,7 @@ G_STATIC_ASSERT(TV_N_FILTERS == G_N_ELEMENTS(((AppWindow *)0)->treeview_filter_t
 // any of the Show only filters, or (none on) everything but MISSING files when Show Missing Files
 // is off
 static void treeview_build_filter(AppWindow *w) {
-    const char *conds[TV_N_FILTERS] = {
+    const char *current[TV_N_FILTERS] = {
         w->treeview_has_runs ? TV_RUN_UNCHANGED : "0",
         w->treeview_has_runs ? TV_RUN_NEW : "0",
         w->treeview_has_runs ? TV_RUN_CHANGED : "0",
@@ -4844,6 +4872,12 @@ static void treeview_build_filter(AppWindow *w) {
         w->treeview_has_status ? "status = 'MISSING'" : "0",  // Missing: every file marked MISSING
         w->treeview_has_status ? "status = 'CORRUPT'" : "0",
     };
+    // A scan run's view: the statuses that run logged (Deleted and Missing are both its MISSING files)
+    static const char *run[TV_N_FILTERS] = {
+        "status = ''", "status = 'NEW'", "status = 'CHANGED'", "status = 'MISSING'", "status = 'MISSING'",
+        "status = 'CORRUPT'",
+    };
+    const char **conds = w->treeview_run_id ? run : current;
     GString *sql = g_string_new(NULL);
     for (int i = 0; i < TV_N_FILTERS; i++) {
         if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_filter_toggles[i]))) continue;
@@ -4852,7 +4886,8 @@ static void treeview_build_filter(AppWindow *w) {
     }
     w->treeview_filtering = sql->len > 0;
     if (w->treeview_filtering) g_string_append(sql, ")");
-    else if (w->treeview_has_status && !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check)))
+    else if ((w->treeview_has_status || w->treeview_run_id) &&
+             !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check)))
         g_string_append(sql, "AND status IS NOT 'MISSING'");
     snprintf(w->treeview_filter, sizeof(w->treeview_filter), "%s", sql->str);
     g_string_free(sql, TRUE);
@@ -4899,6 +4934,37 @@ static const char *treeview_filter_sql(AppWindow *w) {
     return w->treeview_filter;
 }
 
+// What the tree's queries read, in place of a table name (see treeview_build_source)
+static const char *treeview_source(AppWindow *w) {
+    return w->treeview_source[0] ? w->treeview_source : "files";
+}
+
+// Builds w->treeview_source: the files table, or for a scan run that run's log with the files
+// table's columns (id, full_path, size, last_modified, created, owner, keywords, checksum, status).
+// Status is the run's: NEW, CHANGED, CORRUPT, MISSING, ERROR, or '' for UNCHANGED; IGNORED entries
+// are left out. Older logs lack size/mtime/checksum, and MISSING/ERROR entries are logged without
+// them: those come from the files table (the file's last recorded values).
+static void treeview_build_source(AppWindow *w, sqlite3 *db) {
+    if (!w->treeview_run_id) {
+        snprintf(w->treeview_source, sizeof(w->treeview_source), "files");
+        return;
+    }
+    int has_mtime = table_has_column(db, "run_logs", "size") && table_has_column(db, "run_logs", "mtime");
+    int has_checksum = table_has_column(db, "run_logs", "checksum");
+    const char *logged = has_mtime ? "l.mtime > 0" : "0";
+    snprintf(w->treeview_source, sizeof(w->treeview_source),
+             "(SELECT l.id AS id, l.full_path AS full_path, "
+             "CASE WHEN %s THEN l.size ELSE f.size END AS size, "
+             "CASE WHEN %s THEN l.mtime ELSE f.last_modified END AS last_modified, "
+             "f.created AS created, f.owner AS owner, f.keywords AS keywords, "
+             "COALESCE(%s, f.checksum) AS checksum, "
+             "CASE WHEN l.status >= 'CHANGED' AND l.status < 'CHANGEE' THEN 'CHANGED' "  // "CHANGED: ..."
+             "     WHEN l.status = 'UNCHANGED' THEN '' ELSE l.status END AS status "
+             "FROM run_logs l LEFT JOIN files f ON f.full_path = l.full_path "
+             "WHERE l.run_id = %lld AND l.status <> 'IGNORED')",
+             logged, logged, has_checksum ? "NULLIF(l.checksum, '')" : "NULL", (long long)w->treeview_run_id);
+}
+
 // The New/Modified/Deleted lookups need run_logs indexed by run; older databases lack the
 // index, so add it once (needs write access; without it the lookups are just slower)
 static void treeview_ensure_run_index(const char *db_path) {
@@ -4906,6 +4972,8 @@ static void treeview_ensure_run_index(const char *db_path) {
     if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
         sqlite3_busy_timeout(db, 2000);
         sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_run_logs_run_status ON run_logs(run_id, status)", NULL, NULL, NULL);
+        // A scan run's tree reads one folder of the run's log at a time
+        sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_run_logs_run_path ON run_logs(run_id, full_path)", NULL, NULL, NULL);
     }
     if (db) sqlite3_close(db);
 }
@@ -4944,10 +5012,10 @@ static int treeview_add_children(AppWindow *w, sqlite3 *db, GtkTreeStore *store,
         "  SUM(st = 'CORRUPT') "
         "FROM (SELECT id, size, last_modified, st, rest, instr(rest, '/') AS p "
         "      FROM (SELECT id, size, last_modified, %s AS st, substr(full_path, ?1) AS rest "
-        "            FROM files WHERE full_path >= ?2 AND full_path < ?3 %s)) "
+        "            FROM %s WHERE full_path >= ?2 AND full_path < ?3 %s)) "
         "WHERE name <> '' "
         "GROUP BY name, is_dir ORDER BY name COLLATE NOCASE",
-        treeview_status_expr(w), treeview_filter_sql(w));
+        treeview_status_expr(w), treeview_source(w), treeview_filter_sql(w));
 
     int added = 0;
     sqlite3_stmt *stmt;
@@ -5086,8 +5154,8 @@ static void treeview_open_filtered_tree(AppWindow *w, sqlite3 *db) {
 // Longest common directory of all paths in the database: the common prefix of the smallest and
 // largest path, cut back to a '/'. Returns "" when the files share only "/".
 static char *treeview_find_root(AppWindow *w, sqlite3 *db, long long *n_files, long long *total_size) {
-    char *sql = g_strdup_printf("SELECT MIN(full_path), MAX(full_path), COUNT(*), SUM(COALESCE(size, 0)) FROM files WHERE 1 %s",
-                                treeview_filter_sql(w));
+    char *sql = g_strdup_printf("SELECT MIN(full_path), MAX(full_path), COUNT(*), SUM(COALESCE(size, 0)) FROM %s WHERE 1 %s",
+                                treeview_source(w), treeview_filter_sql(w));
     char *root = NULL;
     *n_files = 0;
     *total_size = 0;
@@ -5154,15 +5222,22 @@ static void treeview_show_location(AppWindow *w, const char *db_file) {
 static void treeview_update_corrupt_count(AppWindow *w, sqlite3 *db) {
     long long n = 0;
     sqlite3_stmt *stmt;
-    if (db && w->treeview_has_status &&
+    // A scan run: the files that run found corrupt
+    if (db && w->treeview_run_id &&
+        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM run_logs WHERE run_id = ? AND status = 'CORRUPT'", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, w->treeview_run_id);
+        if (sqlite3_step(stmt) == SQLITE_ROW) n = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+    } else if (db && !w->treeview_run_id && w->treeview_has_status &&
         sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM files WHERE status = 'CORRUPT'", -1, &stmt, NULL) == SQLITE_OK) {
         if (sqlite3_step(stmt) == SQLITE_ROW) n = sqlite3_column_int64(stmt, 0);
         sqlite3_finalize(stmt);
     }
     char num[32];
+    const char *suffix = w->treeview_run_id ? " in this run" : "";
     char *text = !db ? g_strdup("")
-               : n == 0 ? g_strdup("No corrupt files")
-               : g_strdup_printf("%s corrupt file%s", format_count(n, num, sizeof(num)), n == 1 ? "" : "s");
+               : n == 0 ? g_strdup_printf("No corrupt files%s", suffix)
+               : g_strdup_printf("%s corrupt file%s%s", format_count(n, num, sizeof(num)), n == 1 ? "" : "s", suffix);
     gtk_label_set_text(GTK_LABEL(w->treeview_corrupt_label), text);
     g_free(text);
     if (n > 0) {
@@ -5184,6 +5259,7 @@ void treeview_load(AppWindow *w) {
     treeview_update_corrupt_count(w, NULL);
     w->treeview_filtering = FALSE;
     w->treeview_filter[0] = '\0';
+    w->treeview_source[0] = '\0';
 
     const char *db_name = w->treeview_db_file;
     treeview_show_location(w, db_name);
@@ -5209,6 +5285,8 @@ void treeview_load(AppWindow *w) {
     }
     w->treeview_has_status = table_has_column(db, "files", "status");
     w->treeview_has_runs = table_has_column(db, "run_logs", "full_path") && table_has_column(db, "meta", "id");
+    if (!w->treeview_has_runs) w->treeview_run_id = 0;
+    treeview_build_source(w, db);
     treeview_build_filter(w);
     gboolean filtering = w->treeview_filtering;
     gtk_widget_set_sensitive(w->treeview_missing_check, !filtering);  // the filters decide which files show
@@ -5218,7 +5296,8 @@ void treeview_load(AppWindow *w) {
     char *root = treeview_find_root(w, db, &n_files, &total_size);
     if (!root) {
         gtk_label_set_text(GTK_LABEL(w->treeview_root_label),
-                           filtering ? "No files match the selected filters" : "No files in this database");
+                           filtering ? "No files match the selected filters"
+                           : w->treeview_run_id ? "No files in this scan run" : "No files in this database");
         sqlite3_close(db);
         return;
     }
@@ -5241,11 +5320,70 @@ void treeview_load(AppWindow *w) {
 
     char count[32], size[32];
     format_size(total_size, size, sizeof(size));
-    char *text = g_strdup_printf("%s — %s %sfile%s, %s", w->treeview_root[0] ? w->treeview_root : "/",
+    char run[64] = "";
+    if (w->treeview_run_id) snprintf(run, sizeof(run), " — as of scan run %lld", (long long)w->treeview_run_id);
+    char *text = g_strdup_printf("%s — %s %sfile%s, %s%s", w->treeview_root[0] ? w->treeview_root : "/",
                                  format_count(n_files, count, sizeof(count)), filtering ? "matching " : "",
-                                 n_files == 1 ? "" : "s", size);
+                                 n_files == 1 ? "" : "s", size, run);
     gtk_label_set_text(GTK_LABEL(w->treeview_root_label), text);
     g_free(text);
+}
+
+// Refills the Run list with "Current files" and the drive's scan runs (newest first), selecting
+// run_id when the drive has it (otherwise Current files). Sets w->treeview_run_id; doesn't reload.
+static void treeview_fill_runs(AppWindow *w, sqlite3_int64 run_id) {
+    GtkComboBoxText *combo = GTK_COMBO_BOX_TEXT(w->treeview_run_combo);
+    w->treeview_run_updating = TRUE;
+    gtk_combo_box_text_remove_all(combo);
+    gtk_combo_box_text_append(combo, "0", "Current files");
+    w->treeview_run_id = 0;
+
+    char path[MAX_PATH], err[512];
+    sqlite3 *db;
+    snprintf(path, sizeof(path), "%s/%s", db_dir_path, w->treeview_db_file);
+    if (w->treeview_db_file[0] && file_list_open(path, &db, err, sizeof(err))) {
+        sqlite3_stmt *stmt;
+        if (table_has_column(db, "meta", "id") && table_has_column(db, "run_logs", "full_path") &&
+            sqlite3_prepare_v2(db, "SELECT id, COALESCE(last_checksum_verify_date, last_date_verify), update_mode, note "
+                                   "FROM meta ORDER BY id DESC", -1, &stmt, NULL) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                sqlite3_int64 id = sqlite3_column_int64(stmt, 0);
+                const char *date = (const char *)sqlite3_column_text(stmt, 1);
+                const char *mode = (const char *)sqlite3_column_text(stmt, 2);
+                const char *note = (const char *)sqlite3_column_text(stmt, 3);
+                char id_str[32];
+                snprintf(id_str, sizeof(id_str), "%lld", (long long)id);
+                char *label = g_strdup_printf("Run %lld — %s%s%s%.40s", (long long)id, date ? date : "unknown date",
+                                              mode && strcmp(mode, "OFF") == 0 ? " [RO]" : "",
+                                              note && note[0] ? " — " : "", note ? note : "");
+                gtk_combo_box_text_append(combo, id_str, label);
+                g_free(label);
+                if (id == run_id) w->treeview_run_id = id;
+            }
+            sqlite3_finalize(stmt);
+        }
+        sqlite3_close(db);
+    }
+    char active[32];
+    snprintf(active, sizeof(active), "%lld", (long long)w->treeview_run_id);
+    gtk_combo_box_set_active_id(GTK_COMBO_BOX(combo), active);
+    w->treeview_run_updating = FALSE;
+}
+
+static void on_treeview_run_changed(GtkComboBox *combo, gpointer user_data) {
+    AppWindow *w = user_data;
+    if (w->treeview_run_updating) return;
+    const char *id = gtk_combo_box_get_active_id(combo);
+    w->treeview_run_id = id ? g_ascii_strtoll(id, NULL, 10) : 0;
+    treeview_load(w);
+}
+
+// Shows the drive database db_file ("Name.db"), unfiltered, at run_id (0: its current files)
+static void treeview_open_drive(AppWindow *w, const char *db_file, sqlite3_int64 run_id) {
+    snprintf(w->treeview_db_file, sizeof(w->treeview_db_file), "%s", db_file);
+    treeview_reset_filter(w);  // a drive opens unfiltered
+    treeview_fill_runs(w, run_id);
+    treeview_load(w);
 }
 
 static void on_treeview_drive_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
@@ -5254,21 +5392,46 @@ static void on_treeview_drive_selected(GtkListBox *box, GtkListBoxRow *row, gpoi
     if (!row) return;  // the list is being refilled
     const char *file = g_object_get_data(G_OBJECT(row), "db-file");
     if (!file || strcmp(file, w->treeview_db_file) == 0) return;
-    snprintf(w->treeview_db_file, sizeof(w->treeview_db_file), "%s", file);
-    treeview_reset_filter(w);  // a drive opens unfiltered
-    treeview_load(w);
+    treeview_open_drive(w, file, 0);  // a drive opens at its current files
 }
 
-// Refills the drive list, keeping the selected drive when it still exists (otherwise the
-// first drive), and reloads the tree
+// Refills the drive list, keeping the selected drive (and its run) when it still exists
+// (otherwise the first drive), and reloads the tree
 void treeview_refresh_databases(AppWindow *w) {
     GtkListBox *list = GTK_LIST_BOX(w->treeview_drive_list);
-    GtkListBoxRow *select = drive_list_fill(list, w->treeview_db_file);
+    char *previous = g_strdup(w->treeview_db_file);
+    GtkListBoxRow *select = drive_list_fill(list, previous);
+    const char *file = select ? g_object_get_data(G_OBJECT(select), "db-file") : NULL;
+    sqlite3_int64 run_id = file && strcmp(file, previous) == 0 ? w->treeview_run_id : 0;
+    g_free(previous);
 
-    // Clear first so selecting the row (same drive or not) always reloads the tree
-    w->treeview_db_file[0] = '\0';
-    if (select) gtk_list_box_select_row(list, select);
-    else treeview_load(w);
+    if (!file) {
+        w->treeview_db_file[0] = '\0';
+        treeview_fill_runs(w, 0);
+        treeview_load(w);
+        return;
+    }
+    // Mark the drive as shown first, so selecting its row doesn't open it a second time
+    snprintf(w->treeview_db_file, sizeof(w->treeview_db_file), "%s", file);
+    gtk_list_box_select_row(list, select);
+    treeview_open_drive(w, file, run_id);
+}
+
+// Opens the TreeView on a drive's scan run (from the Logs tab)
+void treeview_show_run(AppWindow *w, const char *db_file, sqlite3_int64 run_id) {
+    GtkListBox *list = GTK_LIST_BOX(w->treeview_drive_list);
+    for (int i = 0;; i++) {
+        GtkListBoxRow *row = gtk_list_box_get_row_at_index(list, i);
+        if (!row) break;
+        const char *file = g_object_get_data(G_OBJECT(row), "db-file");
+        if (file && strcmp(file, db_file) == 0) {
+            snprintf(w->treeview_db_file, sizeof(w->treeview_db_file), "%s", db_file);
+            gtk_list_box_select_row(list, row);
+            break;
+        }
+    }
+    treeview_open_drive(w, db_file, run_id);
+    app_window_show_page(w, "treeview");
 }
 
 static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer user_data) {
@@ -5307,13 +5470,17 @@ static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer 
         g_string_append_printf(text, "Files:         %s\n", format_count(count, num, sizeof(num)));
         g_string_append_printf(text, "Total Size:    %s (%s bytes)\n", size_str, bytes);
         g_string_append_printf(text, "Newest File:   %s\n", date);
-        g_string_append_printf(text, "Last Run:      %s\n", status && status[0] ? status : "all unchanged");
+        g_string_append_printf(text, "%s     %s\n", w->treeview_run_id ? "This Run:" : "Last Run:",
+                               status && status[0] ? status : "all unchanged");
     } else {
         g_string_append_printf(text, "File:          %s\nPath:          %s\n\n", name, path);
+        if (w->treeview_run_id)
+            g_string_append_printf(text, "As of:         scan run %lld (size, date, checksum and status it logged)\n",
+                                   (long long)w->treeview_run_id);
         sqlite3 *db;
         if (treeview_open_db(w, &db)) {
             char *sql = g_strdup_printf("SELECT size, created, last_modified, owner, checksum, keywords, %s "
-                                        "FROM files WHERE id = ?", treeview_status_expr(w));
+                                        "FROM %s WHERE id = ?", treeview_status_expr(w), treeview_source(w));
             sqlite3_stmt *stmt;
             if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
                 sqlite3_bind_int64(stmt, 1, id);
@@ -5354,7 +5521,7 @@ static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer 
     g_string_append_printf(text, "\nOn disk:       %s\n", on_disk ? "yes" : "no (drive not mounted, or the item is gone)");
     treeview_set_details(w, text->str);
     gtk_widget_set_sensitive(w->treeview_reveal_button, on_disk);
-    gtk_widget_set_sensitive(w->treeview_accept_button, corrupt && on_disk);
+    gtk_widget_set_sensitive(w->treeview_accept_button, corrupt && on_disk && !w->treeview_run_id);  // current files only
 
     g_string_free(text, TRUE);
     g_free(name); g_free(path); g_free(status);
@@ -5421,8 +5588,8 @@ static void treeview_refresh_ancestors(AppWindow *w, GtkTreeIter *iter) {
     char *sql = g_strdup_printf(
         "SELECT SUM(COALESCE(size, 0)), COUNT(*), MAX(last_modified), SUM(st = 'CORRUPT'), SUM(st = 'CHANGED'), "
         "  SUM(st = 'NEW'), SUM(st = 'MISSING'), SUM(st = 'ERROR') "
-        "FROM (SELECT size, last_modified, %s AS st FROM files WHERE full_path >= ?1 AND full_path < ?2 %s)",
-        treeview_status_expr(w), treeview_filter_sql(w));
+        "FROM (SELECT size, last_modified, %s AS st FROM %s WHERE full_path >= ?1 AND full_path < ?2 %s)",
+        treeview_status_expr(w), treeview_source(w), treeview_filter_sql(w));
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         GtkTreeIter child = *iter, parent;
@@ -5750,6 +5917,17 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
 
     GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 
+    // Run: the drive's current files, or the files as one scan run logged them
+    gtk_box_append(GTK_BOX(db_box), gtk_label_new("Run:"));
+    w->treeview_run_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(w->treeview_run_combo), "0", "Current files");
+    gtk_combo_box_set_active_id(GTK_COMBO_BOX(w->treeview_run_combo), "0");
+    gtk_widget_set_tooltip_text(w->treeview_run_combo,
+        "Current files: the drive's file index now. A scan run: the files as that run found them, "
+        "with the status it logged (read-only)");
+    g_signal_connect(w->treeview_run_combo, "changed", G_CALLBACK(on_treeview_run_changed), w);
+    gtk_box_append(GTK_BOX(db_box), w->treeview_run_combo);
+
     w->treeview_missing_check = gtk_check_button_new_with_label("Show Missing Files");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(w->treeview_missing_check), TRUE);
     gtk_widget_set_tooltip_text(w->treeview_missing_check, "Include files the last scan could not find");
@@ -5786,11 +5964,11 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     g_signal_connect(w->treeview_filter_all, "toggled", G_CALLBACK(on_treeview_filter_toggled), w);
     gtk_box_append(GTK_BOX(filter_group), w->treeview_filter_all);
     static const struct { const char *label, *tooltip; } filters[TV_N_FILTERS] = {
-        {"Unchanged", "Files the most recent scan found unchanged"},
-        {"New",      "Files the most recent scan found for the first time"},
-        {"Modified", "Files the most recent scan found changed (written: date or size differs)"},
-        {"Deleted",  "Files that went missing in the most recent scan"},
-        {"Missing",  "Every file marked MISSING, whenever it disappeared"},
+        {"Unchanged", "Files the most recent scan (or the chosen Run) found unchanged"},
+        {"New",      "Files the most recent scan (or the chosen Run) found for the first time"},
+        {"Modified", "Files the most recent scan (or the chosen Run) found changed (written: date or size differs)"},
+        {"Deleted",  "Files that went missing in the most recent scan (or the chosen Run)"},
+        {"Missing",  "Every file marked MISSING, whenever it disappeared (for a Run: the files it found missing)"},
         {"Corrupt",  "Files marked CORRUPT: checksum changed although size and date did not (possible bit rot)"},
     };
     for (int i = 0; i < TV_N_FILTERS; i++) {
@@ -6208,6 +6386,16 @@ static void on_sidebar_row_selected(GtkListBox *box, GtkListBoxRow *row, gpointe
     gtk_label_set_text(GTK_LABEL(w->page_subtitle), page->subtitle);
     // Entering the TreeView shows its drive unfiltered
     if (strcmp(page->id, "treeview") == 0 && w->treeview_filter_all && treeview_reset_filter(w)) treeview_load(w);
+}
+
+// Shows the section with this id (app_pages), as if picked in the sidebar
+void app_window_show_page(AppWindow *w, const char *id) {
+    for (size_t i = 0; i < G_N_ELEMENTS(app_pages); i++) {
+        if (strcmp(app_pages[i].id, id) != 0) continue;
+        GtkListBoxRow *row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(w->nav), (int)i);
+        if (row) gtk_list_box_select_row(GTK_LIST_BOX(w->nav), row);
+        return;
+    }
 }
 
 // Collapsed, the sidebar shows only the section icons (names in their tooltips) and the
