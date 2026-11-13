@@ -32,7 +32,7 @@ file_tracker_unified → SQLite DB (~/db/FileTracker/*.db)
 - **files:** `id, file_name, full_path (UNIQUE), size, created, last_modified, owner, checksum, keywords, status`
   - status: UNCHANGED, CHANGED, CORRUPT, NEW, MISSING, IGNORED, ERROR (run_logs). `files.status` stores only MISSING and CORRUPT (NULL otherwise)
 - **meta:** `id, last_checksum_verify_date, last_date_verify, verify_machine, num_unchanged, num_changed, num_new, num_missing, num_errors, update_mode, note` (num_changed includes CORRUPT files; count them from run_logs)
-- **run_logs:** `id, run_id (FK to meta.id), status, full_path` (indexed on run_id, status)
+- **run_logs:** `id, run_id (FK to meta.id), status, full_path, checksum, size, mtime` (index `idx_run_logs_run_status` on run_id, status; created by both scanners and by TreeView via `treeview_ensure_run_index()`)
 
 ### Storage Locations
 - Databases: `$File_Tracker_DB_PATH/*.db` when the `File_Tracker_DB_PATH` environment variable is set, otherwise `~/db/FileTracker/*.db`
@@ -76,7 +76,7 @@ gcc -Wall -Wextra -O2 \
   - Drives tab: Drive metadata tracking with auto-capacity detection
   - Locator tab: Search by filename across databases, checksum comparison
   - Compare tab: Compare two scan runs to see changes
-  - TreeView tab: Finder-like list view of a database's `files` table; drives are picked from a Finder-style list (`w->treeview_drive_list`) beside the app sidebar and the tree starts at the drive root (`/Volumes/<name>`, or `/`); folders load lazily on `test-expand-row` (placeholder child) with one range query (`full_path >= 'dir/' AND full_path < 'dir0'`) grouped by the next path component
+  - TreeView tab: Finder-like list view of a database's `files` table; drives are picked from a Finder-style list (`w->treeview_drive_list`) beside the app sidebar and the tree starts at the drive root (`/Volumes/<name>`, or `/`); folders load lazily on `test-expand-row` (placeholder child) with one range query (`full_path >= 'dir/' AND full_path < 'dir0'`) grouped by the next path component. Row status = `files.status` (MISSING/CORRUPT) else the latest run's NEW/CHANGED (`treeview_status_expr()`, `TV_LAST_RUN` subqueries); the Show only toggles (All/Unchanged/New/Modified/Deleted/Missing/Corrupt) are one `gtk_toggle_button_set_group` group (one selected; drive open or tab entry resets to All via `treeview_reset_filter()`) and become `w->treeview_filter` (`treeview_build_filter()`), applied to every TreeView files query
   - Multiple windows in one process (File > New Window ⌘N, Dock menu). All per-window widgets and state live in `AppWindow` (`w->...`); open windows are in `app_windows`. Callbacks receive the `AppWindow *` as `user_data` (or via a request struct such as `DriveDeleteRequest`/`RenameDialog`; `ScannerContext.win` for scanner idle callbacks)
 - `macos_dock_menu.m`: Adds `applicationDockMenu:` to GTK's NSApp delegate at runtime (macOS only; linked with `-framework Cocoa`)
 - `macos_appearance.m`: Reports the macOS Light/Dark appearance and its changes; `app_apply_color_scheme()` mirrors it into GTK

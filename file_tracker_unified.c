@@ -151,7 +151,12 @@ typedef struct {
     GtkWidget *treeview_drive_list;      // Finder-style list of drive databases
     GtkWidget *treeview_drives_box;      // column holding it; widens while the sidebar is collapsed
     GtkWidget *treeview_missing_check;
-    GtkWidget *treeview_corrupt_toggle;  // Only Corrupt: show just CORRUPT files and their folders
+    GtkWidget *treeview_filter_toggles[6];  // Show only: Unchanged, New, Modified, Deleted, Missing, Corrupt (TV_FILTER_*)
+    GtkWidget *treeview_filter_all;      // "All": on when no filter is; clicking it clears them
+    gboolean treeview_filter_updating;   // toggles are being set in code; don't reload per toggle
+    gboolean treeview_has_runs;          // run_logs and meta exist (New/Modified/Deleted need them)
+    gboolean treeview_filtering;         // a Show only filter is on
+    char treeview_filter[1024];          // "AND (...)" condition on the files shown, or ""
     GtkWidget *treeview_corrupt_label;   // count of CORRUPT files on the drive
     GtkWidget *treeview_root_label;
     GtkWidget *treeview_location_label;  // where the drive is stored (Drives tab's Location)
@@ -3175,6 +3180,7 @@ gpointer scanner_thread_func(gpointer data) {
     scanner_ensure_status_column(ctx->db);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, size INTEGER, mtime INTEGER, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
+    sqlite3_exec(ctx->db, "CREATE INDEX IF NOT EXISTS idx_run_logs_run_status ON run_logs(run_id, status);", 0, 0, 0);
 
     scanner_post_current_file(ctx, "Counting files...");
     ctx->total_files = scanner_count_files(ctx->scan_path, ctx->scan_path);
@@ -4727,18 +4733,107 @@ static int treeview_open_db(AppWindow *w, sqlite3 **db) {
     return 1;
 }
 
-// Status column expression; databases from before the status column have none
+// Files the drive's most recent scan logged with a status matching cond (run_logs columns).
+// Uses the run_logs(run_id, status) index; the IN list is built once per statement.
+#define TV_LAST_RUN(cond) \
+    "full_path IN (SELECT full_path FROM run_logs WHERE run_id = (SELECT MAX(id) FROM meta) AND " cond ")"
+#define TV_RUN_NEW      TV_LAST_RUN("status = 'NEW'")
+#define TV_RUN_CHANGED  TV_LAST_RUN("status >= 'CHANGED' AND status < 'CHANGEE'")  // "CHANGED: ..." (index-friendly LIKE)
+#define TV_RUN_MISSING  TV_LAST_RUN("status = 'MISSING'")
+#define TV_RUN_UNCHANGED TV_LAST_RUN("status = 'UNCHANGED'")
+
+// Status column expression: the file's own mark (MISSING, CORRUPT), else its status in the most
+// recent scan (NEW, CHANGED, or MISSING when that scan was read-only). Databases from before the
+// status column, or without any runs, lack one or both sources.
 static const char *treeview_status_expr(AppWindow *w) {
+    if (w->treeview_has_status && w->treeview_has_runs)
+        return "CASE WHEN COALESCE(status, '') <> '' THEN status WHEN " TV_RUN_NEW " THEN 'NEW' WHEN " TV_RUN_CHANGED
+               " THEN 'CHANGED' WHEN " TV_RUN_MISSING " THEN 'MISSING' ELSE '' END";
+    if (w->treeview_has_runs)
+        return "CASE WHEN " TV_RUN_NEW " THEN 'NEW' WHEN " TV_RUN_CHANGED " THEN 'CHANGED' WHEN " TV_RUN_MISSING
+               " THEN 'MISSING' ELSE '' END";
     return w->treeview_has_status ? "COALESCE(status, '')" : "''";
 }
 
-// Extra condition on the files the tree shows: only CORRUPT files, or everything but MISSING
-// ones when Show Missing Files is off. Starts with "AND " (or is empty).
+enum { TV_FILTER_UNCHANGED, TV_FILTER_NEW, TV_FILTER_MODIFIED, TV_FILTER_DELETED, TV_FILTER_MISSING, TV_FILTER_CORRUPT, TV_N_FILTERS };
+G_STATIC_ASSERT(TV_N_FILTERS == G_N_ELEMENTS(((AppWindow *)0)->treeview_filter_toggles));
+
+// Builds w->treeview_filter, the extra condition on the files the tree shows: the files matching
+// any of the Show only filters, or (none on) everything but MISSING files when Show Missing Files
+// is off
+static void treeview_build_filter(AppWindow *w) {
+    const char *conds[TV_N_FILTERS] = {
+        w->treeview_has_runs ? TV_RUN_UNCHANGED : "0",
+        w->treeview_has_runs ? TV_RUN_NEW : "0",
+        w->treeview_has_runs ? TV_RUN_CHANGED : "0",
+        w->treeview_has_runs ? TV_RUN_MISSING : "0",          // Deleted: went missing in the latest scan
+        w->treeview_has_status ? "status = 'MISSING'" : "0",  // Missing: every file marked MISSING
+        w->treeview_has_status ? "status = 'CORRUPT'" : "0",
+    };
+    GString *sql = g_string_new(NULL);
+    for (int i = 0; i < TV_N_FILTERS; i++) {
+        if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_filter_toggles[i]))) continue;
+        g_string_append(sql, sql->len ? " OR " : "AND (");
+        g_string_append(sql, conds[i]);
+    }
+    w->treeview_filtering = sql->len > 0;
+    if (w->treeview_filtering) g_string_append(sql, ")");
+    else if (w->treeview_has_status && !gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check)))
+        g_string_append(sql, "AND status IS NOT 'MISSING'");
+    snprintf(w->treeview_filter, sizeof(w->treeview_filter), "%s", sql->str);
+    g_string_free(sql, TRUE);
+}
+
+void treeview_load(AppWindow *w);
+
+// The Show only buttons (All, New, ...) are mutually exclusive; selecting one reloads the tree
+// Idle callback: if no Show only button is selected (the selected one was switched off), select
+// All, which reloads the tree. data is a reference on the window, so its AppWindow stays valid.
+static gboolean treeview_filter_ensure_selected(gpointer data) {
+    AppWindow *w = g_object_get_data(G_OBJECT(data), "app-window");
+    if (!w || !g_list_find(app_windows, w)) return G_SOURCE_REMOVE;
+    gboolean any = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_filter_all));
+    for (int i = 0; i < TV_N_FILTERS; i++)
+        any |= gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_filter_toggles[i]));
+    if (!any) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w->treeview_filter_all), TRUE);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_treeview_filter_toggled(GtkToggleButton *button, gpointer user_data) {
+    AppWindow *w = user_data;
+    if (w->treeview_filter_updating) return;
+    if (!gtk_toggle_button_get_active(button)) {
+        // The buttons form one group: selecting one first deselects the other, which toggles
+        // too. Once that switch is over, make sure one button is still selected.
+        g_idle_add_full(G_PRIORITY_HIGH_IDLE, treeview_filter_ensure_selected,
+                        g_object_ref(w->window), g_object_unref);
+        return;
+    }
+    treeview_load(w);
+}
+
+// Selects All without reloading the tree. Returns TRUE if another filter was selected.
+static gboolean treeview_reset_filter(AppWindow *w) {
+    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_filter_all))) return FALSE;
+    w->treeview_filter_updating = TRUE;
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w->treeview_filter_all), TRUE);
+    w->treeview_filter_updating = FALSE;
+    return TRUE;
+}
+
 static const char *treeview_filter_sql(AppWindow *w) {
-    if (!w->treeview_has_status) return "";
-    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_corrupt_toggle))) return "AND status = 'CORRUPT'";
-    if (!gtk_check_button_get_active(GTK_CHECK_BUTTON(w->treeview_missing_check))) return "AND status IS NOT 'MISSING'";
-    return "";
+    return w->treeview_filter;
+}
+
+// The New/Modified/Deleted lookups need run_logs indexed by run; older databases lack the
+// index, so add it once (needs write access; without it the lookups are just slower)
+static void treeview_ensure_run_index(const char *db_path) {
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+        sqlite3_busy_timeout(db, 2000);
+        sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_run_logs_run_status ON run_logs(run_id, status)", NULL, NULL, NULL);
+    }
+    if (db) sqlite3_close(db);
 }
 
 static int treeview_status_rank(const char *status) {
@@ -4847,23 +4942,17 @@ static int treeview_populate(AppWindow *w, sqlite3 *db, GtkTreeStore *store, Gtk
     return added;
 }
 
-static gboolean on_treeview_test_expand_row(GtkTreeView *view, GtkTreeIter *iter, GtkTreePath *path, gpointer user_data) {
-    (void)path;
-    AppWindow *w = user_data;
-    GtkTreeModel *model = gtk_tree_view_get_model(view);
+// Loads the contents of the folder at iter if it still has its placeholder
+static void treeview_load_folder(AppWindow *w, sqlite3 *db, GtkTreeModel *model, GtkTreeIter *iter) {
     GtkTreeIter child;
-    if (!gtk_tree_model_iter_children(model, &child, iter)) return FALSE;
+    if (!gtk_tree_model_iter_children(model, &child, iter)) return;
     gboolean placeholder = FALSE;
     gtk_tree_model_get(model, &child, TV_COL_PLACEHOLDER, &placeholder, -1);
-    if (!placeholder) return FALSE;  // already loaded
+    if (!placeholder) return;  // already loaded
 
     char *dir = NULL;
     gtk_tree_model_get(model, iter, TV_COL_PATH, &dir, -1);
-    sqlite3 *db;
-    if (dir && treeview_open_db(w, &db)) {
-        treeview_populate(w, db, GTK_TREE_STORE(model), iter, dir);
-        sqlite3_close(db);
-    }
+    if (dir) treeview_populate(w, db, GTK_TREE_STORE(model), iter, dir);
     g_free(dir);
     // The placeholder is the first child (rows are inserted unsorted after it, then sorted;
     // find it again rather than trusting its position)
@@ -4876,7 +4965,48 @@ static gboolean on_treeview_test_expand_row(GtkTreeView *view, GtkTreeIter *iter
             }
         } while (gtk_tree_model_iter_next(model, &child));
     }
+}
+
+static gboolean on_treeview_test_expand_row(GtkTreeView *view, GtkTreeIter *iter, GtkTreePath *path, gpointer user_data) {
+    (void)path;
+    AppWindow *w = user_data;
+    sqlite3 *db;
+    if (treeview_open_db(w, &db)) {
+        treeview_load_folder(w, db, gtk_tree_view_get_model(view), iter);
+        sqlite3_close(db);
+    }
     return FALSE;  // allow expanding
+}
+
+// Loads every folder below parent (NULL: the whole tree)
+static void treeview_load_all_folders(AppWindow *w, sqlite3 *db, GtkTreeModel *model, GtkTreeIter *parent) {
+    GtkTreeIter it;
+    if (!gtk_tree_model_iter_children(model, &it, parent)) return;
+    do {
+        gboolean is_dir = FALSE;
+        gtk_tree_model_get(model, &it, TV_COL_IS_DIR, &is_dir, -1);
+        if (!is_dir) continue;
+        treeview_load_folder(w, db, model, &it);
+        treeview_load_all_folders(w, db, model, &it);
+    } while (gtk_tree_model_iter_next(model, &it));
+}
+
+// A filtered tree opens all its folders so the matching files are in view, unless there are
+// too many of them to open at once
+#define TREEVIEW_FILTER_EXPAND_LIMIT 5000  // matching files
+
+static void treeview_open_filtered_tree(AppWindow *w, sqlite3 *db) {
+    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->treeview_tree));
+    // Sort once at the end rather than after every folder (treeview_populate skips sorting
+    // while the store is unsorted)
+    GtkTreeSortable *sortable = GTK_TREE_SORTABLE(model);
+    int sort_id;
+    GtkSortType order;
+    gboolean sorted = gtk_tree_sortable_get_sort_column_id(sortable, &sort_id, &order);
+    if (sorted) gtk_tree_sortable_set_sort_column_id(sortable, GTK_TREE_SORTABLE_UNSORTED_SORT_COLUMN_ID, order);
+    treeview_load_all_folders(w, db, model, NULL);
+    if (sorted) gtk_tree_sortable_set_sort_column_id(sortable, sort_id, order);
+    gtk_tree_view_expand_all(GTK_TREE_VIEW(w->treeview_tree));
 }
 
 // Longest common directory of all paths in the database: the common prefix of the smallest and
@@ -4978,8 +5108,8 @@ void treeview_load(AppWindow *w) {
     gtk_widget_set_sensitive(w->treeview_accept_button, FALSE);
     w->treeview_db_path[0] = '\0';
     treeview_update_corrupt_count(w, NULL);
-    gboolean only_corrupt = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_corrupt_toggle));
-    gtk_widget_set_sensitive(w->treeview_missing_check, !only_corrupt);  // the filter shows no MISSING files
+    w->treeview_filtering = FALSE;
+    w->treeview_filter[0] = '\0';
 
     const char *db_name = w->treeview_db_file;
     treeview_show_location(w, db_name);
@@ -4988,6 +5118,9 @@ void treeview_load(AppWindow *w) {
         return;
     }
     snprintf(w->treeview_db_path, sizeof(w->treeview_db_path), "%s/%s", db_dir_path, db_name);
+    gtk_widget_set_cursor_from_name(w->window, "wait");
+    treeview_ensure_run_index(w->treeview_db_path);
+    gtk_widget_set_cursor(w->window, NULL);
 
     sqlite3 *db;
     if (!treeview_open_db(w, &db)) {
@@ -5001,13 +5134,17 @@ void treeview_load(AppWindow *w) {
         return;
     }
     w->treeview_has_status = table_has_column(db, "files", "status");
+    w->treeview_has_runs = table_has_column(db, "run_logs", "full_path") && table_has_column(db, "meta", "id");
+    treeview_build_filter(w);
+    gboolean filtering = w->treeview_filtering;
+    gtk_widget_set_sensitive(w->treeview_missing_check, !filtering);  // the filters decide which files show
     treeview_update_corrupt_count(w, db);
 
     long long n_files, total_size;
     char *root = treeview_find_root(w, db, &n_files, &total_size);
     if (!root) {
         gtk_label_set_text(GTK_LABEL(w->treeview_root_label),
-                           only_corrupt ? "No files on this drive are marked CORRUPT" : "No files in this database");
+                           filtering ? "No files match the selected filters" : "No files in this database");
         sqlite3_close(db);
         return;
     }
@@ -5024,13 +5161,14 @@ void treeview_load(AppWindow *w) {
 
     gtk_widget_set_cursor_from_name(w->window, "wait");
     treeview_populate(w, db, store, NULL, w->treeview_root);
+    if (filtering && n_files <= TREEVIEW_FILTER_EXPAND_LIMIT) treeview_open_filtered_tree(w, db);
     gtk_widget_set_cursor(w->window, NULL);
     sqlite3_close(db);
 
     char count[32], size[32];
     format_size(total_size, size, sizeof(size));
     char *text = g_strdup_printf("%s — %s %sfile%s, %s", w->treeview_root[0] ? w->treeview_root : "/",
-                                 format_count(n_files, count, sizeof(count)), only_corrupt ? "corrupt " : "",
+                                 format_count(n_files, count, sizeof(count)), filtering ? "matching " : "",
                                  n_files == 1 ? "" : "s", size);
     gtk_label_set_text(GTK_LABEL(w->treeview_root_label), text);
     g_free(text);
@@ -5052,6 +5190,7 @@ static void on_treeview_drive_selected(GtkListBox *box, GtkListBoxRow *row, gpoi
     const char *file = g_object_get_data(G_OBJECT(row), "db-file");
     if (!file || strcmp(file, w->treeview_db_file) == 0) return;
     snprintf(w->treeview_db_file, sizeof(w->treeview_db_file), "%s", file);
+    treeview_reset_filter(w);  // a drive opens unfiltered
     treeview_load(w);
 }
 
@@ -5301,9 +5440,8 @@ static void on_treeview_accept_done(GObject *source, GAsyncResult *result, gpoin
             gtk_alert_dialog_set_detail(alert, req->error);
             gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
             g_object_unref(alert);
-        } else if (strcmp(req->db_path, w->treeview_db_path) == 0 &&
-                   gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w->treeview_corrupt_toggle))) {
-            treeview_load(w);  // the file is no longer CORRUPT, so it leaves the filtered tree
+        } else if (strcmp(req->db_path, w->treeview_db_path) == 0 && w->treeview_filtering) {
+            treeview_load(w);  // the file is no longer CORRUPT, so it may leave the filtered tree
         } else if (strcmp(req->db_path, w->treeview_db_path) == 0) {
             sqlite3 *db;
             if (treeview_open_db(w, &db)) {
@@ -5598,11 +5736,6 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
         "Files on this drive marked CORRUPT: checksum changed although size and date did not (possible bit rot)");
     gtk_box_append(GTK_BOX(db_box), w->treeview_corrupt_label);
 
-    w->treeview_corrupt_toggle = gtk_toggle_button_new_with_label("Only Corrupt");
-    gtk_widget_set_tooltip_text(w->treeview_corrupt_toggle, "Show only files marked CORRUPT and the folders that contain them");
-    g_signal_connect_swapped(w->treeview_corrupt_toggle, "toggled", G_CALLBACK(treeview_load), w);
-    gtk_box_append(GTK_BOX(db_box), w->treeview_corrupt_toggle);
-
     GtkWidget *collapse_btn = gtk_button_new_with_label("Collapse All");
     g_signal_connect(collapse_btn, "clicked", G_CALLBACK(on_treeview_collapse_all_clicked), w);
     gtk_box_append(GTK_BOX(db_box), collapse_btn);
@@ -5612,6 +5745,37 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(treeview_refresh_databases), w);
     gtk_box_append(GTK_BOX(db_box), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), db_box);
+
+    // Show only: one of All (every file) or a filter; the buttons are a group, like radio buttons
+    GtkWidget *filter_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *filter_label = gtk_label_new("Show only:");
+    gtk_widget_add_css_class(filter_label, "dim-label");
+    gtk_box_append(GTK_BOX(filter_box), filter_label);
+    GtkWidget *filter_group = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(filter_group, "linked");
+    gtk_widget_add_css_class(filter_group, "ft-filters");
+    w->treeview_filter_all = gtk_toggle_button_new_with_label("All");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(w->treeview_filter_all), TRUE);
+    gtk_widget_set_tooltip_text(w->treeview_filter_all, "Show every file");
+    g_signal_connect(w->treeview_filter_all, "toggled", G_CALLBACK(on_treeview_filter_toggled), w);
+    gtk_box_append(GTK_BOX(filter_group), w->treeview_filter_all);
+    static const struct { const char *label, *tooltip; } filters[TV_N_FILTERS] = {
+        {"Unchanged", "Files the most recent scan found unchanged"},
+        {"New",      "Files the most recent scan found for the first time"},
+        {"Modified", "Files the most recent scan found changed (written: date or size differs)"},
+        {"Deleted",  "Files that went missing in the most recent scan"},
+        {"Missing",  "Every file marked MISSING, whenever it disappeared"},
+        {"Corrupt",  "Files marked CORRUPT: checksum changed although size and date did not (possible bit rot)"},
+    };
+    for (int i = 0; i < TV_N_FILTERS; i++) {
+        w->treeview_filter_toggles[i] = gtk_toggle_button_new_with_label(filters[i].label);
+        gtk_widget_set_tooltip_text(w->treeview_filter_toggles[i], filters[i].tooltip);
+        gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(w->treeview_filter_toggles[i]), GTK_TOGGLE_BUTTON(w->treeview_filter_all));
+        g_signal_connect(w->treeview_filter_toggles[i], "toggled", G_CALLBACK(on_treeview_filter_toggled), w);
+        gtk_box_append(GTK_BOX(filter_group), w->treeview_filter_toggles[i]);
+    }
+    gtk_box_append(GTK_BOX(filter_box), filter_group);
+    gtk_box_append(GTK_BOX(left_box), filter_box);
 
     // Where the drive is kept, then the scanned folder with its totals
     GtkWidget *info_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
@@ -5946,6 +6110,8 @@ static const char *app_css =
     ".ft-drive-list .ft-sidebar-heading { margin-top: 14px; }\n"
     ".ft-sidebar-collapsed list { padding: 0 6px; }\n"
     ".ft-corrupt-count { color: #ff3b30; font-weight: bold; }\n"
+    ".ft-filters button:checked { background: @ft_accent; color: white; border-color: @ft_accent; }\n"
+    ".ft-filters button:checked:hover { background: shade(@ft_accent, 1.08); }\n"
     ".ft-sidebar-collapsed headerbar { min-width: 0; padding: 0; }\n"
     ".ft-sidebar .ft-sidebar-footer { font-size: 11px; color: @ft_secondary; margin: 12px 18px; }\n"
     ".ft-divider { background: @ft_separator; min-width: 1px; min-height: 1px; }\n"
@@ -6014,6 +6180,8 @@ static void on_sidebar_row_selected(GtkListBox *box, GtkListBoxRow *row, gpointe
     gtk_stack_set_visible_child_name(GTK_STACK(w->main_stack), page->id);
     gtk_label_set_text(GTK_LABEL(w->page_title), page->title);
     gtk_label_set_text(GTK_LABEL(w->page_subtitle), page->subtitle);
+    // Entering the TreeView shows its drive unfiltered
+    if (strcmp(page->id, "treeview") == 0 && w->treeview_filter_all && treeview_reset_filter(w)) treeview_load(w);
 }
 
 // Collapsed, the sidebar shows only the section icons (names in their tooltips) and the

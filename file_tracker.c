@@ -626,6 +626,7 @@ static int open_database(Ctx *c) {
     sqlite3_exec(c->db, "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, file_name TEXT, full_path TEXT UNIQUE, size INTEGER, created INTEGER, last_modified INTEGER, owner TEXT, checksum TEXT, keywords TEXT, status TEXT);", 0, 0, 0);
     sqlite3_exec(c->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
     sqlite3_exec(c->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, size INTEGER, mtime INTEGER, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
+    sqlite3_exec(c->db, "CREATE INDEX IF NOT EXISTS idx_run_logs_run_status ON run_logs(run_id, status);", 0, 0, 0);
 
     // Older databases have no files.status column; add it so files can be marked MISSING
     sqlite3_stmt *stmt;

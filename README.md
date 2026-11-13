@@ -103,10 +103,15 @@ The scanned drive is registered in the drives database automatically, and its ca
 Browse one database's file index like Finder's list view, whether or not the drive is mounted.
 
 - **Drives:** the list beside the sidebar shows every drive database, like Finder's Locations. Click a drive to browse it. The tree starts at the root of the drive (`/Volumes/<name>` for an external drive, `/` for the startup disk), shown above the tree with the file count and total size. Above the tree, **Location** shows where the drive is stored, as set on the Drives tab. **Refresh** reloads the drive list and the tree.
-- **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the files below it, e.g. *1 corrupt, 2 missing*.
+- **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the files below it, e.g. *1 corrupt, 2 missing*. A file's Status is its MISSING or CORRUPT mark, otherwise its status in the drive's most recent scan (NEW or CHANGED).
 - **Columns:** Name, Date Modified, Size, Files, Status, all sortable. CORRUPT files are highlighted across the whole row (red tint, warning icon, bold red name), and folders containing one show their name in red. Corrupt, missing and error entries are red, changed orange, new blue. Type to search the names of the visible rows.
 - **Show Missing Files:** untick to hide files the last scan could not find.
-- **Corrupt count / Only Corrupt:** the toolbar shows how many files on the drive are marked CORRUPT (in red when there are any). **Only Corrupt** limits the tree to CORRUPT files and the folders that contain them; the totals above the tree then cover only those files. Accepting a file's current contents removes it from the filtered tree.
+- **Corrupt count:** the toolbar shows how many files on the drive are marked CORRUPT (in red when there are any).
+- **Show only:** **All** (every file) or one filter at a time; the selected button is highlighted in the accent color, and selecting another deselects it. A filter limits the tree to the matching files and the folders that contain them, and the totals above the tree cover only those files. The filtered tree opens all its folders so the matching files are in view (up to 5,000 matching files; beyond that, open folders by hand). Opening a drive, or coming back to the TreeView from another section, selects All.
+  - **Unchanged** / **New** / **Modified:** files the drive's most recent scan logged as UNCHANGED / NEW / CHANGED.
+  - **Deleted:** files that went missing in the most recent scan.
+  - **Missing:** every file marked MISSING, whenever it disappeared.
+  - **Corrupt:** files marked CORRUPT. Accepting a file's current contents removes it from the filtered tree.
 - **Info:** the selected file's size, dates, owner, status and SHA-256, or the folder's totals. For a CORRUPT file the SHA-256 is the original checksum. **Show in Finder** (or double-clicking a file) reveals the item when its drive is mounted.
 - **Accept Current Contents:** for a CORRUPT file on a mounted drive, store the checksum of its current contents and clear the mark (after confirming). See [Bit Rot](#bit-rot).
 - **Collapse All:** close every open folder.
@@ -239,6 +244,7 @@ Apps opened from Finder or the Dock do not see variables set in your shell profi
 
 **run_logs:** the per-file log of each run
 - `id, run_id (→ meta.id), status, full_path, checksum, size, mtime`
+- Indexed on `(run_id, status)` (`idx_run_logs_run_status`), added by the scanners and by the TreeView to older databases
 
 **drives** (in `drives.db`)
 - `drive_id, drive_name (UNIQUE), capacity, space_available, space_used, description, last_updated, last_verified, storage_container`
