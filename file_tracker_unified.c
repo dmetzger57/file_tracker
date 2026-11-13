@@ -5623,10 +5623,10 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
     }
 
     g_signal_connect(nav, "row-selected", G_CALLBACK(on_sidebar_row_selected), w);
-    // Open on the File Locator, wherever it sits in the sorted list
+    // Open on the TreeView, wherever it sits in the sorted list
     int start_page = 0;
     for (size_t i = 0; i < G_N_ELEMENTS(app_pages); i++) {
-        if (strcmp(app_pages[i].id, "locator") == 0) start_page = (int)i;
+        if (strcmp(app_pages[i].id, "treeview") == 0) start_page = (int)i;
     }
     gtk_list_box_select_row(GTK_LIST_BOX(nav), gtk_list_box_get_row_at_index(GTK_LIST_BOX(nav), start_page));
 

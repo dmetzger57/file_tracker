@@ -58,7 +58,7 @@ With *Update Database* on (`-u` on the command line), changed files have their s
 
 ## Desktop Application
 
-The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Compare, Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on File Locator. The window follows the macOS Light/Dark appearance.
+The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Compare, Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on TreeView. The window follows the macOS Light/Dark appearance.
 
 ### Multiple Windows
 

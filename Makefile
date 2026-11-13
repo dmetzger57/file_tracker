@@ -32,7 +32,7 @@ clean:
 	rm -f file_tracker_unified file_tracker *.o
 	rm -rf dist
 
-install:
+install: apps
 	@echo "Installing File Tracker Unified to /Applications..."
 	@if [ -d "File Tracker Unified.app" ]; then \
 		echo "Installing File Tracker Unified.app..."; \

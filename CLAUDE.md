@@ -197,7 +197,7 @@ Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via
 5. Update all tools that query the table
 
 ### GUI Development
-- Window layout (modeled on ../photo-meta): sidebar `GtkListBox` → `GtkStack` of sections, built from the `app_pages[]` table in `app_window_build_layout()`; add a section there, keeping the table sorted alphabetically by title (About stays last). The window opens on File Locator. The window has no title bar: the sidebar's `GtkHeaderBar` holds the native traffic lights and the page header is a `GtkWindowHandle`
+- Window layout (modeled on ../photo-meta): sidebar `GtkListBox` → `GtkStack` of sections, built from the `app_pages[]` table in `app_window_build_layout()`; add a section there, keeping the table sorted alphabetically by title (About stays last). The window opens on TreeView. The window has no title bar: the sidebar's `GtkHeaderBar` holds the native traffic lights and the page header is a `GtkWindowHandle`
 - Look and feel: one app-wide stylesheet (`app_css`) with macOS colors as `@define-color ft_*` tokens, redefined under `@media (prefers-color-scheme: dark)`. Style with these tokens; use the stock classes (`suggested-action`, `destructive-action`, `heading`, `dim-label`) on widgets
 - Progress updates: `g_idle_add()` for thread-safe UI updates
 - Use `GtkColumnView` for tables, `GtkTextView` for logs
