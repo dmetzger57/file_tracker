@@ -58,7 +58,7 @@ With *Update Database* on (`-u` on the command line), changed files have their s
 
 ## Desktop Application
 
-The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Compare, Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on TreeView. The window follows the macOS Light/Dark appearance.
+The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Compare, Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on TreeView. The sidebar button at the left of the page header (or View > Toggle Sidebar, ⌃⌘S) collapses the sidebar to a narrow column of its icons (the window buttons move into the page header); the TreeView's drive list uses the room to show longer drive names. The window follows the macOS Light/Dark appearance.
 
 ### Multiple Windows
 
@@ -90,7 +90,7 @@ The scanned drive is registered in the drives database automatically, and its ca
 
 Browse one database's file index like Finder's list view, whether or not the drive is mounted.
 
-- **Database:** pick a database. The tree starts at the folder that holds all of its files (shown above the tree with the file count and total size). Above the tree, **Location** shows where the drive is stored, as set on the Drives tab. **Refresh** reloads the database list and the tree.
+- **Drives:** the list beside the sidebar shows every drive database, like Finder's Locations. Click a drive to browse it. The tree starts at the root of the drive (`/Volumes/<name>` for an external drive, `/` for the startup disk), shown above the tree with the file count and total size. Above the tree, **Location** shows where the drive is stored, as set on the Drives tab. **Refresh** reloads the drive list and the tree.
 - **Folders** open with their disclosure triangle or a double-click and are loaded when first opened. A folder's Size, Files and Date Modified cover every file below it (Date Modified is the newest file's). Its Status summarizes the last run below it, e.g. *2 changed, 1 missing*.
 - **Columns:** Name, Date Modified, Size, Files, Status, all sortable. Missing and error entries are red, changed orange, new blue. Type to search the names of the visible rows.
 - **Show Missing Files:** untick to hide files the last scan could not find.

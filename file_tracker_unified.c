@@ -49,6 +49,13 @@ typedef struct {
     GtkWidget *page_title;        // header above the page: name of the selected sidebar item
     GtkWidget *page_subtitle;
     GtkWidget *db_folder_label;   // right end of the page header: the database folder in use
+    GtkWidget *sidebar;           // the tab list; collapses to icons (View > Toggle Sidebar)
+    GtkWidget *sidebar_heading;
+    GtkWidget *sidebar_bar;       // holds the traffic lights while the sidebar is expanded
+    GtkWidget *header_controls;   // traffic lights in the page header while it is collapsed
+    GtkWidget *sidebar_footer;
+    GtkWidget *nav;
+    gboolean sidebar_collapsed;
     int number;                   // 1 for the first window opened, 2 for the next, ...
     gboolean close_prompt_open;   // "A scan is running" prompt is showing
     gboolean close_after_scan;    // close was confirmed while a scan was running
@@ -140,7 +147,8 @@ typedef struct {
     GtkWidget *dupe_status_label;
 
     // TreeView
-    GtkWidget *treeview_db_combo;
+    GtkWidget *treeview_drive_list;      // Finder-style list of drive databases
+    GtkWidget *treeview_drives_box;      // column holding it; widens while the sidebar is collapsed
     GtkWidget *treeview_missing_check;
     GtkWidget *treeview_root_label;
     GtkWidget *treeview_location_label;  // where the drive is stored (Drives tab's Location)
@@ -148,6 +156,7 @@ typedef struct {
     GtkWidget *treeview_details_text;
     GtkWidget *treeview_reveal_button;
     char treeview_db_path[MAX_PATH];  // "" when no database is loaded
+    char treeview_db_file[256];       // selected drive database file name ("Name.db"), "" for none
     char treeview_root[MAX_PATH];     // common folder of every file in the database ("" for "/")
     gboolean treeview_has_status;     // files.status exists (older databases lack it)
 } AppWindow;
@@ -4857,15 +4866,13 @@ void treeview_load(AppWindow *w) {
     gtk_widget_set_sensitive(w->treeview_reveal_button, FALSE);
     w->treeview_db_path[0] = '\0';
 
-    char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->treeview_db_combo));
+    const char *db_name = w->treeview_db_file;
     treeview_show_location(w, db_name);
-    if (!db_name || !db_name[0]) {
-        gtk_label_set_text(GTK_LABEL(w->treeview_root_label), "No database selected");
-        g_free(db_name);
+    if (!db_name[0]) {
+        gtk_label_set_text(GTK_LABEL(w->treeview_root_label), "No drive selected");
         return;
     }
     snprintf(w->treeview_db_path, sizeof(w->treeview_db_path), "%s/%s", db_dir_path, db_name);
-    g_free(db_name);
 
     sqlite3 *db;
     if (!treeview_open_db(w, &db)) {
@@ -4887,6 +4894,14 @@ void treeview_load(AppWindow *w) {
         sqlite3_close(db);
         return;
     }
+    // Start at the root of the drive, like Finder: /Volumes/<name> for an external
+    // volume, "/" for the startup disk, whatever folder the scans covered
+    if (g_str_has_prefix(root, "/Volumes/")) {
+        char *end = strchr(root + strlen("/Volumes/"), '/');
+        if (end) *end = '\0';
+    } else {
+        root[0] = '\0';
+    }
     snprintf(w->treeview_root, sizeof(w->treeview_root), "%s", root);
     g_free(root);
 
@@ -4903,11 +4918,59 @@ void treeview_load(AppWindow *w) {
     g_free(text);
 }
 
+// The drive column takes over the room the tab list gives up when it collapses
+#define TREEVIEW_DRIVES_WIDTH 190
+#define SIDEBAR_WIDTH 210
+#define SIDEBAR_COLLAPSED_WIDTH 44  // one icon plus row and list padding (.ft-sidebar-collapsed)
+void treeview_set_drives_width(AppWindow *w) {
+    int width = TREEVIEW_DRIVES_WIDTH + (w->sidebar_collapsed ? SIDEBAR_WIDTH - SIDEBAR_COLLAPSED_WIDTH : 0);
+    gtk_widget_set_size_request(w->treeview_drives_box, width, -1);
+}
+
+static void on_treeview_drive_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
+    (void)box;
+    AppWindow *w = user_data;
+    if (!row) return;  // the list is being refilled
+    const char *file = g_object_get_data(G_OBJECT(row), "db-file");
+    if (!file || strcmp(file, w->treeview_db_file) == 0) return;
+    snprintf(w->treeview_db_file, sizeof(w->treeview_db_file), "%s", file);
+    treeview_load(w);
+}
+
+// Refills the drive list, keeping the selected drive when it still exists (otherwise the
+// first drive), and reloads the tree
 void treeview_refresh_databases(AppWindow *w) {
     GPtrArray *files = list_database_files();
-    if (!files) return;
-    refill_database_combo(w->treeview_db_combo, files, NULL, FALSE);
-    g_ptr_array_unref(files);
+    GtkListBox *list = GTK_LIST_BOX(w->treeview_drive_list);
+    gtk_list_box_remove_all(list);
+
+    GtkListBoxRow *select = NULL;
+    for (guint i = 0; files && i < files->len; i++) {
+        const char *file = g_ptr_array_index(files, i);
+        char *name = g_strndup(file, strlen(file) - 3);  // drop ".db"
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(box), gtk_image_new_from_icon_name("drive-harddisk-symbolic"));
+        GtkWidget *label = gtk_label_new(name);
+        gtk_label_set_xalign(GTK_LABEL(label), 0);
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_MIDDLE);
+        gtk_label_set_max_width_chars(GTK_LABEL(label), 1);  // the column's width decides, not the name
+        gtk_widget_set_hexpand(label, TRUE);
+        gtk_widget_set_tooltip_text(label, name);
+        gtk_box_append(GTK_BOX(box), label);
+        g_free(name);
+
+        GtkWidget *row = gtk_list_box_row_new();
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+        g_object_set_data_full(G_OBJECT(row), "db-file", g_strdup(file), g_free);
+        gtk_list_box_append(list, row);
+        if (!select || strcmp(file, w->treeview_db_file) == 0) select = GTK_LIST_BOX_ROW(row);
+    }
+    if (files) g_ptr_array_unref(files);
+
+    // Clear first so selecting the row (same drive or not) always reloads the tree
+    w->treeview_db_file[0] = '\0';
+    if (select) gtk_list_box_select_row(list, select);
+    else treeview_load(w);
 }
 
 static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer user_data) {
@@ -5105,11 +5168,40 @@ static gint treeview_sort_int64(GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter
 }
 
 GtkWidget *create_treeview_tab(AppWindow *w) {
+    // Far left, beside the app's sidebar: the drives, like Finder's Locations
+    GtkWidget *drives = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(drives, "ft-sidebar");
+    gtk_widget_add_css_class(drives, "ft-drive-list");
+    w->treeview_drives_box = drives;
+    treeview_set_drives_width(w);
+    GtkWidget *drives_heading = gtk_label_new("Drives");
+    gtk_widget_add_css_class(drives_heading, "ft-sidebar-heading");
+    gtk_label_set_xalign(GTK_LABEL(drives_heading), 0);
+    gtk_box_append(GTK_BOX(drives), drives_heading);
+
+    w->treeview_drive_list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(w->treeview_drive_list), GTK_SELECTION_BROWSE);
+    g_signal_connect(w->treeview_drive_list, "row-selected", G_CALLBACK(on_treeview_drive_selected), w);
+    GtkWidget *drives_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(drives_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(drives_scroll), w->treeview_drive_list);
+    gtk_widget_set_vexpand(drives_scroll, TRUE);
+    gtk_box_append(GTK_BOX(drives), drives_scroll);
+
+    GtkWidget *drives_divider = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(drives_divider, "ft-divider");
+
+    GtkWidget *tab = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_append(GTK_BOX(tab), drives);
+    gtk_box_append(GTK_BOX(tab), drives_divider);
+
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_hexpand(paned, TRUE);
+    gtk_box_append(GTK_BOX(tab), paned);
     gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
     gtk_paned_set_resize_end_child(GTK_PANED(paned), FALSE);
 
-    // Left: database picker and the folder tree
+    // Middle: options and the folder tree
     GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_set_size_request(left_box, 700, -1);
     gtk_widget_set_margin_start(left_box, 8);
@@ -5118,15 +5210,11 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     gtk_widget_set_margin_bottom(left_box, 8);
 
     GtkWidget *db_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_append(GTK_BOX(db_box), gtk_label_new("Database:"));
-    w->treeview_db_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(w->treeview_db_combo, TRUE);
-    g_signal_connect_swapped(w->treeview_db_combo, "changed", G_CALLBACK(treeview_load), w);
-    gtk_box_append(GTK_BOX(db_box), w->treeview_db_combo);
 
     w->treeview_missing_check = gtk_check_button_new_with_label("Show Missing Files");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(w->treeview_missing_check), TRUE);
     gtk_widget_set_tooltip_text(w->treeview_missing_check, "Include files the last scan could not find");
+    gtk_widget_set_hexpand(w->treeview_missing_check, TRUE);
     g_signal_connect_swapped(w->treeview_missing_check, "toggled", G_CALLBACK(treeview_load), w);
     gtk_box_append(GTK_BOX(db_box), w->treeview_missing_check);
 
@@ -5135,7 +5223,7 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     gtk_box_append(GTK_BOX(db_box), collapse_btn);
 
     GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
-    gtk_widget_set_tooltip_text(refresh_btn, "Reload the database list and the selected database");
+    gtk_widget_set_tooltip_text(refresh_btn, "Reload the drive list and the selected drive");
     g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(treeview_refresh_databases), w);
     gtk_box_append(GTK_BOX(db_box), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), db_box);
@@ -5251,7 +5339,7 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
     gtk_box_append(GTK_BOX(right_box), w->treeview_reveal_button);
 
     gtk_paned_set_end_child(GTK_PANED(paned), right_box);
-    return paned;
+    return tab;
 }
 
 // ============================================================================
@@ -5459,6 +5547,9 @@ static const char *app_css =
     ".ft-sidebar list row:selected { background: @ft_sidebar_sel; color: @ft_label; }\n"
     ".ft-sidebar list row image { color: @ft_accent; }\n"
     ".ft-sidebar .ft-sidebar-heading { font-size: 11px; font-weight: 600; color: @ft_secondary; margin: 0 18px 4px 18px; }\n"
+    ".ft-drive-list .ft-sidebar-heading { margin-top: 14px; }\n"
+    ".ft-sidebar-collapsed list { padding: 0 6px; }\n"
+    ".ft-sidebar-collapsed headerbar { min-width: 0; padding: 0; }\n"
     ".ft-sidebar .ft-sidebar-footer { font-size: 11px; color: @ft_secondary; margin: 12px 18px; }\n"
     ".ft-divider { background: @ft_separator; min-width: 1px; min-height: 1px; }\n"
 
@@ -5528,6 +5619,33 @@ static void on_sidebar_row_selected(GtkListBox *box, GtkListBoxRow *row, gpointe
     gtk_label_set_text(GTK_LABEL(w->page_subtitle), page->subtitle);
 }
 
+// Collapsed, the sidebar shows only the section icons (names in their tooltips) and the
+// TreeView's drive list gets the room
+static void app_window_set_sidebar_collapsed(AppWindow *w, gboolean collapsed) {
+    w->sidebar_collapsed = collapsed;
+    gtk_widget_set_size_request(w->sidebar, collapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH, -1);
+    if (collapsed) gtk_widget_add_css_class(w->sidebar, "ft-sidebar-collapsed");
+    else gtk_widget_remove_css_class(w->sidebar, "ft-sidebar-collapsed");
+    gtk_header_bar_set_show_title_buttons(GTK_HEADER_BAR(w->sidebar_bar), !collapsed);
+    gtk_widget_set_visible(w->header_controls, collapsed);
+    gtk_widget_set_visible(w->sidebar_heading, !collapsed);
+    gtk_widget_set_visible(w->sidebar_footer, !collapsed);
+    for (int i = 0;; i++) {
+        GtkListBoxRow *row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(w->nav), i);
+        if (!row) break;
+        GtkWidget *box = gtk_list_box_row_get_child(row);
+        gtk_widget_set_halign(box, collapsed ? GTK_ALIGN_CENTER : GTK_ALIGN_FILL);
+        gtk_widget_set_visible(gtk_widget_get_last_child(box), !collapsed);  // the name
+    }
+    treeview_set_drives_width(w);
+}
+
+static void on_toggle_sidebar_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter;
+    AppWindow *w = user_data;
+    app_window_set_sidebar_collapsed(w, !w->sidebar_collapsed);
+}
+
 static GtkWidget *app_window_build_layout(AppWindow *w) {
     gtk_widget_add_css_class(w->window, "ft-main");
     // The window's real title bar is replaced by the sidebar and page header below;
@@ -5541,7 +5659,8 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
     // Sidebar
     GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(sidebar, "ft-sidebar");
-    gtk_widget_set_size_request(sidebar, 210, -1);
+    gtk_widget_set_size_request(sidebar, SIDEBAR_WIDTH, -1);
+    w->sidebar = sidebar;
 
     GtkWidget *sidebar_bar = gtk_header_bar_new();
     gtk_header_bar_set_use_native_controls(GTK_HEADER_BAR(sidebar_bar), TRUE);
@@ -5549,13 +5668,16 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
     gtk_header_bar_set_decoration_layout(GTK_HEADER_BAR(sidebar_bar), "close,minimize,maximize:");
     gtk_header_bar_set_title_widget(GTK_HEADER_BAR(sidebar_bar), gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
     gtk_box_append(GTK_BOX(sidebar), sidebar_bar);
+    w->sidebar_bar = sidebar_bar;
 
     GtkWidget *heading = gtk_label_new("File Tracker");
     gtk_widget_add_css_class(heading, "ft-sidebar-heading");
     gtk_label_set_xalign(GTK_LABEL(heading), 0);
     gtk_box_append(GTK_BOX(sidebar), heading);
+    w->sidebar_heading = heading;
 
     GtkWidget *nav = gtk_list_box_new();
+    w->nav = nav;
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(nav), GTK_SELECTION_BROWSE);
     gtk_widget_set_vexpand(nav, TRUE);
     gtk_box_append(GTK_BOX(sidebar), nav);
@@ -5564,6 +5686,7 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
     gtk_widget_add_css_class(footer, "ft-sidebar-footer");
     gtk_label_set_xalign(GTK_LABEL(footer), 0);
     gtk_box_append(GTK_BOX(sidebar), footer);
+    w->sidebar_footer = footer;
 
     GtkWidget *divider = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(divider, "ft-divider");
@@ -5574,6 +5697,19 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
 
     GtkWidget *header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_widget_add_css_class(header_box, "ft-page-header");
+    // The collapsed sidebar is too narrow for the traffic lights, so they move here
+    w->header_controls = gtk_window_controls_new(GTK_PACK_START);
+    gtk_window_controls_set_use_native_controls(GTK_WINDOW_CONTROLS(w->header_controls), TRUE);
+    gtk_window_controls_set_decoration_layout(GTK_WINDOW_CONTROLS(w->header_controls), "close,minimize,maximize:");
+    gtk_widget_set_valign(w->header_controls, GTK_ALIGN_CENTER);
+    gtk_widget_set_visible(w->header_controls, FALSE);
+    gtk_box_append(GTK_BOX(header_box), w->header_controls);
+    GtkWidget *sidebar_toggle = gtk_button_new_from_icon_name("sidebar-show-symbolic");
+    gtk_widget_add_css_class(sidebar_toggle, "flat");
+    gtk_widget_set_valign(sidebar_toggle, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(sidebar_toggle, "Collapse or expand the sidebar (⌃⌘S)");
+    gtk_actionable_set_action_name(GTK_ACTIONABLE(sidebar_toggle), "win.toggle-sidebar");
+    gtk_box_append(GTK_BOX(header_box), sidebar_toggle);
     w->page_title = gtk_label_new("");
     gtk_widget_add_css_class(w->page_title, "ft-page-title");
     w->page_subtitle = gtk_label_new("");
@@ -5615,6 +5751,7 @@ static GtkWidget *app_window_build_layout(AppWindow *w) {
         gtk_stack_add_named(GTK_STACK(w->main_stack), page->build(w), page->id);
 
         GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_widget_set_tooltip_text(row, page->title);
         gtk_box_append(GTK_BOX(row), gtk_image_new_from_icon_name(page->icon));
         GtkWidget *name = gtk_label_new(page->title);
         gtk_label_set_xalign(GTK_LABEL(name), 0);
@@ -5649,6 +5786,10 @@ static void app_window_new(GtkApplication *app) {
     gtk_window_set_default_size(GTK_WINDOW(w->window), 1420, 800);
 
     gtk_window_set_child(GTK_WINDOW(w->window), app_window_build_layout(w));
+    const GActionEntry win_actions[] = {
+        { .name = "toggle-sidebar", .activate = on_toggle_sidebar_action },
+    };
+    g_action_map_add_action_entries(G_ACTION_MAP(w->window), win_actions, G_N_ELEMENTS(win_actions), w);
 
     // Initialize scanner volumes list and logs databases
     scanner_refresh_volumes(w);
@@ -5693,6 +5834,7 @@ void startup(GtkApplication *app, gpointer user_data) {
     gtk_application_set_accels_for_action(app, "app.new-window", (const char *[]){ "<Primary>n", NULL });
     gtk_application_set_accels_for_action(app, "window.close", (const char *[]){ "<Primary>w", NULL });
     gtk_application_set_accels_for_action(app, "app.quit", (const char *[]){ "<Primary>q", NULL });
+    gtk_application_set_accels_for_action(app, "win.toggle-sidebar", (const char *[]){ "<Control><Primary>s", NULL });
 
     // File menu (in the macOS menu bar; inside the window elsewhere)
     GMenu *file_menu = g_menu_new();
@@ -5700,6 +5842,10 @@ void startup(GtkApplication *app, gpointer user_data) {
     g_menu_append(file_menu, "Close Window", "window.close");
     GMenu *menubar = g_menu_new();
     g_menu_append_submenu(menubar, "File", G_MENU_MODEL(file_menu));
+    GMenu *view_menu = g_menu_new();
+    g_menu_append(view_menu, "Toggle Sidebar", "win.toggle-sidebar");
+    g_menu_append_submenu(menubar, "View", G_MENU_MODEL(view_menu));
+    g_object_unref(view_menu);
     gtk_application_set_menubar(app, G_MENU_MODEL(menubar));
     g_object_unref(file_menu);
     g_object_unref(menubar);

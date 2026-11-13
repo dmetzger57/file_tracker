@@ -76,7 +76,7 @@ gcc -Wall -Wextra -O2 \
   - Drives tab: Drive metadata tracking with auto-capacity detection
   - Locator tab: Search by filename across databases, checksum comparison
   - Compare tab: Compare two scan runs to see changes
-  - TreeView tab: Finder-like list view of a database's `files` table; folders load lazily on `test-expand-row` (placeholder child) with one range query (`full_path >= 'dir/' AND full_path < 'dir0'`) grouped by the next path component
+  - TreeView tab: Finder-like list view of a database's `files` table; drives are picked from a Finder-style list (`w->treeview_drive_list`) beside the app sidebar and the tree starts at the drive root (`/Volumes/<name>`, or `/`); folders load lazily on `test-expand-row` (placeholder child) with one range query (`full_path >= 'dir/' AND full_path < 'dir0'`) grouped by the next path component
   - Multiple windows in one process (File > New Window ⌘N, Dock menu). All per-window widgets and state live in `AppWindow` (`w->...`); open windows are in `app_windows`. Callbacks receive the `AppWindow *` as `user_data` (or via a request struct such as `DriveDeleteRequest`/`RenameDialog`; `ScannerContext.win` for scanner idle callbacks)
 - `macos_dock_menu.m`: Adds `applicationDockMenu:` to GTK's NSApp delegate at runtime (macOS only; linked with `-framework Cocoa`)
 - `macos_appearance.m`: Reports the macOS Light/Dark appearance and its changes; `app_apply_color_scheme()` mirrors it into GTK
@@ -197,7 +197,7 @@ Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via
 5. Update all tools that query the table
 
 ### GUI Development
-- Window layout (modeled on ../photo-meta): sidebar `GtkListBox` → `GtkStack` of sections, built from the `app_pages[]` table in `app_window_build_layout()`; add a section there, keeping the table sorted alphabetically by title (About stays last). The window opens on TreeView. The window has no title bar: the sidebar's `GtkHeaderBar` holds the native traffic lights and the page header is a `GtkWindowHandle`
+- Window layout (modeled on ../photo-meta): sidebar `GtkListBox` → `GtkStack` of sections, built from the `app_pages[]` table in `app_window_build_layout()`; add a section there, keeping the table sorted alphabetically by title (About stays last). The window opens on TreeView. `win.toggle-sidebar` (⌃⌘S, View menu, page-header button) collapses the sidebar to icons (44px; the native traffic lights move from `w->sidebar_bar` to `w->header_controls` in the page header) via `app_window_set_sidebar_collapsed()`; `treeview_set_drives_width()` gives the freed width to the TreeView drive list. The window has no title bar: the sidebar's `GtkHeaderBar` holds the native traffic lights and the page header is a `GtkWindowHandle`
 - Look and feel: one app-wide stylesheet (`app_css`) with macOS colors as `@define-color ft_*` tokens, redefined under `@media (prefers-color-scheme: dark)`. Style with these tokens; use the stock classes (`suggested-action`, `destructive-action`, `heading`, `dim-label`) on widgets
 - Progress updates: `g_idle_add()` for thread-safe UI updates
 - Use `GtkColumnView` for tables, `GtkTextView` for logs
