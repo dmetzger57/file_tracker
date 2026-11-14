@@ -124,6 +124,7 @@ Browse one database's file index like Finder's list view, whether or not the dri
   - **Missing:** every file marked MISSING, whenever it disappeared.
   - **Corrupt:** files marked CORRUPT. Accepting a file's current contents removes it from the filtered tree.
 - **Info:** the selected file's size, dates, owner, status and SHA-256, or the folder's totals. For a CORRUPT file the SHA-256 is the original checksum. **Show in Finder** (or double-clicking a file) reveals the item when its drive is mounted.
+- **Copy Name / Copy Path / Copy Checksum:** right-click (or Control-click) a file or folder to copy its name, full path or SHA-256 to the clipboard. This works whether or not the drive is mounted. The checksum is the one shown in Info: for current files the stored checksum (a CORRUPT file's original), for a run the checksum that run logged. Copy Checksum is unavailable for folders and files without a checksum.
 - **Accept Current Contents:** for a CORRUPT file on a mounted drive, store the checksum of its current contents and clear the mark (after confirming). See [Bit Rot](#bit-rot).
 - **Collapse All:** close every open folder.
 
@@ -145,6 +146,7 @@ The detailed, per-file log of any run.
 - **Export** (on the Logs line, with Export Contents and Open in TreeView): save the files matching the current filter as CSV (`Status,Full Path`).
 - **Export Contents:** save the files matching the current filter with their details, in the same format as the Drives tab's Export Contents, sorted by path: `Full Path,File Name,Size (bytes),Last Modified,Created,Owner,Checksum,Status`. Size, Last Modified and Checksum are the values the run recorded; for Missing, Ignored and Error entries (which the run logs without them) they are the file's last recorded values, or empty. Created and Owner are the file's current database values.
 - **Colors:** log lines are colored like the TreeView: CORRUPT and ERROR red, CHANGED and MISSING yellow, NEW green.
+- **Copy Name / Copy Path / Copy Checksum:** right-click (or Control-click) a log line to copy that file's name, full path or the checksum this run logged for it (unavailable when it logged none, e.g. missing files or quick scans of unchanged files). The usual Copy and Select All are in the same menu.
 - **Open in TreeView:** browse the selected run's files in the TreeView, as that run found them (see TreeView › Run).
 - **Delete Selected Run:** remove a run and its log.
 

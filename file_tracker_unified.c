@@ -87,6 +87,9 @@ typedef struct {
     GtkWidget *logs_run_info_text;
     GtkWidget *logs_note_text;
     GtkWidget *logs_text;
+    char logs_menu_path[MAX_PATH];       // full path on the log line last right-clicked ("" if none)
+    char logs_menu_checksum[HASH_SIZE];  // that file's checksum in the run's log ("" if it has none)
+    GSimpleActionGroup *logs_menu_actions;  // its Copy Name / Path / Checksum actions (owned by logs_text)
     GtkWidget *logs_filter_new_check;
     GtkWidget *logs_filter_changed_check;
     GtkWidget *logs_filter_missing_check;
@@ -153,6 +156,11 @@ typedef struct {
     sqlite3_int64 treeview_run_id;    // 0: the files table (current files); else the run whose log is shown
     gboolean treeview_run_updating;   // the Run list is being refilled: don't reload per change
     char treeview_source[2048];       // what the tree's queries read: "files", or the run's log as a subquery
+    GtkWidget *treeview_context_menu; // right-click menu: Copy Name / Copy Path (child of the tree's box)
+    char treeview_menu_name[1024];    // the right-clicked row's name and full path, for the menu's actions
+    char treeview_menu_path[MAX_PATH];
+    char treeview_menu_checksum[HASH_SIZE];  // its SHA-256 ("" for folders or files without one)
+    GSimpleActionGroup *treeview_menu_actions;  // the menu's actions (owned by the tree's box)
 } AppWindow;
 
 // Open main windows, oldest first
@@ -2790,6 +2798,124 @@ void on_logs_delete_confirmed(GObject *source, GAsyncResult *result, gpointer us
     g_object_unref(alert);
 }
 
+// ---- Log list right-click: Copy Name / Copy Path, added to the text view's own menu ----
+// Log lines are "[STATUS] /full/path" (see logs_load_logs()); the status never contains ']'.
+
+// Enables or disables one of a menu's actions
+static void menu_action_set_enabled(GSimpleActionGroup *group, const char *name, gboolean enabled) {
+    GAction *action = group ? g_action_map_lookup_action(G_ACTION_MAP(group), name) : NULL;
+    if (action) g_simple_action_set_enabled(G_SIMPLE_ACTION(action), enabled);
+}
+
+static void logs_set_copy_enabled(AppWindow *w, gboolean enabled) {
+    menu_action_set_enabled(w->logs_menu_actions, "copy-name", enabled);
+    menu_action_set_enabled(w->logs_menu_actions, "copy-path", enabled);
+    menu_action_set_enabled(w->logs_menu_actions, "copy-checksum", enabled && w->logs_menu_checksum[0]);
+}
+
+// The checksum the selected run logged for path (missing files and quick scans log none)
+static void logs_lookup_checksum(AppWindow *w, const char *path) {
+    w->logs_menu_checksum[0] = '\0';
+    sqlite3 *db = NULL;
+    if (w->logs_selected_run_id &&
+        sqlite3_open_v2(w->logs_current_db_path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, "SELECT checksum FROM run_logs WHERE run_id = ? AND full_path = ? "
+                                   "AND checksum IS NOT NULL AND checksum != '' LIMIT 1", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, w->logs_selected_run_id);
+            sqlite3_bind_text(stmt, 2, path, -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                g_strlcpy(w->logs_menu_checksum, (const char *)sqlite3_column_text(stmt, 0), sizeof(w->logs_menu_checksum));
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+    if (db) sqlite3_close(db);
+}
+
+// Remembers the path on the log line at (x, y) in logs_text's coordinates, and enables the copy items
+static void logs_pick_line(AppWindow *w, double x, double y) {
+    w->logs_menu_path[0] = '\0';
+    w->logs_menu_checksum[0] = '\0';
+    GtkTextView *view = GTK_TEXT_VIEW(w->logs_text);
+    int bx, by;
+    gtk_text_view_window_to_buffer_coords(view, GTK_TEXT_WINDOW_WIDGET, (int)x, (int)y, &bx, &by);
+    GtkTextIter start, end;
+    if (gtk_text_view_get_iter_at_location(view, &start, bx, by)) {
+        gtk_text_iter_set_line_offset(&start, 0);
+        end = start;
+        if (!gtk_text_iter_ends_line(&end)) gtk_text_iter_forward_to_line_end(&end);
+        char *line = gtk_text_iter_get_text(&start, &end);
+        const char *close = line[0] == '[' ? strstr(line, "] ") : NULL;
+        if (close && close[2] == '/') g_strlcpy(w->logs_menu_path, close + 2, sizeof(w->logs_menu_path));
+        g_free(line);
+    }
+    if (w->logs_menu_path[0]) logs_lookup_checksum(w, w->logs_menu_path);
+    logs_set_copy_enabled(w, w->logs_menu_path[0] != '\0');
+}
+
+// Runs before the text view opens its menu (right-click, or Control-click on macOS)
+static void on_logs_text_pressed(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
+    (void)n_press;
+    guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+    GdkModifierType mods = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
+    if (button != GDK_BUTTON_SECONDARY && !(button == GDK_BUTTON_PRIMARY && (mods & GDK_CONTROL_MASK))) return;
+    logs_pick_line(user_data, x, y);
+}
+
+static void on_logs_copy_name(GSimpleAction *action, GVariant *param, gpointer user_data) {
+    (void)action; (void)param;
+    AppWindow *w = user_data;
+    if (!w->logs_menu_path[0]) return;
+    char *name = g_path_get_basename(w->logs_menu_path);
+    gdk_clipboard_set_text(gtk_widget_get_clipboard(w->window), name);
+    g_free(name);
+}
+
+static void on_logs_copy_path(GSimpleAction *action, GVariant *param, gpointer user_data) {
+    (void)action; (void)param;
+    AppWindow *w = user_data;
+    if (w->logs_menu_path[0]) gdk_clipboard_set_text(gtk_widget_get_clipboard(w->window), w->logs_menu_path);
+}
+
+static void on_logs_copy_checksum(GSimpleAction *action, GVariant *param, gpointer user_data) {
+    (void)action; (void)param;
+    AppWindow *w = user_data;
+    if (w->logs_menu_checksum[0]) gdk_clipboard_set_text(gtk_widget_get_clipboard(w->window), w->logs_menu_checksum);
+}
+
+static void logs_add_context_menu(AppWindow *w) {
+    static const GActionEntry entries[] = {
+        { .name = "copy-name", .activate = on_logs_copy_name },
+        { .name = "copy-path", .activate = on_logs_copy_path },
+        { .name = "copy-checksum", .activate = on_logs_copy_checksum },
+    };
+    GSimpleActionGroup *group = g_simple_action_group_new();
+    g_action_map_add_action_entries(G_ACTION_MAP(group), entries, G_N_ELEMENTS(entries), w);
+    // The text view's menu is its own child, so it finds actions inserted on the text view
+    gtk_widget_insert_action_group(w->logs_text, "logs", G_ACTION_GROUP(group));
+    g_object_unref(group);
+    w->logs_menu_actions = group;
+    logs_set_copy_enabled(w, FALSE);
+
+    GMenu *menu = g_menu_new();
+    GMenu *section = g_menu_new();
+    g_menu_append(section, "Copy Name", "logs.copy-name");
+    g_menu_append(section, "Copy Path", "logs.copy-path");
+    g_menu_append(section, "Copy Checksum", "logs.copy-checksum");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
+    g_object_unref(section);
+    gtk_text_view_set_extra_menu(GTK_TEXT_VIEW(w->logs_text), G_MENU_MODEL(menu));
+    g_object_unref(menu);
+
+    // Capture phase: sees the click before the text view opens its menu; doesn't claim it
+    GtkGesture *click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
+    g_signal_connect(click, "pressed", G_CALLBACK(on_logs_text_pressed), w);
+    gtk_widget_add_controller(w->logs_text, GTK_EVENT_CONTROLLER(click));
+}
+
 GtkWidget *create_logs_tab(AppWindow *w) {
     // Far left, beside the app's sidebar: the drives, as in the TreeView
     w->logs_drives_box = drive_column_new(&w->logs_drive_list, G_CALLBACK(on_logs_drive_selected), w);
@@ -2966,6 +3092,7 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     gtk_text_view_set_editable(GTK_TEXT_VIEW(w->logs_text), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(w->logs_text), TRUE);
     gtk_widget_set_vexpand(w->logs_text, TRUE);
+    logs_add_context_menu(w);
     GtkWidget *logs_scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(logs_scroll), w->logs_text);
     gtk_widget_set_vexpand(logs_scroll, TRUE);
@@ -5481,6 +5608,123 @@ static void on_treeview_reveal_clicked(GtkButton *button, gpointer user_data) {
     g_free(path);
 }
 
+// ---- Right-click (or Control-click) menu on a row: copy its name or full path to the clipboard ----
+static void treeview_copy_text(AppWindow *w, const char *text) {
+    if (text && text[0]) gdk_clipboard_set_text(gtk_widget_get_clipboard(w->window), text);
+}
+
+static void on_treeview_copy_name(GSimpleAction *action, GVariant *param, gpointer user_data) {
+    (void)action; (void)param;
+    AppWindow *w = user_data;
+    treeview_copy_text(w, w->treeview_menu_name);
+}
+
+static void on_treeview_copy_path(GSimpleAction *action, GVariant *param, gpointer user_data) {
+    (void)action; (void)param;
+    AppWindow *w = user_data;
+    treeview_copy_text(w, w->treeview_menu_path);
+}
+
+static void on_treeview_copy_checksum(GSimpleAction *action, GVariant *param, gpointer user_data) {
+    (void)action; (void)param;
+    AppWindow *w = user_data;
+    treeview_copy_text(w, w->treeview_menu_checksum);
+}
+
+// The file's checksum as the tree shows it: the current files (a CORRUPT file's original checksum)
+// or the selected run's log. id is files.id; 0 (a folder) has none.
+static void treeview_lookup_checksum(AppWindow *w, gint64 id) {
+    w->treeview_menu_checksum[0] = '\0';
+    sqlite3 *db;
+    if (id <= 0 || !treeview_open_db(w, &db)) return;
+    char *sql = g_strdup_printf("SELECT checksum FROM %s WHERE id = ?", treeview_source(w));
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, id);
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_text(stmt, 0)) {
+            g_strlcpy(w->treeview_menu_checksum, (const char *)sqlite3_column_text(stmt, 0), sizeof(w->treeview_menu_checksum));
+        }
+        sqlite3_finalize(stmt);
+    }
+    g_free(sql);
+    sqlite3_close(db);
+}
+
+static void on_treeview_right_click(GtkGestureClick *gesture, int n_press, double x, double y, gpointer user_data) {
+    (void)n_press;
+    AppWindow *w = user_data;
+    // macOS: Control-click is a right-click
+    guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+    GdkModifierType mods = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
+    if (button != GDK_BUTTON_SECONDARY && !(button == GDK_BUTTON_PRIMARY && (mods & GDK_CONTROL_MASK))) return;
+
+    GtkTreeView *view = GTK_TREE_VIEW(w->treeview_tree);
+    int bx, by;
+    gtk_tree_view_convert_widget_to_bin_window_coords(view, (int)x, (int)y, &bx, &by);
+    GtkTreePath *tree_path = NULL;
+    if (!gtk_tree_view_get_path_at_pos(view, bx, by, &tree_path, NULL, NULL, NULL)) return;
+
+    GtkTreeModel *model = gtk_tree_view_get_model(view);
+    GtkTreeIter iter;
+    char *name = NULL, *path = NULL;
+    gboolean placeholder = FALSE;
+    gint64 id = 0;
+    if (gtk_tree_model_get_iter(model, &iter, tree_path)) {
+        gtk_tree_model_get(model, &iter, TV_COL_NAME, &name, TV_COL_PATH, &path, TV_COL_PLACEHOLDER, &placeholder,
+                           TV_COL_ID, &id, -1);
+    }
+    if (!placeholder && path && path[0]) {
+        gtk_tree_selection_select_path(gtk_tree_view_get_selection(view), tree_path);  // the menu acts on this row
+        g_strlcpy(w->treeview_menu_name, name ? name : "", sizeof(w->treeview_menu_name));
+        g_strlcpy(w->treeview_menu_path, path, sizeof(w->treeview_menu_path));
+        treeview_lookup_checksum(w, id);
+        menu_action_set_enabled(w->treeview_menu_actions, "copy-checksum", w->treeview_menu_checksum[0] != '\0');
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        // The menu's parent is the box around the tree, so point at the click in its coordinates
+        graphene_point_t in_tree = GRAPHENE_POINT_INIT((float)x, (float)y), in_box;
+        if (!gtk_widget_compute_point(w->treeview_tree, gtk_widget_get_parent(w->treeview_context_menu),
+                                      &in_tree, &in_box)) in_box = in_tree;
+        GdkRectangle at = { (int)in_box.x, (int)in_box.y, 1, 1 };
+        gtk_popover_set_pointing_to(GTK_POPOVER(w->treeview_context_menu), &at);
+        gtk_popover_popup(GTK_POPOVER(w->treeview_context_menu));
+    }
+    g_free(name);
+    g_free(path);
+    gtk_tree_path_free(tree_path);
+}
+
+// parent: a plain container around the tree (GtkTreeView itself can't hold extra children: GTK
+// warns about its CSS nodes). The container unparents the menu when it is disposed.
+static void treeview_add_context_menu(AppWindow *w, GtkWidget *parent) {
+    static const GActionEntry entries[] = {
+        { .name = "copy-name", .activate = on_treeview_copy_name },
+        { .name = "copy-path", .activate = on_treeview_copy_path },
+        { .name = "copy-checksum", .activate = on_treeview_copy_checksum },
+    };
+    GSimpleActionGroup *group = g_simple_action_group_new();
+    g_action_map_add_action_entries(G_ACTION_MAP(group), entries, G_N_ELEMENTS(entries), w);
+    // On the menu's parent: the menu finds its actions by walking up from itself, not via the tree
+    gtk_widget_insert_action_group(parent, "tv", G_ACTION_GROUP(group));
+    g_object_unref(group);
+    w->treeview_menu_actions = group;
+
+    GMenu *menu = g_menu_new();
+    g_menu_append(menu, "Copy Name", "tv.copy-name");
+    g_menu_append(menu, "Copy Path", "tv.copy-path");
+    g_menu_append(menu, "Copy Checksum", "tv.copy-checksum");
+    w->treeview_context_menu = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+    g_object_unref(menu);
+    gtk_popover_set_has_arrow(GTK_POPOVER(w->treeview_context_menu), FALSE);
+    gtk_widget_set_halign(w->treeview_context_menu, GTK_ALIGN_START);
+    gtk_widget_set_parent(w->treeview_context_menu, parent);
+
+    GtkGesture *click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);  // any button: right, or Control + left
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
+    g_signal_connect(click, "pressed", G_CALLBACK(on_treeview_right_click), w);
+    gtk_widget_add_controller(w->treeview_tree, GTK_EVENT_CONTROLLER(click));
+}
+
 // Double-click: open or close a folder, reveal a file in Finder
 static void on_treeview_row_activated(GtkTreeView *view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
     (void)column;
@@ -5802,6 +6046,7 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
 
     g_signal_connect(w->treeview_tree, "test-expand-row", G_CALLBACK(on_treeview_test_expand_row), w);
     g_signal_connect(w->treeview_tree, "row-activated", G_CALLBACK(on_treeview_row_activated), w);
+    treeview_add_context_menu(w, left_box);
     GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(w->treeview_tree));
     g_signal_connect(selection, "changed", G_CALLBACK(on_treeview_selection_changed), w);
 
