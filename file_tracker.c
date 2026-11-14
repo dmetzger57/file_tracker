@@ -37,7 +37,7 @@ typedef struct {
     sqlite3_int64 run_id;
     long total, processed;
     long unchanged, changed, new_files, missing, ignored, errors;
-    long corrupt;  // checksum differs, size and date do not (bit rot); counted in meta.num_changed
+    long corrupt;  // checksum or size differs, date does not (bit rot); counted in meta.num_changed
 } Ctx;
 
 static char *ignore_list[MAX_IGNORES];
@@ -391,11 +391,12 @@ static void process_file(Ctx *c, const char *filepath, const char *filename, con
     int size_diff = db_size != sb->st_size;
     int time_diff = db_mtime != sb->st_mtime;
 
-    if (sum_diff && !size_diff && !time_diff) {
-        // The contents changed but nothing wrote to the file: bit rot or silent corruption.
-        // Keep the stored (original) checksum so the damage stays detectable, and mark the file.
+    if (!time_diff && (sum_diff || size_diff)) {
+        // The contents changed but the modification time did not, so nothing wrote to the file
+        // the normal way: bit rot or silent corruption. Keep the stored (original) size and
+        // checksum so the damage stays detectable, and mark the file.
         c->corrupt++;
-        log_entry(c, "CORRUPT", filepath, checksum, sb->st_size, sb->st_mtime);
+        log_entry(c, "CORRUPT", filepath, have_checksum ? checksum : db_checksum, sb->st_size, sb->st_mtime);
         if (c->update_mode && !was_corrupt) set_status(c, filepath, "CORRUPT");
         return;
     }
@@ -755,9 +756,9 @@ int main(int argc, char *argv[]) {
     printf("Total: %ld - Processed: %ld - New: %ld - Changed: %ld - Corrupt: %ld - Unchanged: %ld - Missing: %ld - Errors: %ld\n",
            ctx.total, ctx.processed, ctx.new_files, ctx.changed, ctx.corrupt, ctx.unchanged, ctx.missing, ctx.errors);
     if (ctx.corrupt > 0) {
-        printf("WARNING: %ld file(s) no longer match the stored checksum although size and date are unchanged "
+        printf("WARNING: %ld file(s) changed (checksum or size) although the modification date is unchanged "
                "(possible bit rot).%s\n", ctx.corrupt,
-               ctx.update_mode ? " They are marked CORRUPT and their original checksums are kept."
+               ctx.update_mode ? " They are marked CORRUPT and their original checksums and sizes are kept."
                                : " Run with -u to mark them CORRUPT in the database.");
     }
 

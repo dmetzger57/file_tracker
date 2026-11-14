@@ -14,8 +14,7 @@ File tracking suite using SHA-256 checksums to detect bit-rot and silent corrupt
 3. **Logs** - Browse detailed per-file change logs
 4. **Drives** - Track external drive information
 5. **Locator** - Search for files across databases
-6. **Compare** - Compare two scan runs
-7. **TreeView** - Finder-like browser of one database's file index
+6. **TreeView** - Finder-like browser of one database's file index
 
 ### Data Flow
 ```
@@ -75,7 +74,6 @@ gcc -Wall -Wextra -O2 \
   - Logs tab: Per-run detailed log viewer with filters (one at a time: a check-button radio group); drives are picked from the same Finder-style drive column as the TreeView (`w->logs_drive_list`). The column is shared code: `drive_column_new()`, `drive_list_fill()` (rows carry `db-file`), `drive_columns_set_width()`
   - Drives tab: Drive metadata tracking with auto-capacity detection
   - Locator tab: Search by filename across databases, checksum comparison
-  - Compare tab: Compare two scan runs to see changes
   - TreeView tab: Finder-like list view of a database's `files` table; drives are picked from a Finder-style list (`w->treeview_drive_list`) beside the app sidebar and the tree starts at the drive root (`/Volumes/<name>`, or `/`); folders load lazily on `test-expand-row` (placeholder child) with one range query (`full_path >= 'dir/' AND full_path < 'dir0'`) grouped by the next path component. Row status = `files.status` (MISSING/CORRUPT) else the latest run's NEW/CHANGED (`treeview_status_expr()`, `TV_LAST_RUN` subqueries); the Show only toggles (All/Unchanged/New/Modified/Deleted/Missing/Corrupt) are one `gtk_toggle_button_set_group` group (one selected; drive open or tab entry resets to All via `treeview_reset_filter()`) and become `w->treeview_filter` (`treeview_build_filter()`), applied to every TreeView files query. The Run combo (`w->treeview_run_combo`, `treeview_fill_runs()`) shows Current files (`treeview_run_id` 0) or a scan run: TreeView queries read `treeview_source(w)`, either `files` or that run's `run_logs` rows as a subquery with the files table's columns and the run's status (`treeview_build_source()`; read-only, Accept disabled). `treeview_ensure_run_index()` also adds `idx_run_logs_run_path` (run_id, full_path) for it. Logs › Open in TreeView calls `treeview_show_run()`
   - Multiple windows in one process (File > New Window ⌘N, Dock menu). All per-window widgets and state live in `AppWindow` (`w->...`); open windows are in `app_windows`. Callbacks receive the `AppWindow *` as `user_data` (or via a request struct such as `DriveDeleteRequest`/`RenameDialog`; `ScannerContext.win` for scanner idle callbacks)
 - `macos_dock_menu.m`: Adds `applicationDockMenu:` to GTK's NSApp delegate at runtime (macOS only; linked with `-framework Cocoa`)
@@ -109,6 +107,7 @@ gcc -Wall -Wextra -O2 \
 - Always check `sqlite3_open()` return value
 - Use prepared statements for queries: `sqlite3_prepare_v2()`
 - Transaction pattern: `BEGIN TRANSACTION` → operations → `COMMIT`
+- Scanner: the whole scan runs in one transaction committed about once a second (`scanner_begin()`/`scanner_maybe_commit()`, called from `scanner_log_message()` under `ctx->lock`); finishing steps (missing check, run log save) report progress to Results via `scanner_step_begin/progress/done()`. Run log paths/statuses live in `ctx->log_strings` (`GStringChunk`), not fixed `MAX_PATH` buffers
 - Close statements with `sqlite3_finalize()`
 
 ### Error Handling
@@ -123,8 +122,8 @@ gcc -Wall -Wextra -O2 \
 
 ### Status Values
 - **UNCHANGED:** File matches database record
-- **CHANGED:** Size or mtime differs (file was written)
-- **CORRUPT:** Checksum differs but size and mtime do not (bit rot). Update scans set `files.status='CORRUPT'` and keep the original checksum; cleared when a checksum scan matches again, the file is rewritten, or TreeView "Accept Current Contents". Both scanners (`file_tracker_unified.c` and `file_tracker.c`) implement this
+- **CHANGED:** mtime differs (file was written; size and checksum may differ too)
+- **CORRUPT:** mtime unchanged but size differs (any scan) or checksum differs (checksum scan): bit rot / change outside a normal write. Update scans set `files.status='CORRUPT'` and keep the original checksum and size; cleared when a checksum scan matches again, the file is rewritten, or TreeView "Accept Current Contents". Both scanners (`file_tracker_unified.c` and `file_tracker.c`) implement this
 - **NEW:** File found on disk, not in database
 - **MISSING:** In database, not found on disk
 - **IGNORED:** Matched `.rsync-ignore` pattern
@@ -155,7 +154,7 @@ gcc -Wall -Wextra -O2 \
 4. Add note: "Monthly deep scan"
 5. Start scan
 
-### Investigation (Summary/Logs/Compare Tabs)
+### Investigation (Summary/Logs/TreeView Tabs)
 **What changed?**
 1. Go to Summary tab
 2. Select database
@@ -166,12 +165,6 @@ gcc -Wall -Wextra -O2 \
 2. Select database and run
 3. Filter by status (CHANGED, NEW, MISSING, etc.)
 
-**Compare two runs:**
-1. Go to Compare tab
-2. Select database
-3. Choose two runs to compare
-4. View differences
-
 **Find duplicates:**
 1. Go to Locator tab
 2. Search for filename
@@ -180,7 +173,7 @@ gcc -Wall -Wextra -O2 \
 ## GUI Application Bundle
 
 Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via `make install`:
-- **File Tracker Unified.app:** All-in-one sidebar interface with Scanner, Summary, Logs, Drives, Locator, and Compare tabs
+- **File Tracker Unified.app:** All-in-one sidebar interface with Scanner, Summary, Logs, Drives, Locator, and TreeView tabs
 
 ## Development Notes
 
@@ -216,7 +209,6 @@ Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via
 - [ ] Logs tab: Filtering by status
 - [ ] Drives tab: Add, verify, edit operations
 - [ ] Locator tab: Search across databases
-- [ ] Compare tab: Run comparison and filtering
 - [ ] TreeView tab: Expand folders, folder totals/status, Show Missing Files, Show in Finder
 - [ ] GUI responsiveness during long scans
 - [ ] Database schema compatibility across all tabs
@@ -287,7 +279,6 @@ Created by `create_app_bundles.sh` (`make apps`), installed to /Applications via
 - **Summary tab:** View run history and file lists
 - **Logs tab:** Browse detailed change logs with filters
 - **Locator tab:** Search for files across databases
-- **Compare tab:** Compare two runs to see differences
 
 ### Drive Management
 - **Drives tab:** Add, verify, edit drive metadata

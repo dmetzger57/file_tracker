@@ -43,7 +43,7 @@ The `.app` bundle launches without a terminal window. Double-clicking the raw `f
 
 1. **Baseline:** scan a drive with *Update Database* enabled. Every file is recorded in `~/db/FileTracker/<drive name>.db`.
 2. **Verify:** scan the same drive again later. Each file is compared with its stored record and given a status. The scan is saved as a *run*, with totals and a per-file log.
-3. **Investigate:** use the Summary, Logs and Compare tabs to see what changed and when.
+3. **Investigate:** use the Summary, Logs and TreeView tabs to see what changed and when.
 
 A quick verification compares only size and modification time. A deep verification recomputes every SHA-256 checksum, which also catches corruption that leaves the modification time unchanged.
 
@@ -52,8 +52,8 @@ A quick verification compares only size and modification time. A deep verificati
 | Status | Meaning |
 |--------|---------|
 | **UNCHANGED** | File matches its database record |
-| **CHANGED** | Size or modification time differs (the file was written). The log says what differs (e.g. `CHANGED: CheckSum, Date-Time`) |
-| **CORRUPT** | A checksum scan found contents that no longer match the stored checksum although size and modification time are unchanged: possible bit rot. See [Bit Rot](#bit-rot) |
+| **CHANGED** | Modification time differs (the file was written; size and checksum may differ too). The log says what differs (e.g. `CHANGED: CheckSum, Date-Time`) |
+| **CORRUPT** | The file's size changed, or a checksum scan found contents that no longer match the stored checksum, although its modification time is unchanged: possible bit rot. See [Bit Rot](#bit-rot) |
 | **NEW** | On disk but not in the database, or back on disk after being marked MISSING |
 | **MISSING** | In the database but no longer on disk |
 | **IGNORED** | Matches a pattern in `~/.rsync-ignore` (see [Ignore Patterns](#ignore-patterns)) |
@@ -63,18 +63,18 @@ With *Update Database* on (`-u` on the command line), changed files have their s
 
 ### Bit Rot
 
-When a checksum scan finds a file whose contents changed while its size and modification time did not, nothing wrote to the file, so the change is treated as corruption rather than an edit:
+When a file's contents changed but its modification time did not, nothing wrote to the file the normal way (a normal write updates the time), so the change is treated as corruption rather than an edit. A different size is caught by every scan; a same-size change needs a checksum scan:
 
 - The file is logged as **CORRUPT** (counted in the run's Changed total, which the scan results list separately as Corrupt) and the scan ends with a warning.
-- With *Update Database* on, the file is marked `status = 'CORRUPT'` in the `files` table and its **original checksum is kept**, so the damage stays visible. Later scans keep reporting it as CORRUPT, including quick (mtime-only) scans, which cannot re-check it.
-- The mark clears by itself when the file is fixed: a checksum scan finds the contents match the original checksum again (restored from a backup with its original date), or the file is rewritten (its date or size changes, which stores the new checksum).
+- With *Update Database* on, the file is marked `status = 'CORRUPT'` in the `files` table and its **original checksum and size are kept**, so the damage stays visible. Later scans keep reporting it as CORRUPT, including quick (mtime-only) scans, which cannot re-check it.
+- The mark clears by itself when the file is fixed: a checksum scan finds the contents match the original checksum again (restored from a backup with its original date), or the file is rewritten (its date changes, which stores the new size and checksum).
 - If the current contents are known to be good, select the file in the TreeView and click **Accept Current Contents**: its checksum is recomputed and stored, and the mark is cleared.
 
 A read-only checksum scan reports CORRUPT files in its log but does not mark them.
 
 ## Desktop Application
 
-The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Compare, Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on TreeView. The sidebar button at the left of the page header (or View > Toggle Sidebar, ⌃⌘S) collapses the sidebar to a narrow column of its icons (the window buttons move into the page header); the TreeView's drive list uses the room to show longer drive names. The window follows the macOS Light/Dark appearance.
+The window has a sidebar on the left; pick a section there and it opens on the right. The sections ("tabs" below) are listed alphabetically, with About last: Drives, DupeFinder, File Locator, File Scanner, Logs, Summary, TreeView, About. The window opens on TreeView. The sidebar button at the left of the page header (or View > Toggle Sidebar, ⌃⌘S) collapses the sidebar to a narrow column of its icons (the window buttons move into the page header); the TreeView's drive list uses the room to show longer drive names. The window follows the macOS Light/Dark appearance.
 
 ![TreeView with the sidebar collapsed to its icons, giving the drive list room for longer names](docs/screenshots/treeview-collapsed-sidebar.png)
 
@@ -129,7 +129,9 @@ Browse one database's file index like Finder's list view, whether or not the dri
 
 ### Summary
 
-Pick a database to see its 10 most recent runs, with counts of unchanged, changed, new, missing, ignored and error files. Select a run to see its totals. **Refresh** reloads the database list and runs.
+Pick a database to see its 10 most recent runs, with counts of unchanged, changed, new, missing, ignored and error files. Select a run to see its totals, with corrupt files listed apart from changed ones. **Refresh** reloads the database list and runs.
+
+- **Colors:** as on the Logs tab. A run with corrupt or error entries is red, a run with changed or missing files (and none corrupt or in error) is gold. In the totals, non-zero Corrupt and Errors counts are red, Changed and Missing yellow, New green.
 
 ### Logs
 
@@ -137,7 +139,7 @@ The detailed, per-file log of any run.
 
 ![Logs: a database's scan runs, the selected run's totals, and its per-file log with status filters](docs/screenshots/logs.png)
 
-- **Drives / Scan Runs:** pick a drive in the Drives column (as in the TreeView), then a run. **Refresh** reloads the drive list and the selected drive's runs.
+- **Drives / Scan Runs:** pick a drive in the Drives column (as in the TreeView), then a run. **Refresh** reloads the drive list and the selected drive's runs. A drive's name is red when its latest run has corrupt or error entries. Runs with corrupt or error entries are listed in red, runs with changed or missing files in gold.
 - **Filters:** All, New, Changed, Corrupt, Missing, Unchanged, Ignored, Errors. One is selected at a time: choosing a filter clears the previous one. The run details show the Corrupt count when there is one.
 - **Note / Save Note:** select a run, edit its note in the Note box, and click **Save Note** (beside the Note label) — this works for any run, not just the latest. The note is also shown in Run Information, which updates when you save.
 - **Export** (on the Logs line, with Export Contents and Open in TreeView): save the files matching the current filter as CSV (`Status,Full Path`).
@@ -145,16 +147,6 @@ The detailed, per-file log of any run.
 - **Colors:** log lines are colored like the TreeView: CORRUPT and ERROR red, CHANGED and MISSING yellow, NEW green.
 - **Open in TreeView:** browse the selected run's files in the TreeView, as that run found them (see TreeView › Run).
 - **Delete Selected Run:** remove a run and its log.
-
-### Compare
-
-Compares two runs, from the same database or from two different ones (for example a drive and its backup).
-
-![Compare: two runs picked from two drives, with View By options](docs/screenshots/compare.png)
-
-- Pick a drive and run for Run 1 and Run 2, then click **Compare Runs**. **Refresh** reloads the drive and run lists and keeps the selected runs.
-- **View By:** Only in Run 1, Only in Run 2, Different Checksum, All Diffs, Missing in Run 1, Missing in Run 2, All Files in Run 1, All Files in Run 2, Date/Time Difference, Size Difference.
-- **Export to CSV:** `File Path,Status Run 1,Status Run 2,Checksum Run 1,Checksum Run 2`.
 
 ### Drives
 
@@ -225,7 +217,7 @@ file_tracker -s /Volumes/Archive -u -v                  # deep verification (SHA
 | `-u` | Update file details in the database; without it the run is still recorded but the `files` table is not changed |
 | `-n note` | Note stored with the run |
 
-Output is one line: `Total: X - Processed: X - New: X - Changed: X - Corrupt: X - Unchanged: X - Missing: X - Errors: X`, followed by a warning when files are CORRUPT. Status rules, missing-file handling, ignore patterns and drive registration are the same as in the File Scanner tab. The run then shows up in the application's Summary, Logs and Compare tabs after a **Refresh**.
+Output is one line: `Total: X - Processed: X - New: X - Changed: X - Corrupt: X - Unchanged: X - Missing: X - Errors: X`, followed by a warning when files are CORRUPT. Status rules, missing-file handling, ignore patterns and drive registration are the same as in the File Scanner tab. The run then shows up in the application's Summary, Logs and TreeView tabs after a **Refresh**.
 
 ## Ignore Patterns
 
@@ -313,8 +305,8 @@ After rebuilding, run `make apps` again so the bundle picks up the new binary. I
 
 - **Initial baseline:** select the drive in File Scanner, enable *Update Database* and *Verify Checksums*, add a note such as "Initial baseline", and start the scan.
 - **Weekly quick check:** same, with *Verify Checksums* turned off.
-- **Monthly deep check:** same, with *Verify Checksums* on. Only this catches content changes that leave the size and modification time untouched.
-- **Investigate:** Summary for the totals, Logs filtered to Changed / Missing / Errors for the files, Compare to diff two runs or a drive against its backup.
+- **Monthly deep check:** same, with *Verify Checksums* on. Only this catches content changes that leave the size and modification time untouched (a quick check still catches a size change with an unchanged time).
+- **Investigate:** Summary for the totals, Logs filtered to Changed / Missing / Errors for the files, TreeView to browse a drive as of any run.
 
 ## Performance
 

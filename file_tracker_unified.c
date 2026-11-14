@@ -114,26 +114,6 @@ typedef struct {
     GtkWidget *scanner_results_text;
     ScannerContext *current_scanner_scan;  // NULL when no scan is running
 
-    // Compare
-    GtkWidget *compare_run1_drive_combo;
-    GtkWidget *compare_run1_run_combo;
-    GtkWidget *compare_run2_drive_combo;
-    GtkWidget *compare_run2_run_combo;
-    GtkWidget *compare_results_tree;
-    GtkWidget *compare_filter_only_run1;
-    GtkWidget *compare_filter_only_run2;
-    GtkWidget *compare_filter_different;
-    GtkWidget *compare_filter_missing_run1;
-    GtkWidget *compare_filter_missing_run2;
-    GtkWidget *compare_filter_all_run1;
-    GtkWidget *compare_filter_all_run2;
-    GtkWidget *compare_filter_all_diffs;
-    GtkWidget *compare_filter_mtime_diff;
-    GtkWidget *compare_filter_size_diff;
-    char compare_run1_db_path[MAX_PATH];
-    char compare_run2_db_path[MAX_PATH];
-    sqlite3_int64 compare_run1_id;
-    sqlite3_int64 compare_run2_id;
 
     // DupeFinder
     GtkWidget *dupe_mode_combo;       // DUPE_MODE_*
@@ -542,7 +522,6 @@ void app_window_show_page(AppWindow *w, const char *id);
 void locator_refresh_databases(AppWindow *w);
 void dupe_refresh_databases(AppWindow *w);
 void summary_refresh_databases(AppWindow *w);
-void compare_refresh_databases(AppWindow *w);
 void refresh_database_lists_everywhere(void);
 static void app_window_detach(AppWindow *w);
 
@@ -1680,6 +1659,14 @@ GtkWidget *create_drives_tab(AppWindow *w) {
 // ============================================================================
 
 
+// Summary run list columns: 0-7 shown (ID, Date, counts), then the run's CORRUPT count and its color level
+enum { SUM_COL_CORRUPT = 8, SUM_COL_LEVEL, SUM_N_COLS };
+enum { SUM_LEVEL_NONE, SUM_LEVEL_WARNING, SUM_LEVEL_PROBLEM };  // as the Logs tab's Scan Runs list
+static void treeview_ensure_run_index(const char *db_path);
+static const char *ft_yellow(void);
+static const char *ft_green(void);
+#define FT_RED  "#ff3b30"  // status colors: see ft_status_color()
+
 void summary_load_runs(AppWindow *w) {
     char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(w->summary_db_combo));
     if (!db_name || strlen(db_name) == 0) return;
@@ -1690,6 +1677,7 @@ void summary_load_runs(AppWindow *w) {
     GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->summary_tree)));
     gtk_list_store_clear(store);
 
+    treeview_ensure_run_index(db_path);  // for the per-run CORRUPT count
     sqlite3 *db;
     if (sqlite3_open(db_path, &db) != SQLITE_OK) {
         g_free(db_name);
@@ -1700,9 +1688,22 @@ void summary_load_runs(AppWindow *w) {
                      "num_unchanged, num_changed, num_new, num_missing, num_ignored, num_errors "
                      "FROM meta ORDER BY id DESC LIMIT 10;";
     sqlite3_stmt *stmt;
+    // Older databases may lack run_logs: no corrupt counts then
+    sqlite3_stmt *corrupt_stmt = NULL;
+    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM run_logs WHERE run_id = ? AND status = 'CORRUPT'", -1, &corrupt_stmt, NULL);
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int corrupt = 0;
+            if (corrupt_stmt) {
+                sqlite3_bind_int64(corrupt_stmt, 1, sqlite3_column_int64(stmt, 0));
+                if (sqlite3_step(corrupt_stmt) == SQLITE_ROW) corrupt = sqlite3_column_int(corrupt_stmt, 0);
+                sqlite3_reset(corrupt_stmt);
+            }
+            // Red: corrupt or error entries. Gold: changed (written) or missing files
+            int changed = sqlite3_column_int(stmt, 3) - corrupt;  // meta's num_changed includes CORRUPT
+            int level = corrupt > 0 || sqlite3_column_int(stmt, 7) > 0 ? SUM_LEVEL_PROBLEM
+                      : changed > 0 || sqlite3_column_int(stmt, 5) > 0 ? SUM_LEVEL_WARNING : SUM_LEVEL_NONE;
             GtkTreeIter iter;
             gtk_list_store_append(store, &iter);
             gtk_list_store_set(store, &iter,
@@ -1714,10 +1715,12 @@ void summary_load_runs(AppWindow *w) {
                               5, sqlite3_column_int(stmt, 5),
                               6, sqlite3_column_int(stmt, 6),
                               7, sqlite3_column_int(stmt, 7),
+                              SUM_COL_CORRUPT, corrupt, SUM_COL_LEVEL, level,
                               -1);
         }
         sqlite3_finalize(stmt);
     }
+    sqlite3_finalize(corrupt_stmt);
     sqlite3_close(db);
     g_free(db_name);
 }
@@ -1730,27 +1733,55 @@ void on_summary_run_selected(GtkTreeSelection *selection, gpointer user_data) {
 
     if (!gtk_tree_selection_get_selected(selection, &model, &iter)) return;
 
-    int run_id, unch, chg, new, miss, ign, err;
+    int run_id, unch, chg, new, miss, ign, err, corrupt;
     char *date;
     gtk_tree_model_get(model, &iter, 0, &run_id, 1, &date, 2, &unch, 3, &chg,
-                      4, &new, 5, &miss, 6, &ign, 7, &err, -1);
-
-    char details[1024];
-    snprintf(details, sizeof(details),
-             "Run #%d - %s\n\n"
-             "Unchanged: %'d\n"
-             "Changed:   %'d\n"
-             "New:       %'d\n"
-             "Missing:   %'d\n"
-             "Ignored:   %'d\n"
-             "Errors:    %'d\n\n"
-             "Total:     %'d",
-             run_id, date, unch, chg, new, miss, ign, err,
-             unch + chg + new + miss + err);
+                      4, &new, 5, &miss, 6, &ign, 7, &err, SUM_COL_CORRUPT, &corrupt, -1);
+    chg -= corrupt;  // meta's num_changed includes CORRUPT; list them apart, as the scan results do
 
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->summary_details_text));
-    gtk_text_buffer_set_text(buffer, details, -1);
+    GtkTextTagTable *tags = gtk_text_buffer_get_tag_table(buffer);
+    GtkTextTag *red = gtk_text_tag_table_lookup(tags, "red");
+    if (!red) red = gtk_text_buffer_create_tag(buffer, "red", "foreground", FT_RED, NULL);
+    GtkTextTag *yellow = gtk_text_tag_table_lookup(tags, "yellow");
+    if (!yellow) yellow = gtk_text_buffer_create_tag(buffer, "yellow", NULL);
+    g_object_set(yellow, "foreground", ft_yellow(), NULL);  // follows the current appearance
+    GtkTextTag *green = gtk_text_tag_table_lookup(tags, "green");
+    if (!green) green = gtk_text_buffer_create_tag(buffer, "green", NULL);
+    g_object_set(green, "foreground", ft_green(), NULL);
+
+    char line[256];
+    gtk_text_buffer_set_text(buffer, "", -1);
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(buffer, &end);
+    snprintf(line, sizeof(line), "Run #%d - %s\n\n", run_id, date ? date : "");
+    gtk_text_buffer_insert(buffer, &end, line, -1);
+    // Same colors as the Logs tab: corrupt and error red, changed and missing yellow, new green;
+    // a count is colored only when it is not zero
+    struct { const char *name; int count; GtkTextTag *tag; } rows[] = {
+        {"Unchanged", unch, NULL}, {"Changed", chg, yellow}, {"Corrupt", corrupt, red}, {"New", new, green},
+        {"Missing", miss, yellow}, {"Ignored", ign, NULL}, {"Errors", err, red},
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(rows); i++) {
+        char label[16];
+        snprintf(label, sizeof(label), "%s:", rows[i].name);
+        snprintf(line, sizeof(line), "%-10s %'d\n", label, rows[i].count);
+        if (rows[i].tag && rows[i].count > 0) gtk_text_buffer_insert_with_tags(buffer, &end, line, -1, rows[i].tag, NULL);
+        else gtk_text_buffer_insert(buffer, &end, line, -1);
+    }
+    snprintf(line, sizeof(line), "\nTotal:     %'d", unch + chg + corrupt + new + miss + err);
+    gtk_text_buffer_insert(buffer, &end, line, -1);
     g_free(date);
+}
+
+// Colors a run's row like the Logs tab's Scan Runs list (read at draw time, so it follows Light/Dark)
+static void summary_row_color(GtkTreeViewColumn *column, GtkCellRenderer *renderer, GtkTreeModel *model,
+                              GtkTreeIter *iter, gpointer data) {
+    (void)column; (void)data;
+    int level = SUM_LEVEL_NONE;
+    gtk_tree_model_get(model, iter, SUM_COL_LEVEL, &level, -1);
+    const char *color = level == SUM_LEVEL_PROBLEM ? FT_RED : level == SUM_LEVEL_WARNING ? ft_yellow() : NULL;
+    g_object_set(renderer, "foreground", color, "foreground-set", color != NULL, NULL);
 }
 
 GtkWidget *create_summary_tab(AppWindow *w) {
@@ -1778,8 +1809,9 @@ GtkWidget *create_summary_tab(AppWindow *w) {
     gtk_box_append(GTK_BOX(db_box), refresh_btn);
     gtk_box_append(GTK_BOX(left_box), db_box);
 
-    GtkListStore *store = gtk_list_store_new(8, G_TYPE_INT, G_TYPE_STRING, G_TYPE_INT,
-                                             G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT);
+    GtkListStore *store = gtk_list_store_new(SUM_N_COLS, G_TYPE_INT, G_TYPE_STRING, G_TYPE_INT,
+                                             G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT,
+                                             G_TYPE_INT, G_TYPE_INT);
     w->summary_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
 
@@ -1787,6 +1819,7 @@ GtkWidget *create_summary_tab(AppWindow *w) {
     for (int i = 0; i < 8; i++) {
         GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
         GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
+        gtk_tree_view_column_set_cell_data_func(column, renderer, summary_row_color, NULL, NULL);
         gtk_tree_view_column_set_resizable(column, TRUE);
         gtk_tree_view_append_column(GTK_TREE_VIEW(w->summary_tree), column);
     }
@@ -1901,7 +1934,6 @@ static void refill_database_combo(GtkWidget *combo, GPtrArray *files, const char
 // ---- Status colors, shared by the TreeView and the Logs list ----
 // Red: CORRUPT and ERROR. Yellow: CHANGED (written, not corrupt) and MISSING. Green: NEW.
 static int app_dark_mode;  // the system appearance, kept by app_apply_color_scheme()
-#define FT_RED  "#ff3b30"
 static const char *ft_yellow(void) {
     return app_dark_mode ? "#ffd60a" : "#9a7300";  // system yellow is unreadable on white; use a dark gold there
 }
@@ -1953,6 +1985,52 @@ static GtkWidget *drive_column_new(GtkWidget **list_out, GCallback on_selected, 
     return drives;
 }
 
+static void treeview_ensure_run_index(const char *db_path);
+
+// TRUE when the drive's latest scan run logged CORRUPT or ERROR entries
+static gboolean drive_last_run_has_problem(const char *db_file) {
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s/%s", db_dir_path, db_file);
+    treeview_ensure_run_index(path);  // keeps the run_logs lookup fast
+    sqlite3 *db = NULL;
+    gboolean problem = FALSE;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM run_logs WHERE run_id = (SELECT MAX(id) FROM meta) "
+                                   "AND status IN ('CORRUPT', 'ERROR') LIMIT 1", -1, &stmt, NULL) == SQLITE_OK) {
+            problem = sqlite3_step(stmt) == SQLITE_ROW;
+            sqlite3_finalize(stmt);
+        }
+    }
+    if (db) sqlite3_close(db);
+    return problem;
+}
+
+// Drive names are red while their latest run has corrupt or error entries
+static void drive_row_update_status(GtkListBoxRow *row) {
+    const char *file = g_object_get_data(G_OBJECT(row), "db-file");
+    GtkWidget *label = g_object_get_data(G_OBJECT(row), "name-label");
+    if (!file || !label) return;
+    if (drive_last_run_has_problem(file)) gtk_widget_add_css_class(label, "ft-drive-problem");
+    else gtk_widget_remove_css_class(label, "ft-drive-problem");
+}
+
+static void drive_list_update_status(GtkWidget *list) {
+    if (!list) return;
+    for (GtkWidget *row = gtk_widget_get_first_child(list); row; row = gtk_widget_get_next_sibling(row)) {
+        if (GTK_IS_LIST_BOX_ROW(row)) drive_row_update_status(GTK_LIST_BOX_ROW(row));
+    }
+}
+
+// After a scan, every window recolors its drive columns
+static void drive_lists_update_status_everywhere(void) {
+    for (GList *l = app_windows; l; l = l->next) {
+        AppWindow *w = l->data;
+        drive_list_update_status(w->logs_drive_list);
+        drive_list_update_status(w->treeview_drive_list);
+    }
+}
+
 // Refills the list with the drive databases. Returns the row for selected_file, else the first
 // row (NULL when there are none); the caller selects it.
 static GtkListBoxRow *drive_list_fill(GtkListBox *list, const char *selected_file) {
@@ -1977,6 +2055,8 @@ static GtkListBoxRow *drive_list_fill(GtkListBox *list, const char *selected_fil
         GtkWidget *row = gtk_list_box_row_new();
         gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
         g_object_set_data_full(G_OBJECT(row), "db-file", g_strdup(file), g_free);
+        g_object_set_data(G_OBJECT(row), "name-label", label);
+        drive_row_update_status(GTK_LIST_BOX_ROW(row));
         gtk_list_box_append(list, row);
         if (!select || (selected_file && strcmp(file, selected_file) == 0)) select = GTK_LIST_BOX_ROW(row);
     }
@@ -2022,9 +2102,15 @@ void logs_load_runs(AppWindow *w, const char *db_file) {
     GtkListBox *list = GTK_LIST_BOX(w->logs_runs_list);
 
     if (access(w->logs_current_db_path, F_OK) != 0) return;
+    treeview_ensure_run_index(w->logs_current_db_path);  // the per-run CORRUPT/ERROR check below uses it
 
     sqlite3 *db;
     if (sqlite3_open(w->logs_current_db_path, &db) != SQLITE_OK) return;
+
+    // Runs with CORRUPT or ERROR entries are listed in red (older databases may lack run_logs: no check)
+    sqlite3_stmt *problem_stmt = NULL;
+    sqlite3_prepare_v2(db, "SELECT 1 FROM run_logs WHERE run_id = ? AND status IN ('CORRUPT', 'ERROR') LIMIT 1",
+                       -1, &problem_stmt, NULL);
 
     const char *query =
         "SELECT id, COALESCE(last_checksum_verify_date, last_date_verify) as run_date, "
@@ -2072,10 +2158,21 @@ void logs_load_runs(AppWindow *w, const char *db_file) {
         gtk_widget_add_css_class(stats_label, "dim-label");
         gtk_box_append(GTK_BOX(row), stats_label);
 
+        // Red: corrupt or error entries. Gold: changed or missing files
+        gboolean problem = FALSE;
+        if (problem_stmt) {
+            sqlite3_bind_int64(problem_stmt, 1, id);
+            problem = sqlite3_step(problem_stmt) == SQLITE_ROW;
+            sqlite3_reset(problem_stmt);
+        }
+        if (problem) gtk_widget_add_css_class(row, "ft-run-problem");
+        else if (changed > 0 || missing > 0) gtk_widget_add_css_class(row, "ft-run-warning");
+
         g_object_set_data(G_OBJECT(row), "run_id", GINT_TO_POINTER((gint)id));
         gtk_list_box_append(list, row);
     }
 
+    sqlite3_finalize(problem_stmt);
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 }
@@ -2807,7 +2904,7 @@ GtkWidget *create_logs_tab(AppWindow *w) {
     g_signal_connect(w->logs_filter_changed_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
     w->logs_filter_corrupt_check = gtk_check_button_new_with_label("Corrupt");
-    gtk_widget_set_tooltip_text(w->logs_filter_corrupt_check, "Checksum changed although size and date did not (possible bit rot)");
+    gtk_widget_set_tooltip_text(w->logs_filter_corrupt_check, "Contents (checksum or size) changed although the date did not (possible bit rot)");
     g_signal_connect(w->logs_filter_corrupt_check, "toggled", G_CALLBACK(on_logs_filter_toggled), w);
 
     w->logs_filter_missing_check = gtk_check_button_new_with_label("Missing");
@@ -2886,9 +2983,11 @@ GtkWidget *create_logs_tab(AppWindow *w) {
 // TAB 5: FULL FILE SCANNER
 // ============================================================================
 
+// One run log line, kept until the scan saves its log. The status and path strings live in
+// ScannerContext.log_strings (packed at their real length), so an entry costs ~100 bytes plus the path.
 typedef struct {
-    char status[32];
-    char path[MAX_PATH];
+    const char *status;
+    const char *path;
     char checksum[HASH_SIZE];
     long long size;
     long long mtime;
@@ -2905,10 +3004,11 @@ struct ScannerContext {
     sqlite3 *db;
     sqlite3_int64 run_id;
     int unchanged, changed, new_files, missing, ignored, errors;
-    int corrupt;  // checksum differs, size and date do not (bit rot); counted in meta.num_changed
+    int corrupt;  // checksum or size differs, date does not (bit rot); counted in meta.num_changed
     int total_files;
     int should_stop;
     ScanLogEntry *log_buffer;
+    GStringChunk *log_strings;  // status and path text of log_buffer's entries
     int log_count;
     int log_capacity;
     GThread *scan_thread;
@@ -2917,10 +3017,34 @@ struct ScannerContext {
     GMutex lock;  // guards db, counters and log_buffer while workers are running
     char drive_error[512];  // set when the drive's drives.db entry could not be added or updated
     char open_error[512];   // set when the scan path itself could not be opened
+    GString *activity;      // finishing steps done so far, shown in Results (scanner thread only)
+    gint64 step_start;      // when the current finishing step began
+    gint64 last_post;       // throttles the step's progress updates
+    gint64 last_commit;     // the scan's writes are committed about once a second (scanner_maybe_commit)
 };
 
 // Most files queued for the workers before the directory walk pauses
 #define SCANNER_MAX_QUEUED 1000
+
+// The scan's database writes run in a transaction that is committed about once a second: one
+// disk sync per second instead of one per file, while other windows still see progress and can
+// write (Accept, notes) between commits. A crash loses at most the last second's writes.
+// Caller holds ctx->lock while workers are running.
+static void scanner_begin(ScannerContext *ctx) {
+    if (sqlite3_get_autocommit(ctx->db)) sqlite3_exec(ctx->db, "BEGIN TRANSACTION", 0, 0, 0);
+    ctx->last_commit = g_get_monotonic_time();
+}
+
+static void scanner_commit(ScannerContext *ctx) {
+    // A failed COMMIT (busy past the timeout) leaves the transaction open; the next one retries
+    if (!sqlite3_get_autocommit(ctx->db)) sqlite3_exec(ctx->db, "COMMIT", 0, 0, 0);
+}
+
+static void scanner_maybe_commit(ScannerContext *ctx) {
+    if (g_get_monotonic_time() - ctx->last_commit < G_USEC_PER_SEC) return;
+    scanner_commit(ctx);
+    scanner_begin(ctx);
+}
 
 
 
@@ -2929,15 +3053,16 @@ void scanner_log_message(ScannerContext *ctx, const char *status, const char *pa
         ctx->log_capacity = ctx->log_capacity == 0 ? 1024 : ctx->log_capacity * 2;
         ctx->log_buffer = realloc(ctx->log_buffer, ctx->log_capacity * sizeof(ScanLogEntry));
     }
-    strncpy(ctx->log_buffer[ctx->log_count].status, status, 31);
-    ctx->log_buffer[ctx->log_count].status[31] = '\0';
-    strncpy(ctx->log_buffer[ctx->log_count].path, path, MAX_PATH - 1);
-    ctx->log_buffer[ctx->log_count].path[MAX_PATH - 1] = '\0';
+    if (!ctx->log_strings) ctx->log_strings = g_string_chunk_new(1 << 20);
+    ctx->log_buffer[ctx->log_count].status = g_string_chunk_insert_const(ctx->log_strings, status);  // few distinct values
+    ctx->log_buffer[ctx->log_count].path = g_string_chunk_insert(ctx->log_strings, path);
     strncpy(ctx->log_buffer[ctx->log_count].checksum, checksum ? checksum : "", HASH_SIZE - 1);
     ctx->log_buffer[ctx->log_count].checksum[HASH_SIZE - 1] = '\0';
     ctx->log_buffer[ctx->log_count].size = size;
     ctx->log_buffer[ctx->log_count].mtime = mtime;
     ctx->log_count++;
+    // Every file is logged under ctx->lock, so this is where the scan's writes get committed
+    if (ctx->db) scanner_maybe_commit(ctx);
 }
 
 gboolean scanner_update_progress(gpointer data) {
@@ -2984,6 +3109,57 @@ static void scanner_post_current_file(ScannerContext *ctx, const char *filename)
 
 gboolean scanner_scan_completed(gpointer data);
 
+// ---- Finishing steps: after the last file, the scan still checks for missing files and saves
+// its log. Results shows each step, its progress and how long it took. Scanner thread only.
+typedef struct {
+    AppWindow *w;
+    char *text;
+} ScannerActivity;
+
+static gboolean scanner_show_activity(gpointer data) {
+    ScannerActivity *a = data;
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(a->w->scanner_results_text)), a->text, -1);
+    g_free(a->text);
+    g_free(a);
+    return G_SOURCE_REMOVE;
+}
+
+// Shows the finished steps plus current (NULL: none). force FALSE posts at most 4 times a second.
+static void scanner_post_activity(ScannerContext *ctx, const char *current, gboolean force) {
+    gint64 now = g_get_monotonic_time();
+    if (!force && now - ctx->last_post < G_USEC_PER_SEC / 4) return;
+    ctx->last_post = now;
+    ScannerActivity *a = g_new(ScannerActivity, 1);
+    a->w = ctx->win;
+    a->text = g_strdup_printf("Finishing the scan...\n\n%s%s%s", ctx->activity->str,
+                              current ? "\u2192 " : "", current ? current : "");
+    g_idle_add(scanner_show_activity, a);
+}
+
+static void scanner_step_begin(ScannerContext *ctx, const char *text) {
+    ctx->step_start = g_get_monotonic_time();
+    scanner_post_activity(ctx, text, TRUE);
+}
+
+// Progress of the current step, e.g. "Saving the run log: 1,234 of 5,678 entries"
+static void scanner_step_progress(ScannerContext *ctx, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
+static void scanner_step_progress(ScannerContext *ctx, const char *fmt, ...) {
+    if (g_get_monotonic_time() - ctx->last_post < G_USEC_PER_SEC / 4) return;
+    va_list ap;
+    va_start(ap, fmt);
+    char *text = g_strdup_vprintf(fmt, ap);
+    va_end(ap);
+    scanner_post_activity(ctx, text, FALSE);
+    g_free(text);
+}
+
+// Records the finished step with its duration
+static void scanner_step_done(ScannerContext *ctx, const char *text) {
+    double secs = (g_get_monotonic_time() - ctx->step_start) / (double)G_USEC_PER_SEC;
+    g_string_append_printf(ctx->activity, "\u2713 %s (%.1f s)\n", text, secs);
+    scanner_post_activity(ctx, NULL, TRUE);
+}
+
 // Older databases have no files.status column; add it so files can be marked MISSING
 static void scanner_ensure_status_column(sqlite3 *db) {
     sqlite3_stmt *stmt;
@@ -3014,7 +3190,13 @@ static void scanner_find_missing(ScannerContext *ctx) {
     // Collect ids first; the files table is modified after the query has finished
     sqlite3_int64 *ids = NULL;
     int id_count = 0, id_capacity = 0;
+    long checked = 0;
+    char n[2][32];
+    scanner_step_begin(ctx, "Checking the database for missing files...");
     while (!ctx->should_stop && sqlite3_step(stmt) == SQLITE_ROW) {
+        checked++;
+        scanner_step_progress(ctx, "Checking the database for missing files: %s entries checked, %s missing",
+                              format_count(checked, n[0], sizeof(n[0])), format_count(id_count, n[1], sizeof(n[1])));
         const char *path = (const char *)sqlite3_column_text(stmt, 1);
         struct stat sb;
         if (!path || stat(path, &sb) == 0 || errno != ENOENT) continue;
@@ -3030,17 +3212,25 @@ static void scanner_find_missing(ScannerContext *ctx) {
         ids[id_count++] = sqlite3_column_int64(stmt, 0);
     }
     sqlite3_finalize(stmt);
+    char done[160];
+    snprintf(done, sizeof(done), "Checked %s database entries for missing files: %s missing",
+             format_count(checked, n[0], sizeof(n[0])), format_count(id_count, n[1], sizeof(n[1])));
+    scanner_step_done(ctx, done);
 
     if (ctx->update_mode && id_count > 0) {
+        scanner_step_begin(ctx, "Marking missing files in the database...");
         sqlite3_stmt *up;
         if (sqlite3_prepare_v2(ctx->db, "UPDATE files SET status = 'MISSING' WHERE id = ?", -1, &up, NULL) == SQLITE_OK) {
             for (int i = 0; i < id_count; i++) {
                 sqlite3_bind_int64(up, 1, ids[i]);
                 sqlite3_step(up);
                 sqlite3_reset(up);
+                scanner_maybe_commit(ctx);
             }
             sqlite3_finalize(up);
         }
+        snprintf(done, sizeof(done), "Marked %s missing files", format_count(id_count, n[1], sizeof(n[1])));
+        scanner_step_done(ctx, done);
     }
     free(ids);
     g_idle_add(scanner_update_progress, ctx);
@@ -3154,58 +3344,40 @@ void scanner_process_file(ScannerContext *ctx, const char *filepath, const char 
             has_checksum = compute_sha256(filepath, checksum);
         }
 
-        int same_metadata = db_size == sb.st_size && db_mtime == sb.st_mtime;
+        int size_diff = db_size != sb.st_size;
+        int time_diff = db_mtime != sb.st_mtime;
         int verified = ctx->enable_checksum && has_checksum && strlen(db_checksum) > 0;
+        int sum_diff = verified && strcmp(db_checksum, checksum) != 0;
 
-        if (verified && same_metadata && strcmp(db_checksum, checksum) != 0) {
-            // The contents changed but nothing wrote to the file: bit rot or silent corruption.
-            // Keep the stored (original) checksum so the damage stays detectable, and mark the file.
+        if (!time_diff && (size_diff || sum_diff)) {
+            // The contents changed but the modification time did not, so nothing wrote to the file
+            // the normal way: bit rot or silent corruption. Keep the stored (original) size and
+            // checksum so the damage stays detectable, and mark the file.
             g_mutex_lock(&ctx->lock);
             ctx->corrupt++;
-            scanner_log_message(ctx, "CORRUPT", filepath, checksum, sb.st_size, sb.st_mtime);
+            scanner_log_message(ctx, "CORRUPT", filepath, has_checksum ? checksum : db_checksum, sb.st_size, sb.st_mtime);
             if (ctx->update_mode && !was_corrupt) scanner_set_file_status(ctx, filepath, "CORRUPT");
             g_mutex_unlock(&ctx->lock);
 
-        } else if (!verified && same_metadata && was_corrupt) {
+        } else if (!verified && !time_diff && was_corrupt) {
             // Marked CORRUPT earlier and not re-checked now (mtime-only scan): still corrupt
             g_mutex_lock(&ctx->lock);
             ctx->corrupt++;
             scanner_log_message(ctx, "CORRUPT", filepath, db_checksum, sb.st_size, sb.st_mtime);
             g_mutex_unlock(&ctx->lock);
 
-        } else if (verified && strcmp(db_checksum, checksum) != 0) {
-            if ((db_size != sb.st_size) && (db_mtime != sb.st_mtime)) {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, Date-Time, File-Size");
-            }
-            else if((db_size != sb.st_size) && (db_mtime == sb.st_mtime)) {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, File-Size");
-            }
-            else if((db_size == sb.st_size) && (db_mtime != sb.st_mtime)) {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum, Date-Time");
-            }
-            else {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
-            }
-
+        } else if (sum_diff) {
+            // The modification time changed (otherwise the file is CORRUPT above)
+            snprintf(log_mesg, sizeof(log_mesg), size_diff ? "CHANGED: CheckSum, Date-Time, File-Size"
+                                                           : "CHANGED: CheckSum, Date-Time");
             g_mutex_lock(&ctx->lock);
             ctx->changed++;
             scanner_log_message(ctx, log_mesg, filepath, checksum, sb.st_size, sb.st_mtime);
             if (ctx->update_mode) scanner_update_file_row(ctx, filepath, &sb, checksum);
             g_mutex_unlock(&ctx->lock);
 
-        } else if (db_size != sb.st_size || db_mtime != sb.st_mtime) {
-            if ((db_size != sb.st_size) && (db_mtime != sb.st_mtime)) {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: Date-Time, File-Size");
-            }
-            else if((db_size != sb.st_size) && (db_mtime == sb.st_mtime)) {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: File-Size");
-            }
-            else if((db_size == sb.st_size) && (db_mtime != sb.st_mtime)) {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: Date-Time");
-            }
-            else {
-	        snprintf(log_mesg, sizeof(log_mesg), "CHANGED: CheckSum");
-            }
+        } else if (time_diff) {
+            snprintf(log_mesg, sizeof(log_mesg), size_diff ? "CHANGED: Date-Time, File-Size" : "CHANGED: Date-Time");
 
             // Always store a checksum that matches the new content
             char new_checksum[HASH_SIZE];
@@ -3363,6 +3535,8 @@ gpointer scanner_thread_func(gpointer data) {
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY AUTOINCREMENT, last_checksum_verify_date TEXT, last_date_verify TEXT, verify_machine TEXT, num_unchanged INTEGER, num_changed INTEGER, num_new INTEGER, num_missing INTEGER, num_ignored INTEGER, num_errors INTEGER, update_mode TEXT, note TEXT);", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE TABLE IF NOT EXISTS run_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, status TEXT, full_path TEXT, checksum TEXT, size INTEGER, mtime INTEGER, FOREIGN KEY(run_id) REFERENCES meta(id));", 0, 0, 0);
     sqlite3_exec(ctx->db, "CREATE INDEX IF NOT EXISTS idx_run_logs_run_status ON run_logs(run_id, status);", 0, 0, 0);
+    sqlite3_busy_timeout(ctx->db, 30000);  // other windows may be reading or writing this database
+    scanner_begin(ctx);
 
     scanner_post_current_file(ctx, "Counting files...");
     ctx->total_files = scanner_count_files(ctx->scan_path, ctx->scan_path);
@@ -3370,8 +3544,11 @@ gpointer scanner_thread_func(gpointer data) {
     // This thread walks the tree; the pool's workers stat, hash and record each file
     ctx->pool = g_thread_pool_new(scanner_worker_func, ctx, ctx->num_workers, TRUE, NULL);
     scanner_scan_directory(ctx, ctx->scan_path);
+    ctx->activity = g_string_new(NULL);
+    scanner_step_begin(ctx, "Waiting for the last files to be checked...");
     g_thread_pool_free(ctx->pool, FALSE, TRUE);  // waits for queued files to finish
     ctx->pool = NULL;
+    scanner_step_done(ctx, "Checked the last files");
 
     scanner_find_missing(ctx);
 
@@ -3399,9 +3576,13 @@ gpointer scanner_thread_func(gpointer data) {
     ctx->run_id = sqlite3_last_insert_rowid(ctx->db);
 
     if (ctx->log_count > 0) {
+        char n[2][32], done[160];
+        format_count(ctx->log_count, n[1], sizeof(n[1]));
+        scanner_step_begin(ctx, "Saving the run log...");
         sqlite3_stmt *log_stmt;
         sqlite3_prepare_v2(ctx->db, "INSERT INTO run_logs (run_id, status, full_path, checksum, size, mtime) VALUES (?, ?, ?, ?, ?, ?)", -1, &log_stmt, 0);
         for (int i = 0; i < ctx->log_count; i++) {
+            scanner_step_progress(ctx, "Saving the run log: %s of %s entries", format_count(i, n[0], sizeof(n[0])), n[1]);
             sqlite3_bind_int64(log_stmt, 1, ctx->run_id);
             sqlite3_bind_text(log_stmt, 2, ctx->log_buffer[i].status, -1, SQLITE_STATIC);
             sqlite3_bind_text(log_stmt, 3, ctx->log_buffer[i].path, -1, SQLITE_STATIC);
@@ -3410,17 +3591,28 @@ gpointer scanner_thread_func(gpointer data) {
             sqlite3_bind_int64(log_stmt, 6, ctx->log_buffer[i].mtime);
             sqlite3_step(log_stmt);
             sqlite3_reset(log_stmt);
+            scanner_maybe_commit(ctx);
         }
         sqlite3_finalize(log_stmt);
+        snprintf(done, sizeof(done), "Saved the run log: %s entries", n[1]);
+        scanner_step_done(ctx, done);
         free(ctx->log_buffer);
         ctx->log_buffer = NULL;
+        if (ctx->log_strings) g_string_chunk_free(ctx->log_strings);
+        ctx->log_strings = NULL;
     }
+
+    scanner_step_begin(ctx, "Committing to the database...");
+    scanner_commit(ctx);
+    scanner_step_done(ctx, "Committed to the database");
 
     // Auto-add or update drive in drive tracker (only in update mode)
     if (ctx->update_mode) {
+        scanner_step_begin(ctx, "Updating the drive's entry...");
         if (!auto_add_or_update_drive(ctx->db_path, ctx->scan_path, ctx->drive_error, sizeof(ctx->drive_error))) {
             g_printerr("file_tracker_unified: %s\n", ctx->drive_error);
         }
+        scanner_step_done(ctx, "Updated the drive's entry");
     }
 
     g_idle_add(scanner_scan_completed, ctx);
@@ -3437,6 +3629,7 @@ gboolean scanner_scan_completed(gpointer data) {
     gtk_widget_set_sensitive(w->scanner_db_entry, TRUE);
     gtk_widget_set_sensitive(w->scanner_workers_spin, TRUE);
     gtk_progress_bar_set_fraction(w->scanner_progress_bar, 1.0);
+    drive_lists_update_status_everywhere();
 
     char results[3072], n[8][32];
     int len = snprintf(results, sizeof(results),
@@ -3455,10 +3648,10 @@ gboolean scanner_scan_completed(gpointer data) {
                           n[6], sizeof(n[6])));
     if (ctx->corrupt > 0 && len >= 0 && (size_t)len < sizeof(results)) {
         len += snprintf(results + len, sizeof(results) - len,
-                 "\n\nWARNING: %s file%s no longer match%s the stored checksum although size and date are "
+                 "\n\nWARNING: %s file%s changed (checksum or size) although the modification date is "
                  "unchanged (possible bit rot). %s",
-                 format_count(ctx->corrupt, n[7], sizeof(n[7])), ctx->corrupt == 1 ? "" : "s", ctx->corrupt == 1 ? "es" : "",
-                 ctx->update_mode ? "They are marked CORRUPT and their original checksums are kept."
+                 format_count(ctx->corrupt, n[7], sizeof(n[7])), ctx->corrupt == 1 ? "" : "s",
+                 ctx->update_mode ? "They are marked CORRUPT and their original checksums and sizes are kept."
                                   : "Run an update scan to mark them CORRUPT in the database.");
     }
     if (ctx->open_error[0] && len >= 0 && (size_t)len < sizeof(results)) {
@@ -3479,6 +3672,13 @@ gboolean scanner_scan_completed(gpointer data) {
 
     GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(w->scanner_results_text));
     gtk_text_buffer_set_text(buffer, results, -1);
+    if (ctx->activity && ctx->activity->len > 0) {
+        // Keep the finishing steps and their times below the results
+        GtkTextIter end;
+        gtk_text_buffer_get_end_iter(buffer, &end);
+        gtk_text_buffer_insert(buffer, &end, "\n\nFinishing steps:\n", -1);
+        gtk_text_buffer_insert(buffer, &end, ctx->activity->str, -1);
+    }
 
     if (ctx->db) sqlite3_close(ctx->db);
 
@@ -3487,6 +3687,8 @@ gboolean scanner_scan_completed(gpointer data) {
     g_thread_join(ctx->scan_thread);
     g_mutex_clear(&ctx->lock);
     free(ctx->log_buffer);
+    if (ctx->log_strings) g_string_chunk_free(ctx->log_strings);
+    if (ctx->activity) g_string_free(ctx->activity, TRUE);
     g_free(ctx);
     w->current_scanner_scan = NULL;
     app_window_set_title(w, NULL);
@@ -3771,554 +3973,6 @@ GtkWidget *create_scanner_tab(AppWindow *w) {
 
     gtk_paned_set_end_child(GTK_PANED(paned), right_box);
     gtk_paned_set_position(GTK_PANED(paned), 320);
-
-    return paned;
-}
-
-// ============================================================================
-// TAB 6: COMPARE RUNS
-// ============================================================================
-
-
-
-void compare_load_runs_for_drive(GtkComboBoxText *combo, const char *db_name) {
-    gtk_combo_box_text_remove_all(combo);
-
-    if (!db_name || strlen(db_name) == 0) return;
-
-    char db_path[MAX_PATH];
-    snprintf(db_path, sizeof(db_path), "%s/%s.db", db_dir_path, db_name);
-
-    sqlite3 *db;
-    if (sqlite3_open(db_path, &db) != SQLITE_OK) return;
-
-    const char *sql = "SELECT id, last_date_verify FROM meta ORDER BY id DESC;";
-    sqlite3_stmt *stmt;
-
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            int id = sqlite3_column_int(stmt, 0);
-            const char *date = (const char *)sqlite3_column_text(stmt, 1);
-            char label[256];
-            snprintf(label, sizeof(label), "Run #%d - %s", id, date ? date : "Unknown");
-
-            char id_str[32];
-            snprintf(id_str, sizeof(id_str), "%d", id);
-            gtk_combo_box_text_append(combo, id_str, label);
-        }
-        sqlite3_finalize(stmt);
-    }
-    sqlite3_close(db);
-}
-
-void on_compare_run1_drive_changed(GtkComboBox *combo, gpointer user_data) {
-    AppWindow *w = user_data;
-    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
-    if (db_name) {
-        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(w->compare_run1_run_combo), db_name);
-        snprintf(w->compare_run1_db_path, sizeof(w->compare_run1_db_path), "%s/%s.db", db_dir_path, db_name);
-        g_free((void *)db_name);
-    }
-}
-
-void on_compare_run2_drive_changed(GtkComboBox *combo, gpointer user_data) {
-    AppWindow *w = user_data;
-    const char *db_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo));
-    if (db_name) {
-        compare_load_runs_for_drive(GTK_COMBO_BOX_TEXT(w->compare_run2_run_combo), db_name);
-        snprintf(w->compare_run2_db_path, sizeof(w->compare_run2_db_path), "%s/%s.db", db_dir_path, db_name);
-        g_free((void *)db_name);
-    }
-}
-
-void on_compare_run1_run_changed(GtkComboBox *combo, gpointer user_data) {
-    AppWindow *w = user_data;
-    const char *id_str = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
-    w->compare_run1_id = id_str ? atoll(id_str) : 0;
-}
-
-void on_compare_run2_run_changed(GtkComboBox *combo, gpointer user_data) {
-    AppWindow *w = user_data;
-    const char *id_str = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
-    w->compare_run2_id = id_str ? atoll(id_str) : 0;
-}
-
-typedef struct {
-    char path_run1[MAX_PATH];
-    char path_run2[MAX_PATH];
-    char status_run1[32];
-    char status_run2[32];
-    char checksum_run1[HASH_SIZE];
-    char checksum_run2[HASH_SIZE];
-    long long size_run1;
-    long long size_run2;
-    long long mtime_run1;
-    long long mtime_run2;
-} CompareResult;
-
-// Strip mount point (first two path components) for comparison
-// e.g., "/Volumes/MediaArch-C2/folder/file" -> "/folder/file"
-const char* get_relative_path(const char *full_path) {
-    if (!full_path || full_path[0] != '/') return full_path;
-
-    const char *p = full_path + 1; // Skip first '/'
-    int slashes = 0;
-
-    while (*p && slashes < 2) {
-        if (*p == '/') slashes++;
-        p++;
-    }
-
-    // If we found 2 slashes, return pointer after them
-    // Otherwise return original path
-    if (slashes == 2 && *p) {
-        return p - 1; // Return including the slash
-    }
-    return full_path;
-}
-
-void compare_perform_comparison(AppWindow *w) {
-    if (w->compare_run1_id == 0 || w->compare_run2_id == 0) {
-        GtkAlertDialog *alert = gtk_alert_dialog_new("Please select both runs to compare");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
-        g_object_unref(alert);
-        return;
-    }
-
-    // Clear existing results
-    GtkListStore *store = GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(w->compare_results_tree)));
-    gtk_list_store_clear(store);
-
-    // Open both databases
-    sqlite3 *db1, *db2;
-    if (sqlite3_open(w->compare_run1_db_path, &db1) != SQLITE_OK) return;
-    if (sqlite3_open(w->compare_run2_db_path, &db2) != SQLITE_OK) {
-        sqlite3_close(db1);
-        return;
-    }
-
-    // Get files from run 1
-    GHashTable *files_run1 = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-    GHashTable *files_run2 = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db1, "SELECT full_path, checksum, status, size, mtime FROM run_logs "
-                                "WHERE run_id = ?",
-                          -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(stmt, 1, w->compare_run1_id);
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char *path = (const char *)sqlite3_column_text(stmt, 0);
-            const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
-            const char *status = (const char *)sqlite3_column_text(stmt, 2);
-            long long size = sqlite3_column_int64(stmt, 3);
-            long long mtime = sqlite3_column_int64(stmt, 4);
-
-            // Use relative path (without mount point) as comparison key
-            const char *rel_path = get_relative_path(path);
-
-            CompareResult *result = g_new0(CompareResult, 1);
-            strncpy(result->path_run1, path, MAX_PATH - 1);  // Store full path for display
-            result->path_run1[MAX_PATH - 1] = '\0';
-            strcpy(result->path_run2, "");  // Not in run 2 yet
-            strncpy(result->status_run1, status ? status : "UNKNOWN", 31);
-            strncpy(result->checksum_run1, checksum ? checksum : "", HASH_SIZE - 1);
-            strcpy(result->status_run2, "NOT_IN_RUN");
-            strcpy(result->checksum_run2, "");
-            result->size_run1 = size;
-            result->mtime_run1 = mtime;
-            result->size_run2 = 0;
-            result->mtime_run2 = 0;
-
-            g_hash_table_insert(files_run1, g_strdup(rel_path), result);
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    // Get files from run 2 and update comparison
-    if (sqlite3_prepare_v2(db2, "SELECT full_path, checksum, status, size, mtime FROM run_logs "
-                                "WHERE run_id = ?",
-                          -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(stmt, 1, w->compare_run2_id);
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char *path = (const char *)sqlite3_column_text(stmt, 0);
-            const char *checksum = (const char *)sqlite3_column_text(stmt, 1);
-            const char *status = (const char *)sqlite3_column_text(stmt, 2);
-            long long size = sqlite3_column_int64(stmt, 3);
-            long long mtime = sqlite3_column_int64(stmt, 4);
-
-            // Use relative path (without mount point) as comparison key
-            const char *rel_path = get_relative_path(path);
-
-            CompareResult *result = g_hash_table_lookup(files_run1, rel_path);
-            if (result) {
-                // File exists in both runs - update run 2 info
-                strncpy(result->path_run2, path, MAX_PATH - 1);  // Store full path from run 2
-                result->path_run2[MAX_PATH - 1] = '\0';
-                strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
-                strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
-                result->size_run2 = size;
-                result->mtime_run2 = mtime;
-            } else {
-                // File only in run 2
-                result = g_new0(CompareResult, 1);
-                strcpy(result->path_run1, "");  // Not in run 1
-                strncpy(result->path_run2, path, MAX_PATH - 1);  // Store full path for display
-                result->path_run2[MAX_PATH - 1] = '\0';
-                strcpy(result->status_run1, "NOT_IN_RUN");
-                strcpy(result->checksum_run1, "");
-                strncpy(result->status_run2, status ? status : "UNKNOWN", 31);
-                strncpy(result->checksum_run2, checksum ? checksum : "", HASH_SIZE - 1);
-                result->size_run1 = 0;
-                result->mtime_run1 = 0;
-                result->size_run2 = size;
-                result->mtime_run2 = mtime;
-                g_hash_table_insert(files_run2, g_strdup(rel_path), result);
-            }
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    sqlite3_close(db1);
-    sqlite3_close(db2);
-
-    // Apply filters and populate tree view
-    GHashTableIter iter;
-    gpointer key, value;
-
-    g_hash_table_iter_init(&iter, files_run1);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        CompareResult *result = (CompareResult *)value;
-
-        int show = 0;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_only_run1)) &&
-            strcmp(result->status_run2, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_only_run2)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_different)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
-            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
-            strcmp(result->checksum_run1, result->checksum_run2) != 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_diffs)) &&
-            (strcmp(result->status_run2, "NOT_IN_RUN") == 0 ||
-             strcmp(result->status_run1, "NOT_IN_RUN") == 0 ||
-             (strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
-              strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
-              (strcmp(result->checksum_run1, result->checksum_run2) != 0 ||
-               result->mtime_run1 != result->mtime_run2 ||
-               result->size_run1 != result->size_run2)))) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_missing_run2)) &&
-            strcmp(result->status_run2, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_missing_run1)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_run1)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") != 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_run2)) &&
-            strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_mtime_diff)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
-            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
-            result->mtime_run1 != result->mtime_run2) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_size_diff)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") != 0 &&
-            strcmp(result->status_run2, "NOT_IN_RUN") != 0 &&
-            result->size_run1 != result->size_run2) show = 1;
-
-        if (show) {
-            // Use relative path for display (common portion)
-            const char *display_path = get_relative_path(
-                strlen(result->path_run1) > 0 ? result->path_run1 : result->path_run2
-            );
-
-            GtkTreeIter tree_iter;
-            gtk_list_store_append(store, &tree_iter);
-            gtk_list_store_set(store, &tree_iter,
-                              0, display_path,
-                              1, result->status_run1,
-                              2, result->status_run2,
-                              3, result->checksum_run1,
-                              4, result->checksum_run2,
-                              -1);
-        }
-    }
-
-    g_hash_table_iter_init(&iter, files_run2);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        CompareResult *result = (CompareResult *)value;
-
-        int show = 0;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_only_run2)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_diffs)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_missing_run1)) &&
-            strcmp(result->status_run1, "NOT_IN_RUN") == 0) show = 1;
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(w->compare_filter_all_run2)) &&
-            strcmp(result->status_run2, "NOT_IN_RUN") != 0) show = 1;
-
-        if (show) {
-            // Use relative path for display (common portion)
-            const char *display_path = get_relative_path(
-                strlen(result->path_run1) > 0 ? result->path_run1 : result->path_run2
-            );
-
-            GtkTreeIter tree_iter;
-            gtk_list_store_append(store, &tree_iter);
-            gtk_list_store_set(store, &tree_iter,
-                              0, display_path,
-                              1, result->status_run1,
-                              2, result->status_run2,
-                              3, result->checksum_run1,
-                              4, result->checksum_run2,
-                              -1);
-        }
-    }
-
-    g_hash_table_destroy(files_run1);
-    g_hash_table_destroy(files_run2);
-}
-
-void on_compare_filter_toggled(GtkCheckButton *button, gpointer user_data) {
-    AppWindow *w = user_data;
-    (void)button;
-    compare_perform_comparison(w);
-}
-
-void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpointer user_data);
-
-void on_compare_export_csv_clicked(GtkButton *button, gpointer user_data) {
-    AppWindow *w = user_data;
-    (void)button;
-
-    GtkFileDialog *dialog = gtk_file_dialog_new();
-    gtk_file_dialog_set_title(dialog, "Export Comparison to CSV");
-    gtk_file_dialog_set_initial_name(dialog, "comparison.csv");
-
-    gtk_file_dialog_save(dialog, GTK_WINDOW(w->window), NULL,
-                        (GAsyncReadyCallback)on_compare_export_csv_response, w);
-}
-
-void on_compare_export_csv_response(GObject *source, GAsyncResult *result, gpointer user_data) {
-    AppWindow *w = user_data;
-
-    GtkFileDialog *dialog = GTK_FILE_DIALOG(source);
-    GFile *file = gtk_file_dialog_save_finish(dialog, result, NULL);
-
-    if (!file) return;
-
-    char *path = g_file_get_path(file);
-    g_object_unref(file);
-
-    FILE *fp = fopen(path, "w");
-    if (!fp) {
-        GtkAlertDialog *alert = gtk_alert_dialog_new("Failed to create CSV file");
-        gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
-        g_object_unref(alert);
-        g_free(path);
-        return;
-    }
-
-    // Write CSV header
-    fprintf(fp, "File Path,Status Run 1,Status Run 2,Checksum Run 1,Checksum Run 2\n");
-
-    // Write data
-    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(w->compare_results_tree));
-    GtkTreeIter iter;
-    gboolean valid = gtk_tree_model_get_iter_first(model, &iter);
-
-    while (valid) {
-        char *path_str, *status1, *status2, *check1, *check2;
-        gtk_tree_model_get(model, &iter,
-                          0, &path_str,
-                          1, &status1,
-                          2, &status2,
-                          3, &check1,
-                          4, &check2,
-                          -1);
-
-        fprintf(fp, "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",
-                path_str, status1, status2, check1, check2);
-
-        g_free(path_str);
-        g_free(status1);
-        g_free(status2);
-        g_free(check1);
-        g_free(check2);
-
-        valid = gtk_tree_model_iter_next(model, &iter);
-    }
-
-    fclose(fp);
-    g_free(path);
-
-    GtkAlertDialog *alert = gtk_alert_dialog_new("Comparison exported successfully");
-    gtk_alert_dialog_show(alert, GTK_WINDOW(w->window));
-    g_object_unref(alert);
-}
-
-GtkWidget *create_compare_tab(AppWindow *w) {
-    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
-
-    // Left panel: Selection and filters
-    GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_size_request(left_box, 350, -1);
-    gtk_widget_set_margin_start(left_box, 8);
-    gtk_widget_set_margin_end(left_box, 8);
-    gtk_widget_set_margin_top(left_box, 8);
-    gtk_widget_set_margin_bottom(left_box, 8);
-
-    // Run 1 selection
-    GtkWidget *run1_header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *run1_label = gtk_label_new("Run 1");
-    gtk_widget_add_css_class(run1_label, "heading");
-    gtk_label_set_xalign(GTK_LABEL(run1_label), 0.0);
-    gtk_widget_set_hexpand(run1_label, TRUE);
-    GtkWidget *refresh_btn = gtk_button_new_with_label("Refresh");
-    gtk_widget_set_tooltip_text(refresh_btn, "Reload the drive and run lists");
-    g_signal_connect_swapped(refresh_btn, "clicked", G_CALLBACK(compare_refresh_databases), w);
-    gtk_box_append(GTK_BOX(run1_header), run1_label);
-    gtk_box_append(GTK_BOX(run1_header), refresh_btn);
-    gtk_box_append(GTK_BOX(left_box), run1_header);
-
-    GtkWidget *run1_drive_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *run1_drive_label = gtk_label_new("Drive:");
-    gtk_widget_set_size_request(run1_drive_label, 60, -1);
-    w->compare_run1_drive_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(w->compare_run1_drive_combo, TRUE);
-    g_signal_connect(w->compare_run1_drive_combo, "changed", G_CALLBACK(on_compare_run1_drive_changed), w);
-    gtk_box_append(GTK_BOX(run1_drive_box), run1_drive_label);
-    gtk_box_append(GTK_BOX(run1_drive_box), w->compare_run1_drive_combo);
-    gtk_box_append(GTK_BOX(left_box), run1_drive_box);
-
-    GtkWidget *run1_run_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *run1_run_label = gtk_label_new("Run:");
-    gtk_widget_set_size_request(run1_run_label, 60, -1);
-    w->compare_run1_run_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(w->compare_run1_run_combo, TRUE);
-    g_signal_connect(w->compare_run1_run_combo, "changed", G_CALLBACK(on_compare_run1_run_changed), w);
-    gtk_box_append(GTK_BOX(run1_run_box), run1_run_label);
-    gtk_box_append(GTK_BOX(run1_run_box), w->compare_run1_run_combo);
-    gtk_box_append(GTK_BOX(left_box), run1_run_box);
-
-    // Run 2 selection
-    GtkWidget *run2_label = gtk_label_new("Run 2");
-    gtk_widget_add_css_class(run2_label, "heading");
-    gtk_label_set_xalign(GTK_LABEL(run2_label), 0.0);
-    gtk_box_append(GTK_BOX(left_box), run2_label);
-
-    GtkWidget *run2_drive_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *run2_drive_label = gtk_label_new("Drive:");
-    gtk_widget_set_size_request(run2_drive_label, 60, -1);
-    w->compare_run2_drive_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(w->compare_run2_drive_combo, TRUE);
-    g_signal_connect(w->compare_run2_drive_combo, "changed", G_CALLBACK(on_compare_run2_drive_changed), w);
-    gtk_box_append(GTK_BOX(run2_drive_box), run2_drive_label);
-    gtk_box_append(GTK_BOX(run2_drive_box), w->compare_run2_drive_combo);
-    gtk_box_append(GTK_BOX(left_box), run2_drive_box);
-
-    GtkWidget *run2_run_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *run2_run_label = gtk_label_new("Run:");
-    gtk_widget_set_size_request(run2_run_label, 60, -1);
-    w->compare_run2_run_combo = gtk_combo_box_text_new();
-    gtk_widget_set_hexpand(w->compare_run2_run_combo, TRUE);
-    g_signal_connect(w->compare_run2_run_combo, "changed", G_CALLBACK(on_compare_run2_run_changed), w);
-    gtk_box_append(GTK_BOX(run2_run_box), run2_run_label);
-    gtk_box_append(GTK_BOX(run2_run_box), w->compare_run2_run_combo);
-    gtk_box_append(GTK_BOX(left_box), run2_run_box);
-
-    // Compare button
-    GtkWidget *compare_btn = gtk_button_new_with_label("Compare Runs");
-    gtk_widget_add_css_class(compare_btn, "suggested-action");
-    g_signal_connect_swapped(compare_btn, "clicked", G_CALLBACK(compare_perform_comparison), w);
-    gtk_box_append(GTK_BOX(left_box), compare_btn);
-
-    // Filters
-    GtkWidget *filter_label = gtk_label_new("View By:");
-    gtk_widget_add_css_class(filter_label, "heading");
-    gtk_label_set_xalign(GTK_LABEL(filter_label), 0.0);
-    gtk_box_append(GTK_BOX(left_box), filter_label);
-
-    w->compare_filter_only_run1 = gtk_check_button_new_with_label("Only in Run 1");
-    g_signal_connect(w->compare_filter_only_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_only_run1);
-
-    w->compare_filter_only_run2 = gtk_check_button_new_with_label("Only in Run 2");
-    g_signal_connect(w->compare_filter_only_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_only_run2);
-
-    w->compare_filter_different = gtk_check_button_new_with_label("Different Checksum");
-    g_signal_connect(w->compare_filter_different, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_different);
-
-    w->compare_filter_all_diffs = gtk_check_button_new_with_label("All Diffs");
-    g_signal_connect(w->compare_filter_all_diffs, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_all_diffs);
-
-    w->compare_filter_missing_run2 = gtk_check_button_new_with_label("Missing in Run 2");
-    g_signal_connect(w->compare_filter_missing_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_missing_run2);
-
-    w->compare_filter_missing_run1 = gtk_check_button_new_with_label("Missing in Run 1");
-    g_signal_connect(w->compare_filter_missing_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_missing_run1);
-
-    w->compare_filter_all_run1 = gtk_check_button_new_with_label("All Files in Run 1");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(w->compare_filter_all_run1), TRUE);
-    g_signal_connect(w->compare_filter_all_run1, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_all_run1);
-
-    w->compare_filter_all_run2 = gtk_check_button_new_with_label("All Files in Run 2");
-    g_signal_connect(w->compare_filter_all_run2, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_all_run2);
-
-    w->compare_filter_mtime_diff = gtk_check_button_new_with_label("Date/Time Difference");
-    g_signal_connect(w->compare_filter_mtime_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_mtime_diff);
-
-    w->compare_filter_size_diff = gtk_check_button_new_with_label("Size Difference");
-    g_signal_connect(w->compare_filter_size_diff, "toggled", G_CALLBACK(on_compare_filter_toggled), w);
-    gtk_box_append(GTK_BOX(left_box), w->compare_filter_size_diff);
-
-    // Export button
-    GtkWidget *export_btn = gtk_button_new_with_label("Export to CSV");
-    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_compare_export_csv_clicked), w);
-    gtk_box_append(GTK_BOX(left_box), export_btn);
-
-    gtk_paned_set_start_child(GTK_PANED(paned), left_box);
-
-    // Right panel: Results table
-    GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
-    gtk_widget_set_margin_start(right_box, 8);
-    gtk_widget_set_margin_end(right_box, 8);
-    gtk_widget_set_margin_top(right_box, 8);
-    gtk_widget_set_margin_bottom(right_box, 8);
-
-    GtkWidget *results_label = gtk_label_new("Comparison Results");
-    gtk_widget_add_css_class(results_label, "heading");
-    gtk_label_set_xalign(GTK_LABEL(results_label), 0.0);
-    gtk_box_append(GTK_BOX(right_box), results_label);
-
-    GtkListStore *store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
-                                             G_TYPE_STRING, G_TYPE_STRING);
-    w->compare_results_tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
-    g_object_unref(store);
-
-    const char *titles[] = {"File Path", "Status Run 1", "Status Run 2", "Checksum Run 1", "Checksum Run 2"};
-    for (int i = 0; i < 5; i++) {
-        GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
-        GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes(titles[i], renderer, "text", i, NULL);
-        gtk_tree_view_column_set_resizable(column, TRUE);
-        if (i == 0) gtk_tree_view_column_set_expand(column, TRUE);
-        gtk_tree_view_append_column(GTK_TREE_VIEW(w->compare_results_tree), column);
-    }
-
-    GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), w->compare_results_tree);
-    gtk_widget_set_vexpand(scroll, TRUE);
-    gtk_box_append(GTK_BOX(right_box), scroll);
-
-    gtk_paned_set_end_child(GTK_PANED(paned), right_box);
-    gtk_paned_set_position(GTK_PANED(paned), 370);
 
     return paned;
 }
@@ -5584,9 +5238,9 @@ static void on_treeview_selection_changed(GtkTreeSelection *selection, gpointer 
                     corrupt = st && strcmp(st, "CORRUPT") == 0;
                     if (corrupt) {
                         g_string_append(text,
-                            "\nCORRUPT: a checksum scan found contents that no longer match\n"
-                            "this SHA-256 (the original), although the file's size and\n"
-                            "date did not change - possible bit rot. Restore the file\n"
+                            "\nCORRUPT: a scan found a different size or contents that no\n"
+                            "longer match this SHA-256 (the original), although the\n"
+                            "file's date did not change - possible bit rot. Restore the file\n"
                             "from a backup; the next checksum scan clears the mark when\n"
                             "the contents match again. If the current contents are\n"
                             "good, use Accept Current Contents.\n");
@@ -6034,7 +5688,7 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
 
     w->treeview_corrupt_label = gtk_label_new("");
     gtk_widget_set_tooltip_text(w->treeview_corrupt_label,
-        "Files on this drive marked CORRUPT: checksum changed although size and date did not (possible bit rot)");
+        "Files on this drive marked CORRUPT: contents changed although the date did not (possible bit rot)");
     gtk_box_append(GTK_BOX(db_box), w->treeview_corrupt_label);
 
     GtkWidget *collapse_btn = gtk_button_new_with_label("Collapse All");
@@ -6066,7 +5720,7 @@ GtkWidget *create_treeview_tab(AppWindow *w) {
         {"Modified", "Files the most recent scan (or the chosen Run) found changed (written: date or size differs)"},
         {"Deleted",  "Files that went missing in the most recent scan (or the chosen Run)"},
         {"Missing",  "Every file marked MISSING, whenever it disappeared (for a Run: the files it found missing)"},
-        {"Corrupt",  "Files marked CORRUPT: checksum changed although size and date did not (possible bit rot)"},
+        {"Corrupt",  "Files marked CORRUPT: contents changed although the date did not (possible bit rot)"},
     };
     for (int i = 0; i < TV_N_FILTERS; i++) {
         w->treeview_filter_toggles[i] = gtk_toggle_button_new_with_label(filters[i].label);
@@ -6229,27 +5883,10 @@ void summary_refresh_databases(AppWindow *w) {
     g_ptr_array_unref(files);
 }
 
-// Refilling a drive combo reloads its run list, so the selected run is restored afterwards
-static void compare_refill_side(GtkWidget *drive_combo, GtkWidget *run_combo, GPtrArray *files) {
-    char *run_id = g_strdup(gtk_combo_box_get_active_id(GTK_COMBO_BOX(run_combo)));
-    refill_database_combo(drive_combo, files, NULL, TRUE);
-    if (run_id) gtk_combo_box_set_active_id(GTK_COMBO_BOX(run_combo), run_id);
-    g_free(run_id);
-}
-
-void compare_refresh_databases(AppWindow *w) {
-    GPtrArray *files = list_database_files();
-    if (!files) return;
-    compare_refill_side(w->compare_run1_drive_combo, w->compare_run1_run_combo, files);
-    compare_refill_side(w->compare_run2_drive_combo, w->compare_run2_run_combo, files);
-    g_ptr_array_unref(files);
-}
-
 void refresh_all_database_combos(AppWindow *w) {
     locator_refresh_databases(w);
     dupe_refresh_databases(w);
     summary_refresh_databases(w);
-    compare_refresh_databases(w);
     treeview_refresh_databases(w);
 }
 
@@ -6354,7 +5991,6 @@ static GtkWidget *create_about_page(AppWindow *w) { (void)w; return create_about
 
 // Sidebar order: alphabetical by title, with About last. Keep it sorted when adding a section.
 static const AppPage app_pages[] = {
-    { "compare",  "Compare",      "Differences between two scan runs",           "view-dual-symbolic",            create_compare_tab },
     { "drives",   "Drives",       "Storage drives and their capacity",           "drive-harddisk-symbolic",       create_drives_tab },
     { "dupes",    "DupeFinder",   "Find duplicate files by name or checksum",    "edit-copy-symbolic",            create_dupefinder_tab },
     { "locator",  "File Locator", "Search for files across drive databases",     "system-search-symbolic",        create_locator_tab },
@@ -6378,6 +6014,8 @@ static const char *app_css =
     "@define-color ft_row_alt rgba(0,0,0,0.03);\n"
     "@define-color ft_hover rgba(0,0,0,0.05);\n"
     "@define-color ft_sidebar_sel rgba(0,0,0,0.10);\n"
+    "@define-color ft_red #ff3b30;\n"
+    "@define-color ft_yellow #9a7300;\n"
     "@media (prefers-color-scheme: dark) {\n"
     "  @define-color ft_accent #0a84ff;\n"
     "  @define-color ft_sidebar_bg #3a3a3c;\n"
@@ -6390,6 +6028,7 @@ static const char *app_css =
     "  @define-color ft_row_alt rgba(255,255,255,0.04);\n"
     "  @define-color ft_hover rgba(255,255,255,0.06);\n"
     "  @define-color ft_sidebar_sel rgba(255,255,255,0.12);\n"
+    "  @define-color ft_yellow #ffd60a;\n"
     "}\n"
     "window, dialog, popover > contents {\n"
     "  font-family: -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif; font-size: 13px;\n"
@@ -6411,6 +6050,10 @@ static const char *app_css =
     ".ft-drive-list .ft-sidebar-heading { margin-top: 14px; }\n"
     ".ft-sidebar-collapsed list { padding: 0 6px; }\n"
     ".ft-corrupt-count { color: #ff3b30; font-weight: bold; }\n"
+    /* Logs › Scan Runs: same colors as ft_status_color() */
+    ".ft-run-problem label { color: @ft_red; }\n"
+    ".ft-run-warning label { color: @ft_yellow; }\n"
+    ".ft-drive-list label.ft-drive-problem { color: @ft_red; }\n"
     ".ft-filters button:checked { background: @ft_accent; color: white; border-color: @ft_accent; }\n"
     ".ft-filters button:checked:hover { background: shade(@ft_accent, 1.08); }\n"
     ".ft-sidebar-collapsed headerbar { min-width: 0; padding: 0; }\n"
